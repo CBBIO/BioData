@@ -17,12 +17,13 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-# Allow running the script directly from the repo root.
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-from CBBIO.BioData import BioDataClient, NotFoundError
+try:
+    from CBBIO.BioData import BioDataClient, NotFoundError
+except ModuleNotFoundError:
+    PROJECT_ROOT = Path(__file__).resolve().parents[1]
+    if str(PROJECT_ROOT) not in sys.path:
+        sys.path.insert(0, str(PROJECT_ROOT))
+    from CBBIO.BioData import BioDataClient, NotFoundError
 
 
 def _resolve_embedding_type_id(

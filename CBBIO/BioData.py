@@ -16,6 +16,7 @@ from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Seque
 
 Params = Union[Sequence[Any], Mapping[str, Any], None]
 DistanceMetric = Literal["l2", "cosine", "inner_product"]
+EmbeddingModel = Union[int, str]
 ConfigDict = Dict[str, Any]
 
 
@@ -387,6 +388,195 @@ class BioDataClient:
             for row in rows
         ]
 
+    def get_protein(self, protein_id: str) -> Optional[Dict[str, Any]]:
+        """Fetch one protein row by ``protein.id``."""
+        return self.query_one(
+            """
+            SELECT p.id,
+                   p.sequence_id,
+                   p.data_class,
+                   p.molecule_type,
+                   p.created_date,
+                   p.sequence_update_date,
+                   p.annotation_update_date,
+                   p.description,
+                   p.gene_name,
+                   p.organism,
+                   p.organelle,
+                   p.taxonomy_id,
+                   p.comments,
+                   p.protein_existence,
+                   p.seqinfo,
+                   p.disappeared,
+                   p.created_at,
+                   p.updated_at
+            FROM protein p
+            WHERE p.id = %s
+            LIMIT 1;
+            """,
+            (protein_id,),
+        )
+
+    def get_protein_by_accession(self, accession_code: str) -> Optional[Dict[str, Any]]:
+        """Fetch a protein via accession code."""
+        return self.query_one(
+            """
+            SELECT p.id,
+                   p.sequence_id,
+                   p.description,
+                   p.gene_name,
+                   p.organism,
+                   p.taxonomy_id,
+                   a.code AS accession_code,
+                   a."primary" AS is_primary_accession,
+                   a.tag AS accession_tag
+            FROM accession a
+            JOIN protein p ON p.id = a.protein_id
+            WHERE a.code = %s
+            LIMIT 1;
+            """,
+            (accession_code,),
+        )
+
+    def list_accessions_for_protein(self, protein_id: str) -> List[Dict[str, Any]]:
+        """List all accession codes for one protein."""
+        return self.query_all(
+            """
+            SELECT a.code,
+                   a."primary" AS is_primary,
+                   a.tag
+            FROM accession a
+            WHERE a.protein_id = %s
+            ORDER BY a."primary" DESC NULLS LAST, a.code;
+            """,
+            (protein_id,),
+        )
+
+    def get_protein_go_annotations(self, protein_id: str) -> List[Dict[str, Any]]:
+        """Fetch GO annotations for one protein."""
+        return self.query_all(
+            """
+            SELECT pga.go_id,
+                   gt.category,
+                   gt.description,
+                   pga.evidence_code
+            FROM protein_go_term_annotation pga
+            JOIN go_terms gt ON gt.go_id = pga.go_id
+            WHERE pga.protein_id = %s
+            ORDER BY pga.go_id;
+            """,
+            (protein_id,),
+        )
+
+    def get_protein_structures(self, protein_id: str) -> List[Dict[str, Any]]:
+        """Fetch structures linked to one protein."""
+        return self.query_all(
+            """
+            SELECT s.id,
+                   s.method,
+                   s.resolution,
+                   s.file_path,
+                   s.created_at,
+                   s.updated_at
+            FROM structure s
+            WHERE s.protein_id = %s
+            ORDER BY s.id;
+            """,
+            (protein_id,),
+        )
+
+    def get_structure_chains(self, structure_id: str) -> List[Dict[str, Any]]:
+        """Fetch chains for one structure."""
+        return self.query_all(
+            """
+            SELECT c.id,
+                   c.name,
+                   c.sequence_id,
+                   c.accession_code
+            FROM chain c
+            WHERE c.structure_id = %s
+            ORDER BY c.id;
+            """,
+            (structure_id,),
+        )
+
+    def get_chain_states(self, chain_id: int) -> List[Dict[str, Any]]:
+        """Fetch states for one chain."""
+        return self.query_all(
+            """
+            SELECT s.id,
+                   s.model_id,
+                   s.file_path,
+                   s.structure_id
+            FROM state s
+            WHERE s.chain_id = %s
+            ORDER BY s.id;
+            """,
+            (chain_id,),
+        )
+
+    def get_state_3di_embeddings(self, state_id: int) -> List[Dict[str, Any]]:
+        """Fetch 3Di records for one state."""
+        return self.query_all(
+            """
+            SELECT s3.id,
+                   s3.state_id,
+                   s3.embedding,
+                   s3.created_at,
+                   s3.updated_at
+            FROM structure_3di s3
+            WHERE s3.state_id = %s
+            ORDER BY s3.id;
+            """,
+            (state_id,),
+        )
+
+    def get_protein_context(
+        self,
+        protein_id: str,
+        *,
+        include_3di: bool = False,
+    ) -> Optional[Dict[str, Any]]:
+        """Fetch protein + related accession/GO/structure context in one call."""
+        protein = self.get_protein(protein_id)
+        if protein is None:
+            return None
+
+        accessions = self.list_accessions_for_protein(protein_id)
+        go_annotations = self.get_protein_go_annotations(protein_id)
+        structures = self.get_protein_structures(protein_id)
+
+        chains_by_structure: Dict[str, List[Dict[str, Any]]] = {}
+        states_by_chain: Dict[int, List[Dict[str, Any]]] = {}
+        structure_3di_by_state: Dict[int, List[Dict[str, Any]]] = {}
+
+        for structure in structures:
+            structure_key = str(structure["id"])
+            chains = self.get_structure_chains(structure_key)
+            chains_by_structure[structure_key] = chains
+
+            for chain in chains:
+                chain_id = int(chain["id"])
+                chain_states = self.get_chain_states(chain_id)
+                states_by_chain[chain_id] = chain_states
+
+                if include_3di:
+                    for state in chain_states:
+                        state_id = int(state["id"])
+                        structure_3di_by_state[state_id] = self.get_state_3di_embeddings(state_id)
+
+        context: Dict[str, Any] = {
+            "protein": protein,
+            "accessions": accessions,
+            "go_annotations": go_annotations,
+            "structures": structures,
+            "chains_by_structure": chains_by_structure,
+            "states_by_chain": states_by_chain,
+        }
+        if include_3di:
+            context["structure_3di_by_state"] = structure_3di_by_state
+        return context
+
     def get_embedding_type_by_name(self, name: str) -> Optional[EmbeddingType]:
         """Get embedding type metadata by exact ``sequence_embedding_type.name``."""
         row = self.query_one(
@@ -407,6 +597,81 @@ class BioDataClient:
             task_name=_as_optional_str(row.get("task_name")),
             description=_as_optional_str(row.get("description")),
         )
+
+    def distance_to_protein(
+        self,
+        query_embedding: Any,
+        protein_id: str,
+        model: EmbeddingModel,
+        layer_index: int = 0,
+        metric: Optional[DistanceMetric] = None,
+    ) -> float:
+        """Compute distance between a query embedding and one protein embedding."""
+        embedding_type_id = self._resolve_embedding_type_id(model)
+        operator = _metric_operator(metric or self.default_metric)
+        row = self.query_one(
+            f"""
+            SELECT se.embedding {operator} %s::halfvec AS distance
+            FROM protein p
+            JOIN sequence s ON p.sequence_id = s.id
+            JOIN sequence_embeddings se ON se.sequence_id = s.id
+            WHERE p.id = %s
+              AND se.embedding_type_id = %s
+              AND se.layer_index = %s
+            LIMIT 1;
+            """,
+            (query_embedding, protein_id, embedding_type_id, layer_index),
+        )
+        if row is None:
+            raise NotFoundError(
+                f"No embedding found for protein={protein_id}, model={model}, layer={layer_index}."
+            )
+        return float(row["distance"])
+
+    def distance_between_proteins(
+        self,
+        protein_a_id: str,
+        protein_b_id: str,
+        model: EmbeddingModel,
+        layer_index: int = 0,
+        metric: Optional[DistanceMetric] = None,
+    ) -> float:
+        """Compute distance between two proteins for the same model/layer."""
+        embedding_type_id = self._resolve_embedding_type_id(model)
+        operator = _metric_operator(metric or self.default_metric)
+        row = self.query_one(
+            f"""
+            SELECT sea.embedding {operator} seb.embedding AS distance
+            FROM protein pa
+            JOIN sequence sa ON sa.id = pa.sequence_id
+            JOIN sequence_embeddings sea
+              ON sea.sequence_id = sa.id
+             AND sea.embedding_type_id = %s
+             AND sea.layer_index = %s
+            JOIN protein pb ON pb.id = %s
+            JOIN sequence sb ON sb.id = pb.sequence_id
+            JOIN sequence_embeddings seb
+              ON seb.sequence_id = sb.id
+             AND seb.embedding_type_id = %s
+             AND seb.layer_index = %s
+            WHERE pa.id = %s
+            LIMIT 1;
+            """,
+            (
+                embedding_type_id,
+                layer_index,
+                protein_b_id,
+                embedding_type_id,
+                layer_index,
+                protein_a_id,
+            ),
+        )
+        if row is None:
+            raise NotFoundError(
+                f"Could not compute distance for proteins=({protein_a_id}, {protein_b_id}), "
+                f"model={model}, layer={layer_index}."
+            )
+        return float(row["distance"])
 
     def list_available_layers(self, embedding_type_id: int) -> List[int]:
         """List available layer indices for an embedding type."""
@@ -592,6 +857,17 @@ class BioDataClient:
         annotations = self.fetch_go_annotations([n.protein_id for n in neighbors])
         return neighbors, annotations
 
+    def _resolve_embedding_type_id(self, model: EmbeddingModel) -> int:
+        if isinstance(model, int):
+            return model
+        model_name = str(model).strip()
+        if not model_name:
+            raise BioDataError("model must be a non-empty embedding type name or integer ID.")
+        emb_type = self.get_embedding_type_by_name(model_name)
+        if emb_type is None:
+            raise NotFoundError(f"Embedding type not found: {model_name!r}")
+        return emb_type.id
+
     def _require_connection(self) -> Any:
         if self._conn is None:
             raise ConnectionNotOpenError("Connection is not open. Call connect() or use 'with BioDataClient(...)'.")
@@ -687,6 +963,7 @@ __all__ = [
     "Neighbor",
     "NotFoundError",
     "DistanceMetric",
+    "EmbeddingModel",
     "DEFAULT_DATABASE",
     "DEFAULT_DSN",
     "DEFAULT_HOST",

@@ -156,6 +156,140 @@ def test_fetch_go_annotations_groups_rows() -> None:
     assert grouped["P2"][0].evidence_code == "IEA"
 
 
+def test_get_protein_by_accession_returns_joined_row() -> None:
+    responses = [
+        _Response(
+            one={
+                "id": "P12345",
+                "sequence_id": 7,
+                "description": "Example protein",
+                "accession_code": "Q99999",
+                "is_primary_accession": True,
+            }
+        )
+    ]
+    client, _ = _client_with_fake_conn(responses)
+    row = client.get_protein_by_accession("Q99999")
+
+    assert row is not None
+    assert row["id"] == "P12345"
+    assert row["accession_code"] == "Q99999"
+
+
+def test_get_protein_context_returns_none_if_protein_missing() -> None:
+    responses = [_Response(one=None)]
+    client, _ = _client_with_fake_conn(responses)
+
+    assert client.get_protein_context("P00000") is None
+
+
+def test_get_protein_context_aggregates_related_tables() -> None:
+    responses = [
+        _Response(one={"id": "P12345", "sequence_id": 1}),
+        _Response(all=[{"code": "Q99999", "is_primary": True}]),
+        _Response(all=[{"go_id": "GO:0001", "category": "mf", "evidence_code": "EXP"}]),
+        _Response(all=[{"id": "AF-P12345-F1", "method": "AF2"}]),
+        _Response(all=[{"id": 10, "name": "A", "sequence_id": 1, "accession_code": "Q99999"}]),
+        _Response(all=[{"id": 100, "model_id": "1", "file_path": "/tmp/state1.cif"}]),
+    ]
+    client, _ = _client_with_fake_conn(responses)
+    context = client.get_protein_context("P12345")
+
+    assert context is not None
+    assert context["protein"]["id"] == "P12345"
+    assert context["accessions"][0]["code"] == "Q99999"
+    assert context["go_annotations"][0]["go_id"] == "GO:0001"
+    assert context["structures"][0]["id"] == "AF-P12345-F1"
+    assert context["chains_by_structure"]["AF-P12345-F1"][0]["id"] == 10
+    assert context["states_by_chain"][10][0]["id"] == 100
+    assert "structure_3di_by_state" not in context
+
+
+def test_get_protein_context_includes_3di_when_enabled() -> None:
+    responses = [
+        _Response(one={"id": "P12345", "sequence_id": 1}),
+        _Response(all=[]),
+        _Response(all=[]),
+        _Response(all=[{"id": "AF-P12345-F1", "method": "AF2"}]),
+        _Response(all=[{"id": 10, "name": "A", "sequence_id": 1, "accession_code": None}]),
+        _Response(all=[{"id": 100, "model_id": "1", "file_path": "/tmp/state1.cif"}]),
+        _Response(all=[{"id": 900, "state_id": 100, "embedding": "ABCDEF"}]),
+    ]
+    client, _ = _client_with_fake_conn(responses)
+    context = client.get_protein_context("P12345", include_3di=True)
+
+    assert context is not None
+    assert context["structure_3di_by_state"][100][0]["id"] == 900
+
+
+def test_distance_to_protein_with_model_name_and_metric() -> None:
+    responses = [
+        _Response(one={"id": 1, "name": "esm2_layer0"}),
+        _Response(one={"distance": 0.123}),
+    ]
+    client, conn = _client_with_fake_conn(responses)
+
+    distance = client.distance_to_protein(
+        [0.1, 0.2],
+        protein_id="P12345",
+        model="esm2_layer0",
+        layer_index=0,
+        metric="cosine",
+    )
+
+    assert distance == pytest.approx(0.123)
+    sql, params = conn.executed[1]
+    assert "<=>" in sql
+    assert params == ([0.1, 0.2], "P12345", 1, 0)
+
+
+def test_distance_between_proteins_with_model_id_and_metric() -> None:
+    responses = [_Response(one={"distance": 0.55})]
+    client, conn = _client_with_fake_conn(responses)
+
+    distance = client.distance_between_proteins(
+        protein_a_id="P11111",
+        protein_b_id="P22222",
+        model=3,
+        layer_index=2,
+        metric="inner_product",
+    )
+
+    assert distance == pytest.approx(0.55)
+    sql, params = conn.executed[0]
+    assert "<#>" in sql
+    assert params == (3, 2, "P22222", 3, 2, "P11111")
+
+
+def test_distance_to_protein_raises_not_found_when_missing_embedding() -> None:
+    responses = [
+        _Response(one={"id": 1, "name": "esm2_layer0"}),
+        _Response(one=None),
+    ]
+    client, _ = _client_with_fake_conn(responses)
+
+    with pytest.raises(bd.NotFoundError):
+        client.distance_to_protein(
+            [0.1, 0.2],
+            protein_id="P12345",
+            model="esm2_layer0",
+            layer_index=0,
+        )
+
+
+def test_distance_between_proteins_raises_when_model_name_missing() -> None:
+    responses = [_Response(one=None)]
+    client, _ = _client_with_fake_conn(responses)
+
+    with pytest.raises(bd.NotFoundError):
+        client.distance_between_proteins(
+            protein_a_id="P11111",
+            protein_b_id="P22222",
+            model="missing_model",
+            layer_index=0,
+        )
+
+
 def test_neighbors_with_go_raises_when_query_embedding_missing() -> None:
     responses = [_Response(one=None)]
     client, _ = _client_with_fake_conn(responses)

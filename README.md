@@ -64,6 +64,15 @@ python examples/nearest_neighbors.py \
   --metric cosine
 ```
 
+Additional examples:
+
+```bash
+python examples/protein_lookup.py --protein-id P12345 --pretty
+python examples/protein_lookup.py --accession Q99999 --pretty
+python examples/protein_context.py --protein-id P12345 --include-3di --pretty
+python examples/structure_drilldown.py --structure-id AF-P12345-F1 --include-3di --pretty
+```
+
 ## Improved Search Features
 
 ```python
@@ -100,9 +109,20 @@ with BioDataClient() as db:
 - `health_check(...)`
 - `count_sequence_embeddings()`
 - `list_embedding_types()`
+- `get_protein(...)`
+- `get_protein_by_accession(...)`
+- `list_accessions_for_protein(...)`
+- `get_protein_go_annotations(...)`
+- `get_protein_structures(...)`
+- `get_structure_chains(...)`
+- `get_chain_states(...)`
+- `get_state_3di_embeddings(...)`
+- `get_protein_context(...)`
 - `get_embedding_type_by_name(...)`
 - `list_available_layers(...)`
 - `get_protein_embedding(...)`
+- `distance_to_protein(...)`
+- `distance_between_proteins(...)`
 - `find_nearest_neighbors(...)`
 - `fetch_go_annotations(...)`
 - `neighbors_with_go(...)`
