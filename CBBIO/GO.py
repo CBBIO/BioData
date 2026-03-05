@@ -140,6 +140,105 @@ class GOOntology:
 
         raise GOError("Unknown method. Use one of: resnik, lin, schlicker.")
 
+    def group_similarity(
+        self,
+        terms_a: Collection[str],
+        terms_b: Collection[str],
+        *,
+        method: SimilarityMethod = "resnik",
+        aggregate: str = "bma",
+    ) -> Optional[float]:
+        """Compute semantic similarity between two GO-term groups.
+
+        Currently supports best-match average aggregation (``aggregate='bma'``).
+        """
+        if not terms_a or not terms_b:
+            return None
+
+        aggregate_value = aggregate.strip().lower()
+        if aggregate_value != "bma":
+            raise GOError("Unknown aggregate. Use: bma.")
+
+        terms_a_list = [str(go_id) for go_id in terms_a]
+        terms_b_list = [str(go_id) for go_id in terms_b]
+
+        scores_a: List[float] = []
+        for go_id_a in terms_a_list:
+            row_scores = [
+                float(self.semantic_similarity(go_id_a, go_id_b, method=method))
+                for go_id_b in terms_b_list
+            ]
+            if row_scores:
+                scores_a.append(max(row_scores))
+
+        scores_b: List[float] = []
+        for go_id_b in terms_b_list:
+            row_scores = [
+                float(self.semantic_similarity(go_id_b, go_id_a, method=method))
+                for go_id_a in terms_a_list
+            ]
+            if row_scores:
+                scores_b.append(max(row_scores))
+
+        if not scores_a or not scores_b:
+            return None
+
+        avg_a = sum(scores_a) / float(len(scores_a))
+        avg_b = sum(scores_b) / float(len(scores_b))
+        return (avg_a + avg_b) / 2.0
+
+    def term_names(self, go_ids: Collection[str], *, sort: bool = True) -> List[str]:
+        """Return GO term names for provided GO IDs."""
+        names = [str(self.term(str(go_id))["name"]) for go_id in go_ids]
+        return sorted(names) if sort else names
+
+    def format_term_names(
+        self,
+        go_ids: Collection[str],
+        *,
+        separator: str = "; ",
+        sort: bool = True,
+    ) -> str:
+        """Return GO term names as one formatted string."""
+        return separator.join(self.term_names(go_ids, sort=sort))
+
+    def category_for_term(self, go_id: str) -> Optional[str]:
+        """Return canonical GO category for a term: ``mf``, ``bp``, or ``cc``."""
+        term_obj = self._get_term(go_id)
+        namespace = str(getattr(term_obj, "namespace", "")).strip().lower()
+        namespace_to_category = {
+            "molecular_function": "mf",
+            "biological_process": "bp",
+            "cellular_component": "cc",
+        }
+        return namespace_to_category.get(namespace)
+
+    def split_annotations_by_category(
+        self,
+        annotations: Mapping[str, Collection[str]],
+    ) -> Dict[str, Dict[str, Set[str]]]:
+        """Split entity->GO IDs mapping into canonical GO categories.
+
+        Returns mapping:
+        ``{"mf": {entity: {go...}}, "bp": {...}, "cc": {...}}``.
+        Invalid/unknown GO IDs are skipped.
+        """
+        rows: Dict[str, Dict[str, Set[str]]] = {
+            "mf": {},
+            "bp": {},
+            "cc": {},
+        }
+        for entity_id, go_ids in annotations.items():
+            for go_id_raw in go_ids:
+                go_id = str(go_id_raw)
+                if not self.has_term(go_id):
+                    continue
+                category = self.category_for_term(go_id)
+                if category is None:
+                    continue
+                rows[category].setdefault(str(entity_id), set()).add(go_id)
+        return rows
+
     def minimal_branch_length(
         self,
         go_id_a: str,

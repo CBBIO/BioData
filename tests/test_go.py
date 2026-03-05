@@ -99,6 +99,59 @@ def test_go_similarity_unknown_method(go_obo_path: Path) -> None:
         go.semantic_similarity("GO:0000002", "GO:0000002", method="unknown")  # type: ignore[arg-type]
 
 
+def test_go_group_similarity_bma(go_obo_path: Path) -> None:
+    go = load_go(str(go_obo_path))
+    go.prepare_term_counts(
+        {
+            "P1": {"GO:0000002"},
+            "P2": {"GO:0000003"},
+            "P3": {"GO:0000004"},
+        }
+    )
+
+    sim = go.group_similarity(
+        {"GO:0000004", "GO:0000002"},
+        {"GO:0000003"},
+        method="lin",
+    )
+    assert sim is not None
+    assert sim >= 0.0
+
+
+def test_go_group_similarity_unknown_aggregate(go_obo_path: Path) -> None:
+    go = load_go(str(go_obo_path))
+    go.prepare_term_counts({"P1": {"GO:0000002"}})
+    with pytest.raises(GOError):
+        go.group_similarity(
+            {"GO:0000002"},
+            {"GO:0000002"},
+            method="lin",
+            aggregate="unknown",
+        )
+
+
+def test_go_term_name_helpers(go_obo_path: Path) -> None:
+    go = load_go(str(go_obo_path))
+    names = go.term_names(["GO:0000004", "GO:0000002"])
+    assert names == ["child one", "grandchild"]
+    formatted = go.format_term_names(["GO:0000004", "GO:0000002"])
+    assert formatted == "child one; grandchild"
+
+
+def test_split_annotations_by_category(go_obo_path: Path) -> None:
+    go = load_go(str(go_obo_path))
+    split = go.split_annotations_by_category(
+        {
+            "P1": {"GO:0000002", "GO:9999999"},
+            "P2": {"GO:0000004"},
+        }
+    )
+    assert split["bp"]["P1"] == {"GO:0000002"}
+    assert split["bp"]["P2"] == {"GO:0000004"}
+    assert split["mf"] == {}
+    assert split["cc"] == {}
+
+
 def test_minimal_branch_length(go_obo_path: Path) -> None:
     go = load_go(str(go_obo_path))
     assert go.minimal_branch_length("GO:0000004", "GO:0000002") == 1
