@@ -10,7 +10,7 @@ pip install -r requirements.txt
 
 ## Configuration
 
-Connection and client defaults are loaded from [config.yaml](/Users/icases/BioData/config.yaml).
+Connection and client defaults are loaded from [`config.yaml`](config.yaml).
 
 ```yaml
 database:
@@ -164,7 +164,7 @@ Tests use mocked DB connections, so they do not require a live PostgreSQL server
 
 ## Type Checking
 
-Strict type checking is configured via [pyrightconfig.json](/Users/icases/BioData/pyrightconfig.json).
+Strict type checking is configured via [`pyrightconfig.json`](pyrightconfig.json).
 
 ```bash
 poetry run pyright
