@@ -868,6 +868,8 @@ class BioDataClient:
         metric: Optional[DistanceMetric] = None,
         exclude_protein_ids: Optional[Sequence[str]] = None,
         use_ann: bool = False,
+        ann_ef_search: int = 200,
+        ann_candidate_pool: Optional[int] = None,
     ) -> List[Neighbor]:
         """Find nearest proteins using pgvector distance operators.
 
@@ -886,35 +888,54 @@ class BioDataClient:
         excluded_ids = [str(value) for value in (exclude_protein_ids or [])]
         if use_ann:
             dim = _embedding_dimension(query_embedding)
+            candidate_limit = (
+                max(effective_k, int(ann_candidate_pool))
+                if ann_candidate_pool is not None
+                else max(effective_k * 20, 200)
+            )
             extra_where = ""
-            params = [query_embedding, embedding_type_id, layer_index]
+            params = [
+                embedding_type_id,
+                layer_index,
+                query_embedding,
+                candidate_limit,
+                query_embedding,
+            ]
             if excluded_ids:
-                extra_where = (
-                    " AND se.sequence_id <> ALL(ARRAY("
-                    "SELECT pex.sequence_id FROM protein pex WHERE pex.id = ANY(%s)"
-                    "))"
-                )
+                extra_where = " AND p.id <> ALL(%s)"
                 params.append(excluded_ids)
 
             sql = (
-                "SELECT p.id AS protein_id, "
-                "       ranked.layer_index, "
-                "       ranked.distance "
-                "FROM ("
+                "WITH ann_candidates AS ("
                 "    SELECT se.sequence_id, "
                 "           se.layer_index, "
-                f"           (se.embedding::halfvec({dim})) {operator} %s::halfvec AS distance "
+                "           se.embedding "
                 "    FROM sequence_embeddings se "
                 "    WHERE se.embedding_type_id = %s "
-                "      AND se.layer_index = %s"
-                f"{extra_where} "
+                "      AND se.layer_index = %s "
                 f"    ORDER BY (se.embedding::halfvec({dim})) {operator} %s::halfvec "
                 "    LIMIT %s"
-                ") ranked "
-                "JOIN protein p ON p.sequence_id = ranked.sequence_id "
-                "ORDER BY ranked.distance;"
+                "), protein_candidates AS ("
+                "    SELECT p.id AS protein_id, "
+                "           c.layer_index, "
+                f"           c.embedding {operator} %s::halfvec AS distance "
+                "    FROM ann_candidates c "
+                "    JOIN protein p ON p.sequence_id = c.sequence_id "
+                "    WHERE TRUE"
+                f"{extra_where}"
+                "), dedup AS ("
+                "    SELECT protein_id, "
+                "           MIN(layer_index) AS layer_index, "
+                "           MIN(distance) AS distance "
+                "    FROM protein_candidates "
+                "    GROUP BY protein_id"
+                ") "
+                "SELECT protein_id, layer_index, distance "
+                "FROM dedup "
+                "ORDER BY distance "
+                "LIMIT %s;"
             )
-            params.extend([query_embedding, effective_k])
+            params.append(effective_k)
         else:
             extra_where = ""
             params = [query_embedding, embedding_type_id, layer_index]
@@ -938,6 +959,8 @@ class BioDataClient:
             params.extend([query_embedding, effective_k])
 
         with _cursor(conn) as cur:
+            if use_ann and ann_ef_search > 0:
+                cur.execute(f"SET hnsw.ef_search = {int(ann_ef_search)};")
             cur.execute(sql, tuple(params))
             rows = cur.fetchall()
 

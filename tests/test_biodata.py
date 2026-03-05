@@ -140,7 +140,7 @@ def test_find_nearest_neighbors_rejects_invalid_k() -> None:
 
 
 def test_find_nearest_neighbors_use_ann_query_shape() -> None:
-    responses = [_Response(all=[("P2", 0, 0.2)])]
+    responses = [_Response(), _Response(all=[("P2", 0, 0.2)])]
     client, conn = _client_with_fake_conn(responses)
 
     client.find_nearest_neighbors(
@@ -153,11 +153,15 @@ def test_find_nearest_neighbors_use_ann_query_shape() -> None:
         use_ann=True,
     )
 
-    sql, params = conn.executed[0]
-    assert "se.embedding::halfvec(3)" in sql
+    assert "SET hnsw.ef_search = 200;" in conn.executed[0][0]
+
+    sql, params = conn.executed[1]
+    assert "WITH ann_candidates AS" in sql
     assert "ORDER BY (se.embedding::halfvec(3)) <=> %s::halfvec" in sql
-    assert "se.sequence_id <> ALL(ARRAY(" in sql
-    assert params[0] == [0.1, 0.2, 0.3]
+    assert "JOIN protein p ON p.sequence_id = c.sequence_id" in sql
+    assert "GROUP BY protein_id" in sql
+    assert "LIMIT %s;" in sql
+    assert params[2] == [0.1, 0.2, 0.3]
     assert ["P1"] in params
     assert params[-1] == 1
 
