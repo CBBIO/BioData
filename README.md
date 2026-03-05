@@ -72,6 +72,7 @@ python examples/protein_lookup.py --accession Q99999 --pretty
 python examples/protein_context.py --protein-id P12345 --include-3di --pretty
 python examples/structure_drilldown.py --structure-id AF-P12345-F1 --include-3di --pretty
 python examples/go_terms.py --obo /path/to/go-basic.obo --go-id GO:0008150 --pretty
+python examples/neighbor_semantic_distance.py --obo /path/to/go-basic.obo --protein-ids-file proteins.txt
 ```
 
 ## Improved Search Features
