@@ -7,10 +7,9 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Any, Callable, Collection, Dict, List, Mapping, Optional, Set, Literal, cast
+from typing import Any, Callable, Collection, Dict, List, Mapping, Optional, Set, cast
 
-
-SimilarityMethod = Literal["resnik", "lin", "schlicker"]
+from .types import SimilarityMethod
 
 
 class GOError(Exception):

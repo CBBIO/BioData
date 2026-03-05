@@ -141,6 +141,12 @@ with BioDataClient() as db:
 - `information_content(...)`
 - `semantic_similarity(...)`
 
+### Shared Types (`CBBIO.types`)
+
+- `DistanceMetric`, `SimilarityMethod`, `EmbeddingModel`, `EmbeddingVector`
+- `ProteinID`, `GOID`, `StructureID`
+- `EmbeddingType`, `Neighbor`, `GOAnnotation`
+
 ## Notes
 
 - `pgvector` registration is done automatically on connect (`halfvec`).

@@ -9,14 +9,13 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping as MappingABC
 from contextlib import contextmanager
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple, Union, Literal, cast
+from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple, Union, cast
+
+from .types import DistanceMetric, EmbeddingModel, EmbeddingType, GOAnnotation, Neighbor
 
 
 Params = Union[Sequence[Any], Mapping[str, Any], None]
-DistanceMetric = Literal["l2", "cosine", "inner_product"]
-EmbeddingModel = Union[int, str]
 ConfigDict = Dict[str, Any]
 
 
@@ -205,30 +204,6 @@ DEFAULT_AUTOCOMMIT = _DEFAULTS["autocommit"]
 DEFAULT_REGISTER_HALFVEC = _DEFAULTS["register_halfvec"]
 DEFAULT_SEARCH_METRIC: DistanceMetric = _DEFAULTS["default_metric"]
 DEFAULT_SEARCH_K = _DEFAULTS["default_k"]
-
-
-@dataclass(frozen=True)
-class EmbeddingType:
-    id: int
-    name: str
-    model_name: Optional[str]
-    task_name: Optional[str]
-    description: Optional[str]
-
-
-@dataclass(frozen=True)
-class Neighbor:
-    protein_id: str
-    layer_index: int
-    distance: float
-
-
-@dataclass(frozen=True)
-class GOAnnotation:
-    go_id: str
-    category: str
-    description: str
-    evidence_code: str
 
 
 class BioDataClient:
