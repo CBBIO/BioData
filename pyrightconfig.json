@@ -1,0 +1,18 @@
+{
+  "pythonVersion": "3.14",
+  "venvPath": ".",
+  "venv": ".venv",
+  "typeCheckingMode": "basic",
+  "strict": [
+    "CBBIO"
+  ],
+  "include": [
+    "CBBIO",
+    "examples",
+    "tests"
+  ],
+  "exclude": [
+    "**/__pycache__"
+  ],
+  "reportMissingTypeStubs": "none"
+}

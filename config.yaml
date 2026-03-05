@@ -1,0 +1,14 @@
+database:
+  host: localhost
+  port: 5432
+  name: BioData
+  user: usuario
+  password: clave
+
+client:
+  autocommit: true
+  register_halfvec: true
+
+search:
+  default_metric: l2
+  default_k: 10
