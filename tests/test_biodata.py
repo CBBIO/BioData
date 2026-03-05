@@ -232,6 +232,79 @@ def test_get_protein_by_accession_returns_joined_row() -> None:
     assert row["accession_code"] == "Q99999"
 
 
+def test_get_protein_sequence_returns_string() -> None:
+    responses = [_Response(one={"sequence": "MPEPTIDE"})]
+    client, _ = _client_with_fake_conn(responses)
+    value = client.get_protein_sequence("P12345")
+    assert value == "MPEPTIDE"
+
+
+def test_get_protein_sequence_returns_none_if_missing() -> None:
+    responses = [_Response(one=None)]
+    client, _ = _client_with_fake_conn(responses)
+    assert client.get_protein_sequence("P00000") is None
+
+
+def test_get_protein_sequences_batch() -> None:
+    responses = [
+        _Response(
+            all=[
+                {"id": "P1", "sequence": "AAAA"},
+                {"id": "P2", "sequence": "BBBB"},
+            ]
+        )
+    ]
+    client, conn = _client_with_fake_conn(responses)
+    values = client.get_protein_sequences(["P1", "P2"])
+
+    assert values == {"P1": "AAAA", "P2": "BBBB"}
+    sql, params = conn.executed[0]
+    assert "WHERE p.id = ANY(%s)" in sql
+    assert params == (["P1", "P2"],)
+
+
+def test_get_protein_sequences_empty_input() -> None:
+    client, conn = _client_with_fake_conn([])
+    values = client.get_protein_sequences([])
+    assert values == {}
+    assert conn.executed == []
+
+
+def test_get_protein_species_returns_value() -> None:
+    responses = [_Response(one={"organism": "Drosophila melanogaster"})]
+    client, _ = _client_with_fake_conn(responses)
+    value = client.get_protein_species("P12345")
+    assert value == "Drosophila melanogaster"
+
+
+def test_get_protein_taxonomy_id_returns_value() -> None:
+    responses = [_Response(one={"taxonomy_id": "7227"})]
+    client, _ = _client_with_fake_conn(responses)
+    value = client.get_protein_taxonomy_id("P12345")
+    assert value == "7227"
+
+
+def test_get_protein_species_taxonomy_batch() -> None:
+    responses = [
+        _Response(
+            all=[
+                {"id": "P1", "organism": "Mus musculus", "taxonomy_id": "10090"},
+                {"id": "P2", "organism": "Homo sapiens", "taxonomy_id": "9606"},
+            ]
+        )
+    ]
+    client, conn = _client_with_fake_conn(responses)
+    values = client.get_protein_species_taxonomy(["P1", "P2"])
+
+    assert values == {
+        "P1": {"species": "Mus musculus", "taxonomy_id": "10090"},
+        "P2": {"species": "Homo sapiens", "taxonomy_id": "9606"},
+    }
+    sql, params = conn.executed[0]
+    assert "WHERE id = ANY(%s)" in sql
+    assert params == (["P1", "P2"],)
+
+
 def test_get_protein_context_returns_none_if_protein_missing() -> None:
     responses = [_Response(one=None)]
     client, _ = _client_with_fake_conn(responses)

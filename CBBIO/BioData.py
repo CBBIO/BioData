@@ -448,6 +448,106 @@ class BioDataClient:
             (protein_id,),
         )
 
+    def get_protein_sequence(self, protein_id: str) -> Optional[str]:
+        """Fetch raw amino-acid sequence for one protein ID."""
+        row = self.query_one(
+            """
+            SELECT s.sequence
+            FROM protein p
+            JOIN sequence s ON s.id = p.sequence_id
+            WHERE p.id = %s
+            LIMIT 1;
+            """,
+            (protein_id,),
+        )
+        if row is None:
+            return None
+        value = row.get("sequence")
+        if value is None:
+            return None
+        return str(value)
+
+    def get_protein_species(self, protein_id: str) -> Optional[str]:
+        """Fetch organism/species value for one protein ID."""
+        row = self.query_one(
+            """
+            SELECT organism
+            FROM protein
+            WHERE id = %s
+            LIMIT 1;
+            """,
+            (protein_id,),
+        )
+        if row is None:
+            return None
+        value = row.get("organism")
+        if value is None:
+            return None
+        return str(value)
+
+    def get_protein_taxonomy_id(self, protein_id: str) -> Optional[str]:
+        """Fetch taxonomy ID for one protein ID."""
+        row = self.query_one(
+            """
+            SELECT taxonomy_id
+            FROM protein
+            WHERE id = %s
+            LIMIT 1;
+            """,
+            (protein_id,),
+        )
+        if row is None:
+            return None
+        value = row.get("taxonomy_id")
+        if value is None:
+            return None
+        return str(value)
+
+    def get_protein_species_taxonomy(
+        self,
+        protein_ids: Sequence[str],
+    ) -> Dict[str, Dict[str, Optional[str]]]:
+        """Fetch organism/species and taxonomy ID for many proteins."""
+        ids = [str(value) for value in protein_ids]
+        if not ids:
+            return {}
+        rows = self.query_all(
+            """
+            SELECT id, organism, taxonomy_id
+            FROM protein
+            WHERE id = ANY(%s);
+            """,
+            (ids,),
+        )
+        return {
+            str(row["id"]): {
+                "species": _as_optional_str(row.get("organism")),
+                "taxonomy_id": _as_optional_str(row.get("taxonomy_id")),
+            }
+            for row in rows
+            if row.get("id") is not None
+        }
+
+    def get_protein_sequences(self, protein_ids: Sequence[str]) -> Dict[str, str]:
+        """Fetch raw sequences for many proteins in one query."""
+        ids = [str(value) for value in protein_ids]
+        if not ids:
+            return {}
+        rows = self.query_all(
+            """
+            SELECT p.id, s.sequence
+            FROM protein p
+            JOIN sequence s ON s.id = p.sequence_id
+            WHERE p.id = ANY(%s);
+            """,
+            (ids,),
+        )
+        return {
+            str(row["id"]): str(row["sequence"])
+            for row in rows
+            if row.get("id") is not None and row.get("sequence") is not None
+        }
+
     def get_protein_structures(self, protein_id: str) -> List[Dict[str, Any]]:
         """Fetch structures linked to one protein."""
         return self.query_all(
