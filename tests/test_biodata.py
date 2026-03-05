@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import sys
+import types
 from typing import Any, List, Optional, Sequence, Tuple
 
 import pytest
@@ -137,6 +139,29 @@ def test_find_nearest_neighbors_rejects_invalid_k() -> None:
         client.find_nearest_neighbors([0.1], embedding_type_id=1, k=0)
 
 
+def test_find_nearest_neighbors_use_ann_query_shape() -> None:
+    responses = [_Response(all=[("P2", 0, 0.2)])]
+    client, conn = _client_with_fake_conn(responses)
+
+    client.find_nearest_neighbors(
+        [0.1, 0.2, 0.3],
+        embedding_type_id=3,
+        layer_index=0,
+        k=1,
+        metric="cosine",
+        exclude_protein_ids=["P1"],
+        use_ann=True,
+    )
+
+    sql, params = conn.executed[0]
+    assert "se.embedding::halfvec(3)" in sql
+    assert "ORDER BY (se.embedding::halfvec(3)) <=> %s::halfvec" in sql
+    assert "se.sequence_id <> ALL(ARRAY(" in sql
+    assert params[0] == [0.1, 0.2, 0.3]
+    assert ["P1"] in params
+    assert params[-1] == 1
+
+
 def test_fetch_go_annotations_groups_rows() -> None:
     responses = [
         _Response(
@@ -154,6 +179,37 @@ def test_fetch_go_annotations_groups_rows() -> None:
     assert len(grouped["P1"]) == 2
     assert grouped["P1"][0].go_id == "GO:0001"
     assert grouped["P2"][0].evidence_code == "IEA"
+
+
+def test_fetch_protein_go_ids_groups_rows() -> None:
+    responses = [
+        _Response(
+            all=[
+                ("P1", "GO:0001"),
+                ("P1", "GO:0002"),
+                ("P2", "GO:0003"),
+            ]
+        )
+    ]
+    client, conn = _client_with_fake_conn(responses)
+    grouped = client.fetch_protein_go_ids(["P1", "P2"])
+
+    assert grouped["P1"] == {"GO:0001", "GO:0002"}
+    assert grouped["P2"] == {"GO:0003"}
+    sql, params = conn.executed[0]
+    assert "WHERE protein_id = ANY(%s)" in sql
+    assert params == (["P1", "P2"],)
+
+
+def test_fetch_protein_go_ids_all_when_none() -> None:
+    responses = [_Response(all=[("P1", "GO:0001")])]
+    client, conn = _client_with_fake_conn(responses)
+    grouped = client.fetch_protein_go_ids()
+
+    assert grouped == {"P1": {"GO:0001"}}
+    sql, params = conn.executed[0]
+    assert "WHERE protein_id = ANY(%s)" not in sql
+    assert params == ()
 
 
 def test_get_protein_by_accession_returns_joined_row() -> None:
@@ -259,6 +315,42 @@ def test_distance_between_proteins_with_model_id_and_metric() -> None:
     sql, params = conn.executed[0]
     assert "<#>" in sql
     assert params == (3, 2, "P22222", 3, 2, "P11111")
+
+
+def test_connect_register_vector_accepts_single_argument(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _Conn:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    conn = _Conn()
+    calls: List[Any] = []
+
+    psycopg_module = types.ModuleType("psycopg")
+    psycopg_module.connect = lambda *args, **kwargs: conn  # type: ignore[attr-defined]
+
+    pgvector_psycopg_module = types.ModuleType("pgvector.psycopg")
+
+    def _register_vector_single(context: Any) -> None:
+        calls.append(context)
+
+    pgvector_psycopg_module.register_vector = _register_vector_single  # type: ignore[attr-defined]
+
+    pgvector_module = types.ModuleType("pgvector")
+    pgvector_module.psycopg = pgvector_psycopg_module  # type: ignore[attr-defined]
+
+    monkeypatch.setitem(sys.modules, "psycopg", psycopg_module)
+    monkeypatch.setitem(sys.modules, "pgvector", pgvector_module)
+    monkeypatch.setitem(sys.modules, "pgvector.psycopg", pgvector_psycopg_module)
+
+    client = bd.BioDataClient(dsn="postgresql://user:pass@localhost:5432/db")
+    client.connect()
+    client.close()
+
+    assert calls == [conn]
+    assert conn.closed is True
 
 
 def test_distance_to_protein_raises_not_found_when_missing_embedding() -> None:

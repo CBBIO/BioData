@@ -10,7 +10,7 @@ import os
 from collections.abc import Mapping as MappingABC
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple, Union, cast
+from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Sequence, Set, Tuple, Union, cast
 
 from .types import DistanceMetric, EmbeddingModel, EmbeddingType, GOAnnotation, Neighbor
 
@@ -257,7 +257,12 @@ class BioDataClient:
             except ModuleNotFoundError as exc:
                 raise DriverDependencyError("Missing dependency 'pgvector'. Install with: pip install pgvector") from exc
             register_vector_fn = cast(Callable[..., Any], register_vector)
-            register_vector_fn(conn, "halfvec")
+            try:
+                # Older pgvector versions accepted an explicit vector type name.
+                register_vector_fn(conn, "halfvec")
+            except TypeError:
+                # Newer versions infer/register supported vector types from context.
+                register_vector_fn(conn)
 
         self._conn = conn
 
@@ -707,6 +712,52 @@ class BioDataClient:
 
         return np.array(vector, dtype=np.float32)
 
+    def get_protein_embeddings(
+        self,
+        protein_ids: Sequence[str],
+        embedding_type_id: int,
+        layer_index: int = 0,
+        *,
+        as_numpy: bool = False,
+    ) -> Dict[str, Any]:
+        """Fetch embeddings for many proteins at once.
+
+        Returns mapping ``protein_id -> embedding`` for proteins that have
+        an embedding at the requested type/layer.
+        """
+        ids = [str(value) for value in protein_ids]
+        if not ids:
+            return {}
+
+        conn = self._require_connection()
+        with _cursor(conn) as cur:
+            cur.execute(
+                """
+                SELECT p.id, se.embedding
+                FROM protein p
+                JOIN sequence s ON p.sequence_id = s.id
+                JOIN sequence_embeddings se ON se.sequence_id = s.id
+                WHERE p.id = ANY(%s)
+                  AND se.embedding_type_id = %s
+                  AND se.layer_index = %s;
+                """,
+                (ids, embedding_type_id, layer_index),
+            )
+            rows = cur.fetchall()
+
+        if not as_numpy:
+            return {str(protein_id): embedding for protein_id, embedding in rows}
+
+        try:
+            import numpy as np
+        except ModuleNotFoundError as exc:
+            raise DriverDependencyError("NumPy is required for as_numpy=True. Install with: pip install numpy") from exc
+
+        return {
+            str(protein_id): np.array(embedding, dtype=np.float32)
+            for protein_id, embedding in rows
+        }
+
     def find_nearest_neighbors(
         self,
         query_embedding: Any,
@@ -716,6 +767,7 @@ class BioDataClient:
         *,
         metric: Optional[DistanceMetric] = None,
         exclude_protein_ids: Optional[Sequence[str]] = None,
+        use_ann: bool = False,
     ) -> List[Neighbor]:
         """Find nearest proteins using pgvector distance operators.
 
@@ -732,27 +784,59 @@ class BioDataClient:
             raise BioDataError("k must be >= 1")
 
         excluded_ids = [str(value) for value in (exclude_protein_ids or [])]
-        extra_where = ""
-        params: List[Any] = [query_embedding, embedding_type_id, layer_index]
-        if excluded_ids:
-            extra_where = " AND p.id <> ALL(%s)"
-            params.append(excluded_ids)
+        if use_ann:
+            dim = _embedding_dimension(query_embedding)
+            extra_where = ""
+            params = [query_embedding, embedding_type_id, layer_index]
+            if excluded_ids:
+                extra_where = (
+                    " AND se.sequence_id <> ALL(ARRAY("
+                    "SELECT pex.sequence_id FROM protein pex WHERE pex.id = ANY(%s)"
+                    "))"
+                )
+                params.append(excluded_ids)
 
-        sql = (
-            "SELECT p.id AS protein_id, "
-            "       se.layer_index, "
-            f"       se.embedding {operator} %s::halfvec AS distance "
-            "FROM sequence_embeddings se "
-            "JOIN sequence s ON se.sequence_id = s.id "
-            "JOIN protein p ON p.sequence_id = s.id "
-            "WHERE se.embedding_type_id = %s "
-            "  AND se.layer_index = %s"
-            f"{extra_where} "
-            f"ORDER BY se.embedding {operator} %s::halfvec "
-            "LIMIT %s;"
-        )
+            sql = (
+                "SELECT p.id AS protein_id, "
+                "       ranked.layer_index, "
+                "       ranked.distance "
+                "FROM ("
+                "    SELECT se.sequence_id, "
+                "           se.layer_index, "
+                f"           (se.embedding::halfvec({dim})) {operator} %s::halfvec AS distance "
+                "    FROM sequence_embeddings se "
+                "    WHERE se.embedding_type_id = %s "
+                "      AND se.layer_index = %s"
+                f"{extra_where} "
+                f"    ORDER BY (se.embedding::halfvec({dim})) {operator} %s::halfvec "
+                "    LIMIT %s"
+                ") ranked "
+                "JOIN protein p ON p.sequence_id = ranked.sequence_id "
+                "ORDER BY ranked.distance;"
+            )
+            params.extend([query_embedding, effective_k])
+        else:
+            extra_where = ""
+            params = [query_embedding, embedding_type_id, layer_index]
+            if excluded_ids:
+                extra_where = " AND p.id <> ALL(%s)"
+                params.append(excluded_ids)
 
-        params.extend([query_embedding, effective_k])
+            sql = (
+                "SELECT p.id AS protein_id, "
+                "       se.layer_index, "
+                f"       se.embedding {operator} %s::halfvec AS distance "
+                "FROM sequence_embeddings se "
+                "JOIN sequence s ON se.sequence_id = s.id "
+                "JOIN protein p ON p.sequence_id = s.id "
+                "WHERE se.embedding_type_id = %s "
+                "  AND se.layer_index = %s"
+                f"{extra_where} "
+                f"ORDER BY se.embedding {operator} %s::halfvec "
+                "LIMIT %s;"
+            )
+            params.extend([query_embedding, effective_k])
+
         with _cursor(conn) as cur:
             cur.execute(sql, tuple(params))
             rows = cur.fetchall()
@@ -761,6 +845,93 @@ class BioDataClient:
         for protein_id, row_layer, distance in rows:
             neighbors.append(Neighbor(protein_id=str(protein_id), layer_index=int(row_layer), distance=float(distance)))
         return neighbors
+
+    def find_nearest_neighbors_for_proteins(
+        self,
+        protein_ids: Sequence[str],
+        embedding_type_id: int,
+        layer_index: int = 0,
+        k: Optional[int] = None,
+        *,
+        metric: Optional[DistanceMetric] = None,
+        include_query: bool = False,
+    ) -> Dict[str, List[Neighbor]]:
+        """Find nearest neighbors for many proteins in one query.
+
+        Returns a mapping from query protein ID to a list of neighbors.
+        Query proteins missing embeddings are omitted from the mapping.
+        """
+        ids = [str(value) for value in protein_ids]
+        if not ids:
+            return {}
+
+        conn = self._require_connection()
+        effective_metric = metric or self.default_metric
+        operator = _metric_operator(effective_metric)
+        effective_k = self.default_k if k is None else int(k)
+        if effective_k < 1:
+            raise BioDataError("k must be >= 1")
+
+        sql = (
+            "WITH query_embeddings AS ("
+            "    SELECT p.id AS query_protein_id, "
+            "           se.embedding AS query_embedding "
+            "    FROM protein p "
+            "    JOIN sequence s ON p.sequence_id = s.id "
+            "    JOIN sequence_embeddings se ON se.sequence_id = s.id "
+            "    WHERE p.id = ANY(%s) "
+            "      AND se.embedding_type_id = %s "
+            "      AND se.layer_index = %s"
+            ") "
+            "SELECT q.query_protein_id, "
+            "       n.protein_id, "
+            "       n.layer_index, "
+            "       n.distance "
+            "FROM query_embeddings q "
+            "LEFT JOIN LATERAL ("
+            "    SELECT p2.id AS protein_id, "
+            "           se2.layer_index, "
+            f"           se2.embedding {operator} q.query_embedding AS distance "
+            "    FROM sequence_embeddings se2 "
+            "    JOIN sequence s2 ON se2.sequence_id = s2.id "
+            "    JOIN protein p2 ON p2.sequence_id = s2.id "
+            "    WHERE se2.embedding_type_id = %s "
+            "      AND se2.layer_index = %s "
+            "      AND (%s OR p2.id <> q.query_protein_id) "
+            f"    ORDER BY se2.embedding {operator} q.query_embedding "
+            "    LIMIT %s"
+            ") n ON TRUE "
+            "ORDER BY q.query_protein_id, n.distance;"
+        )
+
+        params = (
+            ids,
+            embedding_type_id,
+            layer_index,
+            embedding_type_id,
+            layer_index,
+            bool(include_query),
+            effective_k,
+        )
+
+        with _cursor(conn) as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+
+        grouped: Dict[str, List[Neighbor]] = {}
+        for query_protein_id, neighbor_id, row_layer, distance in rows:
+            query_id = str(query_protein_id)
+            grouped.setdefault(query_id, [])
+            if neighbor_id is None:
+                continue
+            grouped[query_id].append(
+                Neighbor(
+                    protein_id=str(neighbor_id),
+                    layer_index=int(row_layer),
+                    distance=float(distance),
+                )
+            )
+        return grouped
 
     def fetch_go_annotations(self, protein_ids: Sequence[str]) -> Dict[str, List[GOAnnotation]]:
         """Fetch GO annotations grouped by protein ID."""
@@ -798,6 +969,38 @@ class BioDataClient:
             )
         return grouped
 
+    def fetch_protein_go_ids(
+        self,
+        protein_ids: Optional[Sequence[str]] = None,
+    ) -> Dict[str, Set[str]]:
+        """Fetch GO IDs grouped by protein ID.
+
+        When ``protein_ids`` is ``None``, returns mapping for all proteins
+        present in ``protein_go_term_annotation``.
+        """
+        conn = self._require_connection()
+        sql = (
+            "SELECT protein_id, go_id "
+            "FROM protein_go_term_annotation"
+        )
+        params: Tuple[Any, ...] = ()
+        if protein_ids is not None:
+            ids = [str(p) for p in protein_ids]
+            if not ids:
+                return {}
+            sql += " WHERE protein_id = ANY(%s)"
+            params = (ids,)
+        sql += " ORDER BY protein_id, go_id;"
+
+        with _cursor(conn) as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+
+        grouped: Dict[str, Set[str]] = {}
+        for protein_id, go_id in rows:
+            grouped.setdefault(str(protein_id), set()).add(str(go_id))
+        return grouped
+
     def neighbors_with_go(
         self,
         query_uniprot_id: str,
@@ -807,6 +1010,7 @@ class BioDataClient:
         *,
         metric: Optional[DistanceMetric] = None,
         include_query: bool = False,
+        use_ann: bool = False,
     ) -> Tuple[List[Neighbor], Dict[str, List[GOAnnotation]]]:
         """End-to-end helper: query embedding -> neighbors -> GO annotations."""
         query_embedding = self.get_protein_embedding(
@@ -827,6 +1031,7 @@ class BioDataClient:
             k=k,
             metric=metric,
             exclude_protein_ids=[] if include_query else [query_uniprot_id],
+            use_ann=use_ann,
         )
 
         annotations = self.fetch_go_annotations([n.protein_id for n in neighbors])
@@ -897,6 +1102,35 @@ def _metric_operator(metric: DistanceMetric) -> str:
     if operator is None:
         raise BioDataError(f"Unsupported metric: {metric!r}. Use one of: l2, cosine, inner_product.")
     return operator
+
+
+def _embedding_dimension(query_embedding: Any) -> int:
+    dimensions_attr = getattr(query_embedding, "dimensions", None)
+    if callable(dimensions_attr):
+        try:
+            dim_from_method = int(dimensions_attr())
+            if dim_from_method >= 1:
+                return dim_from_method
+        except (TypeError, ValueError):
+            pass
+
+    to_list_attr = getattr(query_embedding, "to_list", None)
+    if callable(to_list_attr):
+        try:
+            values = to_list_attr()
+            dim_from_list = int(len(values))
+            if dim_from_list >= 1:
+                return dim_from_list
+        except (TypeError, ValueError):
+            pass
+
+    try:
+        dim = int(len(query_embedding))
+    except (TypeError, ValueError) as exc:
+        raise BioDataError("Could not infer embedding dimension from query_embedding for ANN search.") from exc
+    if dim < 1:
+        raise BioDataError("Embedding dimension must be >= 1 for ANN search.")
+    return dim
 
 
 def _row_to_dict(row: Any, cursor: Any) -> Dict[str, Any]:
