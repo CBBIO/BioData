@@ -26,6 +26,15 @@ from .BioData import (
     connect,
     load_config,
 )
+from .GO import (
+    GOCountsNotPreparedError,
+    GOError,
+    GOOntology,
+    GOTermNotFoundError,
+    SimilarityMethod,
+    load_go,
+    read_annotations_tsv,
+)
 
 __all__ = [
     "BioDataClient",
@@ -52,4 +61,11 @@ __all__ = [
     "build_dsn",
     "connect",
     "load_config",
+    "GOOntology",
+    "GOError",
+    "GOTermNotFoundError",
+    "GOCountsNotPreparedError",
+    "SimilarityMethod",
+    "load_go",
+    "read_annotations_tsv",
 ]

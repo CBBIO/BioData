@@ -71,6 +71,7 @@ python examples/protein_lookup.py --protein-id P12345 --pretty
 python examples/protein_lookup.py --accession Q99999 --pretty
 python examples/protein_context.py --protein-id P12345 --include-3di --pretty
 python examples/structure_drilldown.py --structure-id AF-P12345-F1 --include-3di --pretty
+python examples/go_terms.py --obo /path/to/go-basic.obo --go-id GO:0008150 --pretty
 ```
 
 ## Improved Search Features
@@ -126,6 +127,19 @@ with BioDataClient() as db:
 - `find_nearest_neighbors(...)`
 - `fetch_go_annotations(...)`
 - `neighbors_with_go(...)`
+
+### GO Ontology API (`CBBIO.GO`)
+
+- `GOOntology`
+- `load_go(...)`
+- `read_annotations_tsv(...)`
+- `ancestors(...)`
+- `descendants(...)`
+- `common_ancestors(...)`
+- `minimal_branch_length(...)`
+- `prepare_term_counts(...)`
+- `information_content(...)`
+- `semantic_similarity(...)`
 
 ## Notes
 
