@@ -85,6 +85,12 @@ def parse_args() -> argparse.Namespace:
         help="Embedding distance metric.",
     )
     parser.add_argument(
+        "--k",
+        type=int,
+        default=1,
+        help="Number of nearest neighbors per query protein.",
+    )
+    parser.add_argument(
         "--semantic-method",
         choices=["lin", "schlicker", "resnik"],
         default="lin",
@@ -115,6 +121,8 @@ def parse_args() -> argparse.Namespace:
 
     if not args.protein_id and not args.protein_ids_file:
         parser.error("Provide --protein-id and/or --protein-ids-file")
+    if args.k < 1:
+        parser.error("--k must be >= 1")
 
     return args
 
@@ -387,7 +395,7 @@ def main() -> int:
                 query_embedding,
                 embedding_type.id,
                 layer_index=args.layer,
-                k=1,
+                k=args.k,
                 metric=args.metric,
                 exclude_protein_ids=[protein_id],
                 use_ann=args.use_ann,
@@ -399,15 +407,15 @@ def main() -> int:
                 )
                 continue
 
-            nearest = neighbors[0]
-            results.append(
-                PairResult(
-                    protein_id=protein_id,
-                    neighbor_id=nearest.protein_id,
-                    embedding_distance=nearest.distance,
+            for neighbor in neighbors:
+                results.append(
+                    PairResult(
+                        protein_id=protein_id,
+                        neighbor_id=neighbor.protein_id,
+                        embedding_distance=neighbor.distance,
+                    )
                 )
-            )
-            neighbor_ids.add(nearest.protein_id)
+                neighbor_ids.add(neighbor.protein_id)
         _log_timing(args.timings, "db: embeddings + nearest neighbors", started_neighbors)
 
         started_annotations = time.perf_counter()
