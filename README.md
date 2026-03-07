@@ -8,6 +8,13 @@ Python helpers for accessing the BioData PostgreSQL database with `pgvector` (`h
 pip install -r requirements.txt
 ```
 
+Notebook/example dependencies are intentionally separated from core runtime deps:
+
+```bash
+# install notebook-only packages from inside each notebook (top cell)
+# e.g. %pip install seaborn biopython tqdm matplotlib
+```
+
 ## Configuration
 
 Connection and client defaults are loaded from [`config.yaml`](config.yaml).
