@@ -1,23 +1,69 @@
-# CBBIO.BioData
+# BioData
 
-Python helpers for accessing the BioData PostgreSQL database with `pgvector` (`halfvec`) support.
+Utilities for working with a PostgreSQL BioData database, protein embeddings (`pgvector`), and GO ontology analysis.
 
-## Install
+## What Is In This Repo
+
+- `CBBIO/BioData.py`: database client (`BioDataClient`) for proteins, embeddings, nearest neighbors, and GO annotations.
+- `CBBIO/GO.py`: ontology utilities (`GOOntology`) built on `goatools`.
+- `schema.sql`: database schema.
+- `config.yaml`: default DB/client/search configuration.
+- `notebooks/`: runnable examples:
+  - `protein_lookup.ipynb`
+  - `nearest_neighbors.ipynb`
+  - `go_terms.ipynb`
+  - `distance_vs_semantic_similarity.ipynb`
+
+## Installation
+
+Core dependencies only:
+
+```bash
+poetry install
+```
+
+Or via pip requirements:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-Notebook/example dependencies are intentionally separated from core runtime deps:
+## Database Installation
+
+### 1) Start PostgreSQL + pgvector
 
 ```bash
-# install notebook-only packages from inside each notebook (top cell)
-# e.g. %pip install seaborn biopython tqdm matplotlib
+docker run -d --name pgvectorsql \
+  -e POSTGRES_USER=usuario \
+  -e POSTGRES_PASSWORD=clave \
+  -e POSTGRES_DB=BioData \
+  -p 5432:5432 \
+  pgvector/pgvector:pg16
+```
+
+### 2) Create extension
+
+```bash
+PGPASSWORD=clave psql -h localhost -U usuario -d BioData -c "CREATE EXTENSION IF NOT EXISTS vector;"
+```
+
+### 3) Load schema
+
+```bash
+PGPASSWORD=clave psql -h localhost -U usuario -d BioData -f schema.sql
+```
+
+### 4) Optional: restore full dataset from backup
+
+If you have a `.backup` dump:
+
+```bash
+PGPASSWORD=clave pg_restore -h localhost -U usuario -d BioData /path/to/BioData.backup
 ```
 
 ## Configuration
 
-Connection and client defaults are loaded from [`config.yaml`](config.yaml).
+Defaults are in `config.yaml`:
 
 ```yaml
 database:
@@ -26,17 +72,9 @@ database:
   name: BioData
   user: usuario
   password: clave
-
-client:
-  autocommit: true
-  register_halfvec: true
-
-search:
-  default_metric: l2
-  default_k: 10
 ```
 
-Environment variable overrides are also supported:
+Environment overrides are supported:
 
 - `BIODATA_DB_HOST`
 - `BIODATA_DB_PORT`
@@ -48,130 +86,93 @@ Environment variable overrides are also supported:
 - `BIODATA_DEFAULT_METRIC`
 - `BIODATA_DEFAULT_K`
 
-## Quick Start
+## CBBIO Modules
 
-```python
-from CBBIO.BioData import BioDataClient
+### `CBBIO.BioData`
 
-with BioDataClient() as db:
-    print(db.health_check())
-    print("Total sequence embeddings:", db.count_sequence_embeddings())
-```
-
-## Example Script
-
-Run the bundled script:
-
-```bash
-python examples/nearest_neighbors.py \
-  --query P12345 \
-  --embedding-type-name esm2_layer0 \
-  --layer 0 \
-  --k 10 \
-  --metric cosine
-```
-
-Additional examples:
-
-```bash
-python examples/protein_lookup.py --protein-id P12345 --pretty
-python examples/protein_lookup.py --accession Q99999 --pretty
-python examples/protein_context.py --protein-id P12345 --include-3di --pretty
-python examples/structure_drilldown.py --structure-id AF-P12345-F1 --include-3di --pretty
-python examples/go_terms.py --obo /path/to/go-basic.obo --go-id GO:0008150 --pretty
-python examples/neighbor_semantic_distance.py --obo /path/to/go-basic.obo --protein-ids-file proteins.txt
-```
-
-## Improved Search Features
-
-```python
-from CBBIO.BioData import BioDataClient
-
-QUERY_UNIPROT = "P12345"  # replace with a valid protein ID
-
-with BioDataClient() as db:
-    embedding_type = db.get_embedding_type_by_name("esm2_layer0")
-    if embedding_type is None:
-        raise ValueError("Embedding type not found")
-
-    layers = db.list_available_layers(embedding_type.id)
-    print("available layers:", layers)
-
-    neighbors, annotations = db.neighbors_with_go(
-        query_uniprot_id=QUERY_UNIPROT,
-        embedding_type_id=embedding_type.id,
-        layer_index=layers[0],
-        k=10,
-        metric="cosine",  # l2 | cosine | inner_product
-    )
-
-    for n in neighbors:
-        print(n.protein_id, n.distance)
-```
-
-## Public API
+Main entrypoint:
 
 - `BioDataClient`
-- `build_dsn(...)`
-- `connect(...)`
-- `load_config(...)`
-- `health_check(...)`
-- `count_sequence_embeddings()`
-- `list_embedding_types()`
-- `get_protein(...)`
-- `get_protein_by_accession(...)`
-- `list_accessions_for_protein(...)`
-- `get_protein_go_annotations(...)`
-- `get_protein_structures(...)`
-- `get_structure_chains(...)`
-- `get_chain_states(...)`
-- `get_state_3di_embeddings(...)`
-- `get_protein_context(...)`
-- `get_embedding_type_by_name(...)`
-- `list_available_layers(...)`
-- `get_protein_embedding(...)`
-- `distance_to_protein(...)`
-- `distance_between_proteins(...)`
-- `find_nearest_neighbors(...)`
-- `fetch_go_annotations(...)`
-- `neighbors_with_go(...)`
 
-### GO Ontology API (`CBBIO.GO`)
+Typical usage:
 
-- `GOOntology`
-- `load_go(...)`
-- `read_annotations_tsv(...)`
-- `ancestors(...)`
-- `descendants(...)`
-- `common_ancestors(...)`
-- `minimal_branch_length(...)`
-- `prepare_term_counts(...)`
-- `information_content(...)`
-- `semantic_similarity(...)`
+```python
+from CBBIO.BioData import BioDataClient
 
-### Shared Types (`CBBIO.types`)
-
-- `DistanceMetric`, `SimilarityMethod`, `EmbeddingModel`, `EmbeddingVector`
-- `ProteinID`, `GOID`, `StructureID`
-- `EmbeddingType`, `Neighbor`, `GOAnnotation`
-
-## Notes
-
-- `pgvector` registration is done automatically on connect (`halfvec`).
-- If `pyyaml` is not available, built-in defaults + env vars are still used.
-- Set `as_numpy=True` in `get_protein_embedding(...)` if you want a NumPy array.
-
-## Tests
-
-```bash
-python -m pytest -q
+with BioDataClient() as client:
+    print(client.health_check())
+    print(client.count_sequence_embeddings())
 ```
 
-Tests use mocked DB connections, so they do not require a live PostgreSQL server.
+Key capabilities:
+
+- DB helpers: `query_one`, `query_all`, `scalar`, `transaction`
+- Protein/context access: `get_protein`, `get_protein_by_accession`, `get_protein_context`
+- Sequence/metadata batch fetch: `get_protein_sequences`, `get_protein_species_taxonomy`
+- Embeddings and distances: `get_protein_embedding`, `distance_to_protein`, `distance_between_proteins`
+- Neighbor search: `find_nearest_neighbors`, `find_nearest_neighbors_for_proteins`, `neighbors_with_go`
+- GO annotation retrieval: `fetch_go_annotations`, `fetch_protein_go_ids`
+
+Detailed API reference: `docs/BioData.md`
+
+### `CBBIO.GO`
+
+Main entrypoints:
+
+- `GOOntology`
+- `load_go`
+
+Typical usage:
+
+```python
+from CBBIO.GO import load_go
+
+go = load_go("go-basic.obo")
+```
+
+Key capabilities:
+
+- Term navigation: `term`, `ancestors`, `descendants`, `common_ancestors`
+- IC and semantic similarity: `prepare_term_counts`, `information_content`, `semantic_similarity`
+- Group comparison: `group_similarity` (BMA)
+- Category splitting: `split_annotations_by_category` (`mf`, `bp`, `cc`)
+
+Detailed API reference: `docs/GO.md`
+
+## Notebook Examples
+
+All notebooks are under `notebooks/` and include a top setup cell for notebook-only packages when needed.
+
+### `protein_lookup.ipynb`
+
+- Connect to DB
+- Fetch protein records and context by protein ID/accession
+
+### `nearest_neighbors.ipynb`
+
+- Resolve embedding type/layer
+- Find nearest neighbors and inspect GO annotations
+
+### `go_terms.ipynb`
+
+- Load GO DAG
+- Build GO statistics and category-level views
+
+### `distance_vs_semantic_similarity.ipynb`
+
+- Sample random proteins from DB
+- Compute query-neighbor distances
+- Compute semantic similarity by GO category
+- Compute sequence identity
+- Build tables and density plots (with linear fit and `R²`)
+
+## Running Tests
+
+```bash
+poetry run pytest -q
+```
 
 ## Type Checking
-
-Strict type checking is configured via [`pyrightconfig.json`](pyrightconfig.json).
 
 ```bash
 poetry run pyright
