@@ -96,6 +96,177 @@ def test_load_config_env_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
     assert cfg["search"]["default_k"] == 25
 
 
+def test_build_dsn_uses_explicit_values() -> None:
+    dsn = bd.build_dsn(
+        user="alice",
+        password="secret",
+        host="db.example",
+        port=6543,
+        database="BioDataProd",
+    )
+    assert dsn == "postgresql://alice:secret@db.example:6543/BioDataProd"
+
+
+def test_is_connected_property() -> None:
+    client = bd.BioDataClient()
+    assert client.is_connected is False
+    client._conn = _FakeConn([])
+    assert client.is_connected is True
+
+
+def test_query_helpers_return_expected_shapes() -> None:
+    responses = [
+        _Response(all=[("P1", "AAAA"), ("P2", "BBBB")], description=[("id",), ("sequence",)]),
+        _Response(one=("P3",), description=[("id",)]),
+        _Response(one=(7,), description=[("count",)]),
+    ]
+    client, conn = _client_with_fake_conn(responses)
+
+    rows = client.query_all("SELECT id, sequence FROM x;")
+    one = client.query_one("SELECT id FROM y;")
+    value = client.scalar("SELECT count(*) FROM z;")
+
+    assert rows == [{"id": "P1", "sequence": "AAAA"}, {"id": "P2", "sequence": "BBBB"}]
+    assert one == {"id": "P3"}
+    assert value == 7
+    assert len(conn.executed) == 3
+
+
+def test_count_sequence_embeddings_and_list_embedding_types() -> None:
+    responses = [
+        _Response(one={"count": 12}),
+        _Response(
+            all=[
+                {"id": 1, "name": "esm2_layer0", "model_name": "esm2", "task_name": "protein", "description": "d1"},
+                {"id": 2, "name": "prot_t5", "model_name": None, "task_name": None, "description": None},
+            ]
+        ),
+    ]
+    client, _ = _client_with_fake_conn(responses)
+
+    assert client.count_sequence_embeddings() == 12
+    emb_types = client.list_embedding_types()
+    assert [e.id for e in emb_types] == [1, 2]
+    assert emb_types[0].name == "esm2_layer0"
+    assert emb_types[1].model_name is None
+
+
+def test_getters_for_protein_accession_go_and_structure_tables() -> None:
+    responses = [
+        _Response(one={"id": "P1", "description": "protein"}),
+        _Response(all=[{"code": "Q1", "is_primary": True, "tag": "SwissProt"}]),
+        _Response(all=[{"go_id": "GO:0001", "category": "mf", "description": "d", "evidence_code": "EXP"}]),
+        _Response(all=[{"id": "AF-P1-F1", "method": "AF2"}]),
+        _Response(all=[{"id": 10, "name": "A", "sequence_id": 1, "accession_code": "Q1"}]),
+        _Response(all=[{"id": 100, "model_id": "1", "file_path": "/tmp/s.cif", "structure_id": "AF-P1-F1"}]),
+        _Response(all=[{"id": 900, "state_id": 100, "embedding": "xyz"}]),
+    ]
+    client, conn = _client_with_fake_conn(responses)
+
+    assert client.get_protein("P1") == {"id": "P1", "description": "protein"}
+    assert client.list_accessions_for_protein("P1")[0]["code"] == "Q1"
+    assert client.get_protein_go_annotations("P1")[0]["go_id"] == "GO:0001"
+    assert client.get_protein_structures("P1")[0]["id"] == "AF-P1-F1"
+    assert client.get_structure_chains("AF-P1-F1")[0]["id"] == 10
+    assert client.get_chain_states(10)[0]["id"] == 100
+    assert client.get_state_3di_embeddings(100)[0]["id"] == 900
+    assert len(conn.executed) == 7
+
+
+def test_get_embedding_type_by_name_and_list_available_layers() -> None:
+    responses = [
+        _Response(one={"id": 5, "name": "esm2_layer0", "model_name": "esm2", "task_name": "protein", "description": None}),
+        _Response(all=[{"layer_index": 0}, {"layer_index": 12}]),
+    ]
+    client, conn = _client_with_fake_conn(responses)
+
+    emb_type = client.get_embedding_type_by_name("esm2_layer0")
+    layers = client.list_available_layers(5)
+
+    assert emb_type is not None
+    assert emb_type.id == 5
+    assert layers == [0, 12]
+    assert conn.executed[0][1] == ("esm2_layer0",)
+    assert conn.executed[1][1] == (5,)
+
+
+def test_get_protein_embedding_variants() -> None:
+    responses = [
+        _Response(one=([0.1, 0.2],)),
+        _Response(one=([0.3, 0.4],)),
+        _Response(one=None),
+    ]
+    client, _ = _client_with_fake_conn(responses)
+
+    raw = client.get_protein_embedding("P1", embedding_type_id=1, layer_index=0)
+    assert raw == [0.1, 0.2]
+
+    np_vec = client.get_protein_embedding("P1", embedding_type_id=1, layer_index=0, as_numpy=True)
+    assert np_vec.shape == (2,)
+    assert str(np_vec.dtype) == "float32"
+
+    missing = client.get_protein_embedding("P1", embedding_type_id=1, layer_index=0)
+    assert missing is None
+
+
+def test_get_protein_embeddings_variants() -> None:
+    responses = [
+        _Response(all=[("P1", [0.1, 0.2]), ("P2", [0.3, 0.4])]),
+        _Response(all=[("P1", [0.5, 0.6])]),
+    ]
+    client, conn = _client_with_fake_conn(responses)
+
+    raw = client.get_protein_embeddings(["P1", "P2"], embedding_type_id=9, layer_index=1)
+    as_np = client.get_protein_embeddings(["P1"], embedding_type_id=9, layer_index=1, as_numpy=True)
+    empty = client.get_protein_embeddings([], embedding_type_id=9, layer_index=1)
+
+    assert raw["P1"] == [0.1, 0.2]
+    assert as_np["P1"].shape == (2,)
+    assert str(as_np["P1"].dtype) == "float32"
+    assert empty == {}
+    assert len(conn.executed) == 2
+
+
+def test_find_nearest_neighbors_for_proteins_groups_rows_and_respects_include_query_flag() -> None:
+    responses = [
+        _Response(
+            all=[
+                ("Q1", "N1", 0, 0.1),
+                ("Q1", "N2", 0, 0.2),
+                ("Q2", None, None, None),
+            ]
+        )
+    ]
+    client, conn = _client_with_fake_conn(responses)
+
+    grouped = client.find_nearest_neighbors_for_proteins(
+        ["Q1", "Q2"],
+        embedding_type_id=3,
+        layer_index=0,
+        k=2,
+        metric="cosine",
+        include_query=False,
+    )
+
+    assert [n.protein_id for n in grouped["Q1"]] == ["N1", "N2"]
+    assert grouped["Q2"] == []
+    sql, params = conn.executed[0]
+    assert "<=>" in sql
+    assert params == (["Q1", "Q2"], 3, 0, 3, 0, False, 2)
+
+
+def test_find_nearest_neighbors_for_proteins_rejects_invalid_k() -> None:
+    client, _ = _client_with_fake_conn([])
+    with pytest.raises(bd.BioDataError):
+        client.find_nearest_neighbors_for_proteins(["Q1"], embedding_type_id=1, k=0)
+
+
+def test_find_nearest_neighbors_for_proteins_empty_input_short_circuit() -> None:
+    client, conn = _client_with_fake_conn([])
+    assert client.find_nearest_neighbors_for_proteins([], embedding_type_id=1) == {}
+    assert conn.executed == []
+
+
 def test_find_nearest_neighbors_uses_metric_and_params() -> None:
     responses = [_Response(all=[("P1", 0, 0.1), ("P2", 0, 0.2)])]
     client, conn = _client_with_fake_conn(responses)

@@ -50,6 +50,7 @@ def go_obo_path(tmp_path: Path) -> Path:
 def test_go_ancestors_descendants(go_obo_path: Path) -> None:
     go = load_go(str(go_obo_path))
     assert go.has_term("GO:0000004")
+    assert "GO:0000001" in go.go_ids
     assert go.ancestors("GO:0000004") == ["GO:0000001", "GO:0000002"]
     assert go.descendants("GO:0000001") == ["GO:0000002", "GO:0000003", "GO:0000004"]
 
@@ -140,6 +141,7 @@ def test_go_term_name_helpers(go_obo_path: Path) -> None:
 
 def test_split_annotations_by_category(go_obo_path: Path) -> None:
     go = load_go(str(go_obo_path))
+    assert go.category_for_term("GO:0000002") == "bp"
     split = go.split_annotations_by_category(
         {
             "P1": {"GO:0000002", "GO:9999999"},

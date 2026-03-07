@@ -172,6 +172,34 @@ All notebooks are under `notebooks/` and include a top setup cell for notebook-o
 poetry run pytest -q
 ```
 
+### Integration Tests (Real DB)
+
+Integration tests are in `tests/test_biodata_integration.py` and run against a real PostgreSQL instance only when config is available.
+
+Setup:
+
+```bash
+cp config_test.yaml.example config_test.yaml
+```
+
+Edit `config_test.yaml` with your test DB credentials.
+
+Run only integration tests:
+
+```bash
+poetry run pytest -q tests/test_biodata_integration.py
+```
+
+Notes:
+- If DB is unavailable or schema is missing, integration tests are skipped with instructions.
+- You can override config path with `BIODATA_TEST_CONFIG=/path/to/config_test.yaml`.
+
+### Coverage
+
+```bash
+poetry run pytest --cov=CBBIO --cov-report=term-missing -q
+```
+
 ## Type Checking
 
 ```bash
