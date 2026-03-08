@@ -2,5 +2,4 @@ psycopg[binary]
 pgvector
 numpy
 pyyaml
-pytest
 goatools

@@ -1,7 +1,7 @@
 [project]
 name = "biodata"
 version = "0.1.0"
-description = ""
+description = "CBBIO tools for BioData PostgreSQL access and GO semantic analysis"
 authors = [
     {name = "Ildefonso Cases",email = "icases@users.noreply.github.com"}
 ]
@@ -15,8 +15,25 @@ dependencies = [
     "goatools (>=1.5.2,<2.0.0)"
 ]
 
+[project.optional-dependencies]
+dev = [
+    "pytest (>=9.0.2,<10.0.0)",
+    "pyright (>=1.1.408,<2.0.0)",
+    "pytest-cov (>=7.0.0,<8.0.0)"
+]
+notebooks = [
+    "pandas (>=2.2.0,<3.0.0)",
+    "matplotlib (>=3.9.0,<4.0.0)",
+    "seaborn (>=0.13.0,<0.14.0)",
+    "biopython (>=1.84,<2.0.0)",
+    "tqdm (>=4.66.0,<5.0.0)",
+    "jupyter (>=1.1.0,<2.0.0)",
+    "ipykernel (>=6.29.0,<7.0.0)"
+]
+
 [tool.poetry]
-package-mode = false
+package-mode = true
+packages = [{ include = "CBBIO" }]
 
 [tool.poetry.group.dev.dependencies]
 pytest = ">=9.0.2,<10.0.0"

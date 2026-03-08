@@ -16,17 +16,39 @@ Utilities for working with a PostgreSQL BioData database, protein embeddings (`p
 
 ## Installation
 
-Core dependencies only:
+### Private GitHub install (recommended)
+
+Install only the `CBBIO` package and runtime dependencies:
 
 ```bash
-poetry install
+pip install "biodata @ git+ssh://git@github.com/cbbio/BioData.git@main"
 ```
 
-Or via pip requirements:
+Optional extras:
 
 ```bash
-pip install -r requirements.txt
+pip install "biodata[notebooks] @ git+ssh://git@github.com/cbbio/BioData.git@main"
+pip install "biodata[dev] @ git+ssh://git@github.com/cbbio/BioData.git@main"
 ```
+
+### Local repository install
+
+```bash
+pip install .
+```
+
+With extras:
+
+```bash
+pip install ".[notebooks]"
+pip install ".[dev]"
+```
+
+### Requirements files
+
+- Runtime only: `requirements.txt`
+- Dev only: `requirements-dev.txt`
+- Notebook only: `requirements-notebooks.txt`
 
 ## Database Installation
 
