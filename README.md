@@ -6,12 +6,15 @@ Utilities for working with a PostgreSQL BioData database, protein embeddings (`p
 
 - `CBBIO/BioData.py`: database client (`BioDataClient`) for proteins, embeddings, nearest neighbors, and GO annotations.
 - `CBBIO/GO.py`: ontology utilities (`GOOntology`) built on `goatools`.
+- `CBBIO/embeddings.py`: model-agnostic embedding generation interfaces, I/O helpers, and metadata types.
+- `CBBIO/embeddings_prott5.py`: ProtT5-specific embedding adapters/generator.
 - `schema.sql`: database schema.
 - `config.yaml`: default DB/client/search configuration.
 - `notebooks/`: runnable examples:
   - `protein_lookup.ipynb`
   - `nearest_neighbors.ipynb`
   - `go_terms.ipynb`
+  - `sequence_to_neighbors_prott5.ipynb`
   - `distance_vs_semantic_similarity.ipynb`
 
 ## Installation
@@ -161,6 +164,25 @@ Key capabilities:
 
 Detailed API reference: `docs/GO.md`
 
+### `CBBIO.embeddings`
+
+Main entrypoints:
+
+- `EmbeddingGenerator`
+- `load_fasta_inputs`
+- `generate_from_fasta`
+- `load_embedding_records` / `save_embedding_records_*`
+
+Key capabilities:
+
+- Model-agnostic adapter interfaces (`PreprocessorAdapter`, `TokenizerAdapter`, `ModelAdapter`, `PostprocessorAdapter`)
+- Embedding record I/O (`.pkl/.pickle/.npy/.npz`)
+- Reproducibility metadata types (`ModelMetadata`, `RunMetadata`)
+
+Detailed API reference: `docs/Embeddings.md`
+
+Model-specific extension guide: `docs/ModelSpecificEmbeddingModules.md`
+
 ## Notebook Examples
 
 All notebooks are under `notebooks/` and include a top setup cell for notebook-only packages when needed.
@@ -179,6 +201,12 @@ All notebooks are under `notebooks/` and include a top setup cell for notebook-o
 
 - Load GO DAG
 - Build GO statistics and category-level views
+
+### `sequence_to_neighbors_prott5.ipynb`
+
+- Generate a ProtT5 embedding from a raw sequence
+- Choose pooling strategy on the notebook side (mean/max)
+- Query nearest neighbors in BioData and inspect GO annotations
 
 ### `distance_vs_semantic_similarity.ipynb`
 
