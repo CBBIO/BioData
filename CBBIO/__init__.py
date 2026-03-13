@@ -30,6 +30,14 @@ from .GO import (
     load_go,
     read_annotations_tsv,
 )
+from .Taxonomy import (
+    TaxonCountsNotPreparedError,
+    TaxonNotFoundError,
+    TaxonomyError,
+    TaxonomyOntology,
+    load_taxonomy,
+    read_taxonomy_annotations_tsv,
+)
 from .embeddings import (
     EmbeddingBackendError,
     EmbeddingDependencyError,
@@ -148,6 +156,12 @@ __all__ = [
     "SimilarityMethod",
     "load_go",
     "read_annotations_tsv",
+    "TaxonomyOntology",
+    "TaxonomyError",
+    "TaxonNotFoundError",
+    "TaxonCountsNotPreparedError",
+    "load_taxonomy",
+    "read_taxonomy_annotations_tsv",
     "EmbeddingGenerationError",
     "EmbeddingInputError",
     "EmbeddingDependencyError",

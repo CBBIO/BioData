@@ -6,6 +6,7 @@ Utilities for working with a PostgreSQL BioData database, protein embeddings (`p
 
 - `CBBIO/BioData.py`: database client (`BioDataClient`) for proteins, embeddings, nearest neighbors, and GO annotations.
 - `CBBIO/GO.py`: ontology utilities (`GOOntology`) built on `goatools`.
+- `CBBIO/Taxonomy.py`: taxonomy utilities (`TaxonomyOntology`) for NCBI taxdump lineage/LCA/IC analysis.
 - `CBBIO/embeddings.py`: model-agnostic embedding generation interfaces, I/O helpers, and metadata types.
 - `CBBIO/embeddings_prott5.py`: ProtT5-specific embedding adapters/generator.
 - `schema.sql`: database schema.
@@ -14,6 +15,7 @@ Utilities for working with a PostgreSQL BioData database, protein embeddings (`p
   - `protein_lookup.ipynb`
   - `nearest_neighbors.ipynb`
   - `go_terms.ipynb`
+  - `taxonomy_clade_examples.ipynb`
   - `sequence_to_neighbors_prott5.ipynb`
   - `distance_vs_semantic_similarity.ipynb`
 
@@ -164,6 +166,30 @@ Key capabilities:
 
 Detailed API reference: `docs/GO.md`
 
+### `CBBIO.Taxonomy`
+
+Main entrypoints:
+
+- `TaxonomyOntology`
+- `load_taxonomy`
+
+Typical usage:
+
+```python
+from CBBIO.Taxonomy import load_taxonomy
+
+tax = load_taxonomy("/path/to/taxdump")
+```
+
+Key capabilities:
+
+- Taxon navigation: `taxon`, `lineage`, `ancestors`, `descendants`, `common_ancestors`
+- LCA and branch distances: `lowest_common_ancestor`, `minimal_branch_length`
+- Taxon IC modes: `prepare_taxon_counts`, `information_content` (`observed`, `subtree`)
+- Taxonomy annotation reader: `read_taxonomy_annotations_tsv`
+
+Detailed API reference: `docs/Taxonomy.md`
+
 ### `CBBIO.embeddings`
 
 Main entrypoints:
@@ -201,6 +227,13 @@ All notebooks are under `notebooks/` and include a top setup cell for notebook-o
 
 - Load GO DAG
 - Build GO statistics and category-level views
+
+### `taxonomy_clade_examples.ipynb`
+
+- Load NCBI taxonomy (`nodes.dmp` + `names.dmp`)
+- Compute LCA ID/rank/clade for a taxon pair
+- Check same-clade membership at target ranks (genus/family/order)
+- Compute normalized LCA depth and Wu-Palmer taxonomy similarity
 
 ### `sequence_to_neighbors_prott5.ipynb`
 

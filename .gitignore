@@ -5,3 +5,5 @@ __pycache__/
 .venv/
 config_test.yaml
 .coverage
+taxdump/
+taxdump.tar.gz
