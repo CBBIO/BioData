@@ -182,7 +182,7 @@ class ProstT5EmbeddingGenerator(EmbeddingGenerator):
     """Concrete embedding generator for ProstT5 (protein mode only)."""
 
     GENERATOR_CLASS = "prostT5"
-    GENERATOR_ALIASES = ("prostt5", "prost_t5", "prost-t5")
+    GENERATOR_ALIASES = ("prostt5", "prost_t5", "prost-t5", "Prost-T5")
     DEFAULT_MODEL_NAME = "Rostlab/ProstT5"
     FAMILY_MODELS = [DEFAULT_MODEL_NAME]
 

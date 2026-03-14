@@ -145,8 +145,8 @@ class EsmcEmbeddingGenerator(EmbeddingGenerator):
     """Concrete embedding generator for ESM-C family models."""
 
     GENERATOR_CLASS = "esmc"
-    GENERATOR_ALIASES = ("esm-c", "esmc3", "esm3c")
-    DEFAULT_MODEL_NAME = "esmc_300m"
+    GENERATOR_ALIASES = ("esm-c", "esmc3", "esm3c","ESM3c")
+    DEFAULT_MODEL_NAME = "esmc_600m"
     FAMILY_MODELS = sorted(str(value) for value in ESMC_LAYER_SPECS.keys())
 
     def __init__(

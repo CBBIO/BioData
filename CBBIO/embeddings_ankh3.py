@@ -152,7 +152,7 @@ class Ankh3EmbeddingGenerator(EmbeddingGenerator):
     """Concrete embedding generator for ANKH3 models."""
 
     GENERATOR_CLASS = "ankh3"
-    GENERATOR_ALIASES = ("ankh3-large", "ankh3_large")
+    GENERATOR_ALIASES = ("Ankh3-Large", "ankh3_large")
     DEFAULT_MODEL_NAME = "ElnaggarLab/ankh3-large"
     # Published model family members from ANKH/ANKH3 plus the HF checkpoint used by default.
     FAMILY_MODELS = [

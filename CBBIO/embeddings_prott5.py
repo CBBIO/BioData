@@ -176,7 +176,7 @@ class ProtT5EmbeddingGenerator(EmbeddingGenerator):
     """Concrete embedding generator for ProtT5 models."""
 
     GENERATOR_CLASS = "protT5"
-    GENERATOR_ALIASES = ("prott5", "prot_t5", "prot-t5")
+    GENERATOR_ALIASES = ("prott5", "prot_t5", "prot-t5", "Prot-T5")
     DEFAULT_MODEL_NAME = "Rostlab/prot_t5_xl_uniref50"
     FAMILY_MODELS = [DEFAULT_MODEL_NAME]
 

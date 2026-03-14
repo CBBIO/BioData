@@ -158,7 +158,7 @@ class Esm2EmbeddingGenerator(EmbeddingGenerator):
     """Concrete embedding generator for ESM2 family models."""
 
     GENERATOR_CLASS = "esm2"
-    GENERATOR_ALIASES = ("esm-2",)
+    GENERATOR_ALIASES = ("esm-2", "ESM")
     DEFAULT_MODEL_NAME = "esm2_t33_650M_UR50D"
     FAMILY_MODELS = sorted(str(value) for value in ESM2_PRETRAINED_LOADERS.keys())
 
