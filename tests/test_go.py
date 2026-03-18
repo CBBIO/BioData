@@ -100,6 +100,18 @@ def test_go_similarity_unknown_method(go_obo_path: Path) -> None:
         go.semantic_similarity("GO:0000002", "GO:0000002", method="unknown")  # type: ignore[arg-type]
 
 
+def test_go_wang_similarity_without_counts(go_obo_path: Path) -> None:
+    go = load_go(str(go_obo_path))
+    sim = go.semantic_similarity("GO:0000004", "GO:0000002", method="wang")
+    assert sim >= 0.0
+
+
+def test_go_ic_based_similarity_requires_counts(go_obo_path: Path) -> None:
+    go = load_go(str(go_obo_path))
+    with pytest.raises(GOCountsNotPreparedError):
+        go.semantic_similarity("GO:0000004", "GO:0000002", method="lin")
+
+
 def test_go_group_similarity_bma(go_obo_path: Path) -> None:
     go = load_go(str(go_obo_path))
     go.prepare_term_counts(
@@ -114,6 +126,17 @@ def test_go_group_similarity_bma(go_obo_path: Path) -> None:
         {"GO:0000004", "GO:0000002"},
         {"GO:0000003"},
         method="lin",
+    )
+    assert sim is not None
+    assert sim >= 0.0
+
+
+def test_go_group_similarity_bma_wang_without_counts(go_obo_path: Path) -> None:
+    go = load_go(str(go_obo_path))
+    sim = go.group_similarity(
+        {"GO:0000004", "GO:0000002"},
+        {"GO:0000003"},
+        method="wang",
     )
     assert sim is not None
     assert sim >= 0.0

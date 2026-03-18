@@ -49,6 +49,7 @@ class GOOntology:
         )
         self._dag: Any = dag_obj
         self._term_counts: Optional[Any] = None
+        self._wang_ss: Optional[Any] = None
         self.obo_path = str(obo_path)
 
     @property
@@ -122,23 +123,40 @@ class GOOntology:
         """Compute semantic similarity between two GO terms."""
         self._get_term(go_id_a)
         self._get_term(go_id_b)
-        term_counts = self._require_term_counts()
         method_value = method.strip().lower()
 
         from goatools import semantic as goat_semantic  # type: ignore
         semantic_mod = cast(Any, goat_semantic)
 
         if method_value == "resnik":
+            term_counts = self._require_term_counts()
             sim_fn = cast(Callable[..., Any], semantic_mod.resnik_sim)
             return _as_float(sim_fn(go_id_a, go_id_b, self._dag, term_counts))
         if method_value == "lin":
+            term_counts = self._require_term_counts()
             sim_fn = cast(Callable[..., Any], semantic_mod.lin_sim)
             return _as_float(sim_fn(go_id_a, go_id_b, self._dag, term_counts))
         if method_value == "schlicker":
+            term_counts = self._require_term_counts()
             sim_fn = cast(Callable[..., Any], semantic_mod.schlicker_sim)
             return _as_float(sim_fn(go_id_a, go_id_b, self._dag, term_counts))
+        if method_value == "wang":
+            # Compatibility path for goatools versions exposing a direct semantic.wang_sim.
+            sim_fn = cast(Callable[..., Any], getattr(semantic_mod, "wang_sim", None))
+            if callable(sim_fn):
+                try:
+                    return _as_float(sim_fn(go_id_a, go_id_b, self._dag))
+                except TypeError:
+                    term_counts = self._require_term_counts()
+                    return _as_float(sim_fn(go_id_a, go_id_b, self._dag, term_counts))
 
-        raise GOError("Unknown method. Use one of: resnik, lin, schlicker.")
+            wang_ss = self._get_wang_ss()
+            get_sim_fn = cast(Callable[..., Any], getattr(wang_ss, "get_sim", None))
+            if not callable(get_sim_fn):
+                raise GOError("Wang method is not available in the installed goatools version.")
+            return _as_float(get_sim_fn(go_id_a, go_id_b))
+
+        raise GOError("Unknown method. Use one of: resnik, lin, schlicker, wang.")
 
     def group_similarity(
         self,
@@ -273,8 +291,17 @@ class GOOntology:
 
     def _require_term_counts(self) -> Any:
         if self._term_counts is None:
-            raise GOCountsNotPreparedError("Call prepare_term_counts(...) before IC/similarity operations.")
+            raise GOCountsNotPreparedError("Call prepare_term_counts(...) before IC-based similarity operations.")
         return self._term_counts
+
+    def _get_wang_ss(self) -> Any:
+        if self._wang_ss is None:
+            try:
+                from goatools.semsim.termwise.wang import SsWang  # type: ignore
+            except ModuleNotFoundError as exc:
+                raise GOError("Wang method is not available in the installed goatools version.") from exc
+            self._wang_ss = SsWang(self.go_ids, self._dag)
+        return self._wang_ss
 
 
 def load_go(

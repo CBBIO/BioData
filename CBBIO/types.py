@@ -11,7 +11,7 @@ GOID: TypeAlias = str
 StructureID: TypeAlias = str
 
 DistanceMetric: TypeAlias = Literal["l2", "cosine", "inner_product"]
-SimilarityMethod: TypeAlias = Literal["resnik", "lin", "schlicker"]
+SimilarityMethod: TypeAlias = Literal["resnik", "lin", "schlicker", "wang"]
 EmbeddingModel: TypeAlias = int | str
 EmbeddingVector: TypeAlias = Sequence[float]
 

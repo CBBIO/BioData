@@ -95,19 +95,22 @@ Computes semantic similarity between two terms.
   - `resnik`
   - `lin`
   - `schlicker`
+  - `wang`
 - Behavior:
-  - Requires valid terms and prepared term counts.
-  - Dispatches to corresponding goatools semantic function.
+  - Requires valid terms.
+  - For `resnik`, `lin`, and `schlicker`, requires prepared term counts.
+  - For `wang`, uses goatools Wang termwise implementation.
+  - Dispatches to the corresponding goatools semantic implementation.
 - Raises:
   - `GOTermNotFoundError` if any term is unknown.
-  - `GOCountsNotPreparedError` if term counts are missing.
+  - `GOCountsNotPreparedError` if term counts are missing for IC-based methods.
   - `GOError` if method is unsupported.
 
 ### `group_similarity(terms_a, terms_b, *, method="resnik", aggregate="bma")`
 Computes group-to-group similarity using best-match average (BMA).
 - Parameters:
   - `terms_a`, `terms_b`: GO-term collections.
-  - `method`: semantic similarity method (`resnik`, `lin`, `schlicker`).
+  - `method`: semantic similarity method (`resnik`, `lin`, `schlicker`, `wang`).
   - `aggregate`: only `bma` is supported.
 - Behavior:
   - For each term in one set, takes max similarity against the other set.
