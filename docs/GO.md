@@ -1,7 +1,7 @@
 # CBBIO/GO.py Documentation
 
 ## General Description
-`CBBIO.GO` provides ontology utilities built on top of `goatools`, independent from database access. It wraps a GO DAG (`GOOntology`) and adds methods for term lookup, graph navigation, information content, semantic similarity, annotation grouping by GO category, and branch-distance calculations. It also includes file-based annotation loading helpers.
+`CBBIO.GO` provides ontology utilities built on top of `goatools`, independent from database access. It wraps a GO DAG (`GOOntology`) and adds methods for term lookup, graph navigation, term-to-term relationship queries, information content, semantic similarity, annotation grouping by GO category, and branch-distance calculations. It also includes file-based annotation loading helpers.
 
 Main dependencies:
 - `goatools` for ontology parsing and semantic metrics.
@@ -59,6 +59,84 @@ Returns all descendant GO IDs for a term.
   - Output is sorted.
 - Raises:
   - `GOTermNotFoundError` for unknown term.
+
+### `direct_parents(go_id)`
+Returns direct parents of a term.
+- Behavior:
+  - Uses the goatools term object's direct `parents`.
+  - Output is sorted.
+- Raises:
+  - `GOTermNotFoundError` for unknown term.
+
+### `direct_children(go_id)`
+Returns direct children of a term.
+- Behavior:
+  - Uses the goatools term object's direct `children`.
+  - Output is sorted.
+- Raises:
+  - `GOTermNotFoundError` for unknown term.
+
+### `is_parent(candidate_parent_id, go_id)`
+Returns `True` when `candidate_parent_id` is a direct parent of `go_id`.
+
+### `is_child(candidate_child_id, go_id)`
+Returns `True` when `candidate_child_id` is a direct child of `go_id`.
+
+### `is_ancestor(candidate_ancestor_id, go_id, *, include_self=False)`
+Returns `True` when `candidate_ancestor_id` is an ancestor of `go_id`.
+- `include_self=True` treats identical terms as related.
+
+### `is_ascendant(candidate_ascendant_id, go_id, *, include_self=False)`
+Alias of `is_ancestor(...)`.
+
+### `is_descendant(candidate_descendant_id, go_id, *, include_self=False)`
+Returns `True` when `candidate_descendant_id` is a descendant of `go_id`.
+- `include_self=True` treats identical terms as related.
+
+### `is_descendent(candidate_descendent_id, go_id, *, include_self=False)`
+Alias of `is_descendant(...)`.
+
+### `are_in_the_same_path(go_id_a, go_id_b, *, include_self=True)`
+Returns `True` when one term lies on the ancestor/descendant path of the other.
+- Equivalent to checking whether `a` is an ancestor of `b` or `b` is an ancestor of `a`.
+
+### `find_relation(go_id_a, go_id_b)`
+Returns the closest directed relation between two terms.
+- Possible values:
+  - `same`
+  - `parent`
+  - `child`
+  - `ancestor`
+  - `descendant`
+  - `non-related`
+- Precedence is exact match first, then direct relations, then indirect relations.
+
+### `relation_rank(relation)`
+Returns integer priority for a relation label.
+- Lower rank means closer relation.
+- Current ordering:
+  - `same`
+  - `parent`
+  - `child`
+  - `ancestor`
+  - `descendant`
+  - `non-related`
+- Raises:
+  - `GOError` on unknown relation label.
+
+### `best_relation_matches(go_id, other_terms)`
+Finds the closest relation from one term to a group of terms.
+- Behavior:
+  - Filters invalid GO IDs from `other_terms`.
+  - Computes `find_relation(go_id, other_go_id)` for each valid term.
+  - Keeps all terms tied for the best relation level.
+- Returns dict:
+  - `{"relation": <best_relation>, "matches": [<go_id>, ...]}`
+
+### `best_relation_map(terms_a, terms_b)`
+Applies `best_relation_matches(...)` to each valid term in `terms_a`.
+- Returns mapping:
+  - `{term_in_a: {"relation": <best_relation>, "matches": [...]}, ...}`
 
 ### `common_ancestors(go_id_a, go_id_b, *, include_terms=True)`
 Computes shared ancestors between two terms.
@@ -153,6 +231,13 @@ Splits `entity -> GO IDs` into category-specific mappings.
   - Skips unknown GO IDs.
   - Skips IDs whose namespace does not map to canonical categories.
   - Keeps values as sets for de-duplication.
+
+### `filter_valid_terms(go_ids, *, sort=True)`
+Returns unique GO IDs that exist in the currently loaded DAG.
+- Behavior:
+  - Drops invalid/unknown GO IDs.
+  - Removes duplicates.
+  - Sorts by default.
 
 ### `minimal_branch_length(go_id_a, go_id_b, *, branch_dist=None)`
 Returns minimum branch distance between two GO terms.

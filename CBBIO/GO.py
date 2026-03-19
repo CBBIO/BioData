@@ -27,6 +27,15 @@ class GOCountsNotPreparedError(GOError):
 class GOOntology:
     """Wrapper around a GO DAG with convenience helpers."""
 
+    _RELATION_RANKS: Dict[str, int] = {
+        "same": 0,
+        "parent": 1,
+        "child": 2,
+        "ancestor": 3,
+        "descendant": 4,
+        "non-related": 5,
+    }
+
     def __init__(
         self,
         obo_path: str,
@@ -50,6 +59,10 @@ class GOOntology:
         self._dag: Any = dag_obj
         self._term_counts: Optional[Any] = None
         self._wang_ss: Optional[Any] = None
+        self._direct_parent_cache: Dict[str, Set[str]] = {}
+        self._direct_child_cache: Dict[str, Set[str]] = {}
+        self._ancestor_cache: Dict[str, Set[str]] = {}
+        self._descendant_cache: Dict[str, Set[str]] = {}
         self.obo_path = str(obo_path)
 
     @property
@@ -71,23 +84,137 @@ class GOOntology:
         }
 
     def ancestors(self, go_id: str, *, include_self: bool = False) -> List[str]:
-        term_obj = self._get_term(go_id)
-        values = {str(value) for value in term_obj.get_all_parents()}
+        values = set(self._ancestor_set(go_id))
         if include_self:
             values.add(go_id)
         return sorted(values)
 
     def descendants(self, go_id: str, *, include_self: bool = False) -> List[str]:
-        term_obj = self._get_term(go_id)
-        values = {str(value) for value in term_obj.get_all_children()}
+        values = set(self._descendant_set(go_id))
         if include_self:
             values.add(go_id)
         return sorted(values)
+
+    def direct_parents(self, go_id: str) -> List[str]:
+        """Return direct parents of ``go_id`` as sorted GO IDs."""
+        return sorted(self._direct_parent_set(go_id))
+
+    def direct_children(self, go_id: str) -> List[str]:
+        """Return direct children of ``go_id`` as sorted GO IDs."""
+        return sorted(self._direct_child_set(go_id))
+
+    def is_parent(self, candidate_parent_id: str, go_id: str) -> bool:
+        """Return ``True`` when ``candidate_parent_id`` is a direct parent of ``go_id``."""
+        self._get_term(candidate_parent_id)
+        return str(candidate_parent_id) in self._direct_parent_set(go_id)
+
+    def is_child(self, candidate_child_id: str, go_id: str) -> bool:
+        """Return ``True`` when ``candidate_child_id`` is a direct child of ``go_id``."""
+        self._get_term(candidate_child_id)
+        return str(candidate_child_id) in self._direct_child_set(go_id)
+
+    def is_ancestor(self, candidate_ancestor_id: str, go_id: str, *, include_self: bool = False) -> bool:
+        """Return ``True`` when ``candidate_ancestor_id`` is an ancestor of ``go_id``."""
+        self._get_term(candidate_ancestor_id)
+        if include_self and str(candidate_ancestor_id) == str(go_id):
+            return True
+        return str(candidate_ancestor_id) in self._ancestor_set(go_id)
+
+    def is_ascendant(self, candidate_ascendant_id: str, go_id: str, *, include_self: bool = False) -> bool:
+        """Alias for :meth:`is_ancestor` using ascendant terminology."""
+        return self.is_ancestor(candidate_ascendant_id, go_id, include_self=include_self)
+
+    def is_descendant(self, candidate_descendant_id: str, go_id: str, *, include_self: bool = False) -> bool:
+        """Return ``True`` when ``candidate_descendant_id`` is a descendant of ``go_id``."""
+        self._get_term(candidate_descendant_id)
+        if include_self and str(candidate_descendant_id) == str(go_id):
+            return True
+        return str(candidate_descendant_id) in self._descendant_set(go_id)
+
+    def is_descendent(self, candidate_descendent_id: str, go_id: str, *, include_self: bool = False) -> bool:
+        """Alias for :meth:`is_descendant` preserving alternate spelling."""
+        return self.is_descendant(candidate_descendent_id, go_id, include_self=include_self)
+
+    def are_in_the_same_path(self, go_id_a: str, go_id_b: str, *, include_self: bool = True) -> bool:
+        """Return ``True`` when one term lies on the ancestor/descendant path of the other."""
+        self._get_term(go_id_a)
+        self._get_term(go_id_b)
+        return self.is_ancestor(go_id_a, go_id_b, include_self=include_self) or self.is_ancestor(
+            go_id_b, go_id_a, include_self=include_self
+        )
+
+    def find_relation(self, go_id_a: str, go_id_b: str) -> str:
+        """Return the closest directed relation between two terms.
+
+        Possible values are:
+        ``same``, ``parent``, ``child``, ``ancestor``, ``descendant``, ``non-related``.
+        """
+        self._get_term(go_id_a)
+        self._get_term(go_id_b)
+
+        if str(go_id_a) == str(go_id_b):
+            return "same"
+        if self.is_parent(go_id_a, go_id_b):
+            return "parent"
+        if self.is_child(go_id_a, go_id_b):
+            return "child"
+        if self.is_ancestor(go_id_a, go_id_b):
+            return "ancestor"
+        if self.is_descendant(go_id_a, go_id_b):
+            return "descendant"
+        return "non-related"
+
+    def relation_rank(self, relation: str) -> int:
+        """Return integer priority for a relation label; lower means closer."""
+        value = str(relation).strip().lower()
+        if value not in self._RELATION_RANKS:
+            raise GOError(f"Unknown relation: {relation}")
+        return self._RELATION_RANKS[value]
+
+    def best_relation_matches(self, go_id: str, other_terms: Collection[str]) -> Dict[str, object]:
+        """Return the closest relation from ``go_id`` to a group of terms plus all matching terms."""
+        self._get_term(go_id)
+        valid_terms = self.filter_valid_terms(other_terms)
+        if not valid_terms:
+            return {"relation": "non-related", "matches": []}
+
+        best_relation = "non-related"
+        best_rank = self.relation_rank(best_relation)
+        matches: List[str] = []
+
+        for other_go_id in valid_terms:
+            relation = self.find_relation(go_id, other_go_id)
+            rank = self.relation_rank(relation)
+            if rank < best_rank:
+                best_relation = relation
+                best_rank = rank
+                matches = [other_go_id]
+            elif rank == best_rank:
+                matches.append(other_go_id)
+
+        return {"relation": best_relation, "matches": matches}
+
+    def best_relation_map(
+        self,
+        terms_a: Collection[str],
+        terms_b: Collection[str],
+    ) -> Dict[str, Dict[str, object]]:
+        """Map each valid term in ``terms_a`` to its closest relation against ``terms_b``."""
+        valid_terms_a = self.filter_valid_terms(terms_a)
+        return {
+            go_id: self.best_relation_matches(go_id, terms_b)
+            for go_id in valid_terms_a
+        }
 
     def common_ancestors(self, go_id_a: str, go_id_b: str, *, include_terms: bool = True) -> List[str]:
         ancestors_a = set(self.ancestors(go_id_a, include_self=include_terms))
         ancestors_b = set(self.ancestors(go_id_b, include_self=include_terms))
         return sorted(ancestors_a.intersection(ancestors_b))
+
+    def filter_valid_terms(self, go_ids: Collection[str], *, sort: bool = True) -> List[str]:
+        """Return unique GO IDs present in the loaded DAG."""
+        values = {str(go_id) for go_id in go_ids if self.has_term(str(go_id))}
+        return sorted(values) if sort else list(values)
 
     def prepare_term_counts(
         self,
@@ -288,6 +415,38 @@ class GOOntology:
         if term_obj is None:
             raise GOTermNotFoundError(f"GO term not found: {go_id}")
         return term_obj
+
+    def _direct_parent_set(self, go_id: str) -> Set[str]:
+        go_id = str(go_id)
+        if go_id not in self._direct_parent_cache:
+            term_obj = self._get_term(go_id)
+            self._direct_parent_cache[go_id] = {
+                str(parent.id) for parent in getattr(term_obj, "parents", set())
+            }
+        return self._direct_parent_cache[go_id]
+
+    def _direct_child_set(self, go_id: str) -> Set[str]:
+        go_id = str(go_id)
+        if go_id not in self._direct_child_cache:
+            term_obj = self._get_term(go_id)
+            self._direct_child_cache[go_id] = {
+                str(child.id) for child in getattr(term_obj, "children", set())
+            }
+        return self._direct_child_cache[go_id]
+
+    def _ancestor_set(self, go_id: str) -> Set[str]:
+        go_id = str(go_id)
+        if go_id not in self._ancestor_cache:
+            term_obj = self._get_term(go_id)
+            self._ancestor_cache[go_id] = {str(value) for value in term_obj.get_all_parents()}
+        return self._ancestor_cache[go_id]
+
+    def _descendant_set(self, go_id: str) -> Set[str]:
+        go_id = str(go_id)
+        if go_id not in self._descendant_cache:
+            term_obj = self._get_term(go_id)
+            self._descendant_cache[go_id] = {str(value) for value in term_obj.get_all_children()}
+        return self._descendant_cache[go_id]
 
     def _require_term_counts(self) -> Any:
         if self._term_counts is None:

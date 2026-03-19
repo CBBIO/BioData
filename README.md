@@ -160,6 +160,7 @@ go = load_go("go-basic.obo")
 Key capabilities:
 
 - Term navigation: `term`, `ancestors`, `descendants`, `common_ancestors`
+- Relationship helpers: `direct_parents`, `direct_children`, `find_relation`, `best_relation_matches`, `best_relation_map`
 - IC and semantic similarity: `prepare_term_counts`, `information_content`, `semantic_similarity`
 - Group comparison: `group_similarity` (BMA)
 - Category splitting: `split_annotations_by_category` (`mf`, `bp`, `cc`)

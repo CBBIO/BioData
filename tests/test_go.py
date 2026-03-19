@@ -55,6 +55,124 @@ def test_go_ancestors_descendants(go_obo_path: Path) -> None:
     assert go.descendants("GO:0000001") == ["GO:0000002", "GO:0000003", "GO:0000004"]
 
 
+def test_go_direct_relationship_lists(go_obo_path: Path) -> None:
+    go = load_go(str(go_obo_path))
+    assert go.direct_parents("GO:0000004") == ["GO:0000002"]
+    assert go.direct_children("GO:0000001") == ["GO:0000002", "GO:0000003"]
+    assert go.direct_children("GO:0000004") == []
+
+
+def test_go_relationship_predicates(go_obo_path: Path) -> None:
+    go = load_go(str(go_obo_path))
+
+    assert go.is_parent("GO:0000002", "GO:0000004")
+    assert not go.is_parent("GO:0000001", "GO:0000004")
+
+    assert go.is_child("GO:0000004", "GO:0000002")
+    assert not go.is_child("GO:0000004", "GO:0000001")
+
+    assert go.is_ancestor("GO:0000001", "GO:0000004")
+    assert go.is_ascendant("GO:0000001", "GO:0000004")
+    assert not go.is_ancestor("GO:0000004", "GO:0000001")
+
+    assert go.is_descendant("GO:0000004", "GO:0000001")
+    assert go.is_descendent("GO:0000004", "GO:0000001")
+    assert not go.is_descendant("GO:0000001", "GO:0000004")
+
+    assert go.is_ancestor("GO:0000004", "GO:0000004", include_self=True)
+    assert go.is_descendant("GO:0000004", "GO:0000004", include_self=True)
+
+
+def test_go_same_path_predicate(go_obo_path: Path) -> None:
+    go = load_go(str(go_obo_path))
+
+    assert go.are_in_the_same_path("GO:0000001", "GO:0000004")
+    assert go.are_in_the_same_path("GO:0000004", "GO:0000001")
+    assert go.are_in_the_same_path("GO:0000002", "GO:0000004")
+    assert not go.are_in_the_same_path("GO:0000003", "GO:0000004")
+    assert go.are_in_the_same_path("GO:0000004", "GO:0000004")
+    assert not go.are_in_the_same_path("GO:0000004", "GO:0000004", include_self=False)
+
+
+def test_go_find_relation(go_obo_path: Path) -> None:
+    go = load_go(str(go_obo_path))
+
+    assert go.find_relation("GO:0000004", "GO:0000004") == "same"
+    assert go.find_relation("GO:0000002", "GO:0000004") == "parent"
+    assert go.find_relation("GO:0000004", "GO:0000002") == "child"
+    assert go.find_relation("GO:0000001", "GO:0000004") == "ancestor"
+    assert go.find_relation("GO:0000004", "GO:0000001") == "descendant"
+    assert go.find_relation("GO:0000003", "GO:0000004") == "non-related"
+
+
+def test_go_filter_valid_terms(go_obo_path: Path) -> None:
+    go = load_go(str(go_obo_path))
+
+    assert go.filter_valid_terms(["GO:0000004", "GO:9999999", "GO:0000002", "GO:0000004"]) == [
+        "GO:0000002",
+        "GO:0000004",
+    ]
+    assert set(go.filter_valid_terms(["GO:0000004", "GO:9999999", "GO:0000002"], sort=False)) == {
+        "GO:0000002",
+        "GO:0000004",
+    }
+
+
+def test_go_relation_rank(go_obo_path: Path) -> None:
+    go = load_go(str(go_obo_path))
+
+    assert go.relation_rank("same") < go.relation_rank("parent")
+    assert go.relation_rank("parent") < go.relation_rank("ancestor")
+    assert go.relation_rank("ancestor") < go.relation_rank("non-related")
+
+
+def test_go_relation_rank_unknown(go_obo_path: Path) -> None:
+    go = load_go(str(go_obo_path))
+
+    with pytest.raises(GOError):
+        go.relation_rank("mystery")
+
+
+def test_go_best_relation_matches(go_obo_path: Path) -> None:
+    go = load_go(str(go_obo_path))
+
+    result = go.best_relation_matches("GO:0000004", ["GO:0000001", "GO:0000002", "GO:0000003"])
+    assert result == {"relation": "child", "matches": ["GO:0000002"]}
+
+    result = go.best_relation_matches("GO:0000001", ["GO:0000002", "GO:0000003", "GO:9999999"])
+    assert result == {"relation": "parent", "matches": ["GO:0000002", "GO:0000003"]}
+
+    result = go.best_relation_matches("GO:0000004", ["GO:9999999"])
+    assert result == {"relation": "non-related", "matches": []}
+
+
+def test_go_best_relation_map(go_obo_path: Path) -> None:
+    go = load_go(str(go_obo_path))
+
+    result = go.best_relation_map(
+        ["GO:0000001", "GO:0000004", "GO:9999999"],
+        ["GO:0000002", "GO:0000003"],
+    )
+
+    assert result == {
+        "GO:0000001": {"relation": "parent", "matches": ["GO:0000002", "GO:0000003"]},
+        "GO:0000004": {"relation": "child", "matches": ["GO:0000002"]},
+    }
+
+
+def test_go_new_relation_helpers_term_not_found(go_obo_path: Path) -> None:
+    go = load_go(str(go_obo_path))
+
+    with pytest.raises(GOTermNotFoundError):
+        go.are_in_the_same_path("GO:9999999", "GO:0000004")
+
+    with pytest.raises(GOTermNotFoundError):
+        go.find_relation("GO:9999999", "GO:0000004")
+
+    with pytest.raises(GOTermNotFoundError):
+        go.best_relation_matches("GO:9999999", ["GO:0000004"])
+
+
 def test_go_term_not_found(go_obo_path: Path) -> None:
     go = load_go(str(go_obo_path))
     with pytest.raises(GOTermNotFoundError):
