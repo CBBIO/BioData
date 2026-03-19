@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import sys
 import types
+import warnings
 from typing import Any, List, Optional, Sequence, Tuple
 
 import pytest
@@ -229,6 +230,8 @@ def test_get_protein_embeddings_variants() -> None:
 
 def test_find_nearest_neighbors_for_proteins_groups_rows_and_respects_include_query_flag() -> None:
     responses = [
+        _Response(one={"embedding": [0.1, 0.2, 0.3]}),
+        _Response(one={"exists": True}),
         _Response(
             all=[
                 ("Q1", "N1", 0, 0.1),
@@ -250,9 +253,35 @@ def test_find_nearest_neighbors_for_proteins_groups_rows_and_respects_include_qu
 
     assert [n.protein_id for n in grouped["Q1"]] == ["N1", "N2"]
     assert grouped["Q2"] == []
-    sql, params = conn.executed[0]
+    sql, params = conn.executed[2]
     assert "<=>" in sql
-    assert params == (["Q1", "Q2"], 3, 0, 3, 0, False, 2)
+    assert "halfvec(3)" in sql
+    assert "query_sequence_id" in sql
+    assert params == (["Q1", "Q2"], 3, 0, 3, 0, 2)
+
+
+def test_warn_if_missing_ann_index_no_warning_when_index_exists() -> None:
+    responses = [_Response(one={"exists": True})]
+    client, _ = _client_with_fake_conn(responses)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        client._warn_if_missing_ann_index(embedding_type_id=3, layer_index=0, metric="cosine")
+
+    assert len(caught) == 0
+
+
+def test_warn_if_missing_ann_index_warns_once_when_index_missing() -> None:
+    responses = [_Response(one={"exists": False})]
+    client, _ = _client_with_fake_conn(responses)
+
+    with pytest.warns(RuntimeWarning, match="No matching HNSW index detected"):
+        client._warn_if_missing_ann_index(embedding_type_id=3, layer_index=0, metric="cosine")
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        client._warn_if_missing_ann_index(embedding_type_id=3, layer_index=0, metric="cosine")
+    assert len(caught) == 0
 
 
 def test_find_nearest_neighbors_for_proteins_rejects_invalid_k() -> None:

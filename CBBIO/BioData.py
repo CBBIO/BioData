@@ -1102,7 +1102,7 @@ class BioDataClient:
                         FROM pg_indexes
                         WHERE schemaname = 'public'
                           AND tablename = 'sequence_embeddings'
-                          AND indexdef ILIKE '%USING hnsw%'
+                          AND indexdef ILIKE '%%USING hnsw%%'
                           AND indexdef ILIKE %s
                           AND indexdef ILIKE %s
                           AND indexdef ILIKE %s
