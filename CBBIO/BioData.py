@@ -7,6 +7,7 @@ It focuses on embedding search and GO annotation retrieval.
 from __future__ import annotations
 
 import os
+import warnings
 from collections.abc import Mapping as MappingABC
 from contextlib import contextmanager
 from pathlib import Path
@@ -226,6 +227,8 @@ class BioDataClient:
         self.default_metric: DistanceMetric = defaults["default_metric"]
         self.default_k: int = defaults["default_k"]
         self._conn: Any = None
+        self._ann_index_presence_cache: Dict[Tuple[int, int, str], bool] = {}
+        self._ann_index_warned: Set[Tuple[int, int, str]] = set()
 
     def __enter__(self) -> "BioDataClient":
         self.connect()
@@ -994,10 +997,29 @@ class BioDataClient:
         effective_k = self.default_k if k is None else int(k)
         if effective_k < 1:
             raise BioDataError("k must be >= 1")
+        dim_row = self.query_one(
+            """
+            SELECT embedding
+            FROM sequence_embeddings
+            WHERE embedding_type_id = %s
+              AND layer_index = %s
+            LIMIT 1;
+            """,
+            (embedding_type_id, layer_index),
+        )
+        if dim_row is None or dim_row.get("embedding") is None:
+            return {}
+        dim = _embedding_dimension(dim_row["embedding"])
+        self._warn_if_missing_ann_index(embedding_type_id, layer_index, effective_metric)
+
+        exclude_clause = ""
+        if not include_query:
+            exclude_clause = " AND se2.sequence_id <> q.query_sequence_id "
 
         sql = (
             "WITH query_embeddings AS ("
             "    SELECT p.id AS query_protein_id, "
+            "           p.sequence_id AS query_sequence_id, "
             "           se.embedding AS query_embedding "
             "    FROM protein p "
             "    JOIN sequence s ON p.sequence_id = s.id "
@@ -1013,16 +1035,22 @@ class BioDataClient:
             "FROM query_embeddings q "
             "LEFT JOIN LATERAL ("
             "    SELECT p2.id AS protein_id, "
-            "           se2.layer_index, "
-            f"           se2.embedding {operator} q.query_embedding AS distance "
-            "    FROM sequence_embeddings se2 "
-            "    JOIN sequence s2 ON se2.sequence_id = s2.id "
-            "    JOIN protein p2 ON p2.sequence_id = s2.id "
-            "    WHERE se2.embedding_type_id = %s "
-            "      AND se2.layer_index = %s "
-            "      AND (%s OR p2.id <> q.query_protein_id) "
-            f"    ORDER BY se2.embedding {operator} q.query_embedding "
-            "    LIMIT %s"
+            "           c.layer_index, "
+            "           c.distance "
+            "    FROM ("
+            "        SELECT se2.sequence_id, "
+            "               se2.layer_index, "
+            f"               (se2.embedding::halfvec({dim})) {operator} "
+            f"               (q.query_embedding::halfvec({dim})) AS distance "
+            "        FROM sequence_embeddings se2 "
+            "        WHERE se2.embedding_type_id = %s "
+            "          AND se2.layer_index = %s "
+            f"         {exclude_clause}"
+            f"        ORDER BY (se2.embedding::halfvec({dim})) {operator} (q.query_embedding::halfvec({dim})) "
+            "        LIMIT %s"
+            "    ) c "
+            "    JOIN protein p2 ON p2.sequence_id = c.sequence_id "
+            "    ORDER BY c.distance"
             ") n ON TRUE "
             "ORDER BY q.query_protein_id, n.distance;"
         )
@@ -1033,7 +1061,6 @@ class BioDataClient:
             layer_index,
             embedding_type_id,
             layer_index,
-            bool(include_query),
             effective_k,
         )
 
@@ -1055,6 +1082,50 @@ class BioDataClient:
                 )
             )
         return grouped
+
+    def _warn_if_missing_ann_index(
+        self,
+        embedding_type_id: int,
+        layer_index: int,
+        metric: DistanceMetric,
+    ) -> None:
+        metric_name = str(metric).strip().lower()
+        opclass = _metric_opclass(metric_name)
+        cache_key = (int(embedding_type_id), int(layer_index), metric_name)
+        cached = self._ann_index_presence_cache.get(cache_key)
+        if cached is None:
+            has_index = bool(
+                self.scalar(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1
+                        FROM pg_indexes
+                        WHERE schemaname = 'public'
+                          AND tablename = 'sequence_embeddings'
+                          AND indexdef ILIKE '%USING hnsw%'
+                          AND indexdef ILIKE %s
+                          AND indexdef ILIKE %s
+                          AND indexdef ILIKE %s
+                    );
+                    """,
+                    (
+                        f"%embedding_type_id = {int(embedding_type_id)}%",
+                        f"%layer_index = {int(layer_index)}%",
+                        f"%{opclass}%",
+                    ),
+                )
+            )
+            self._ann_index_presence_cache[cache_key] = has_index
+            cached = has_index
+        if (not cached) and cache_key not in self._ann_index_warned:
+            warnings.warn(
+                "No matching HNSW index detected for sequence_embeddings "
+                f"(embedding_type_id={embedding_type_id}, layer_index={layer_index}, metric={metric_name}). "
+                "Nearest-neighbor search will run in slow mode.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            self._ann_index_warned.add(cache_key)
 
     def fetch_go_annotations(self, protein_ids: Sequence[str]) -> Dict[str, List[GOAnnotation]]:
         """Fetch GO annotations grouped by protein ID."""
@@ -1225,6 +1296,19 @@ def _metric_operator(metric: DistanceMetric) -> str:
     if operator is None:
         raise BioDataError(f"Unsupported metric: {metric!r}. Use one of: l2, cosine, inner_product.")
     return operator
+
+
+def _metric_opclass(metric: DistanceMetric) -> str:
+    mapping = {
+        "l2": "halfvec_l2_ops",
+        "cosine": "halfvec_cosine_ops",
+        "inner_product": "halfvec_ip_ops",
+    }
+    key = str(metric).strip().lower()
+    opclass = mapping.get(key)
+    if opclass is None:
+        raise BioDataError(f"Unsupported metric: {metric!r}. Use one of: l2, cosine, inner_product.")
+    return opclass
 
 
 def _embedding_dimension(query_embedding: Any) -> int:
