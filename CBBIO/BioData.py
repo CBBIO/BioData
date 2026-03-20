@@ -252,7 +252,7 @@ class BioDataClient:
             raise DriverDependencyError("Missing dependency 'psycopg'. Install with: pip install psycopg[binary]") from exc
 
         psycopg_module = cast(Any, psycopg)
-        conn: Any = psycopg_module.connect(self.dsn, autocommit=self.autocommit)
+        conn: Any = psycopg_module.connect(self.dsn, autocommit=self.autocommit, prepare_threshold=None)
 
         if self.register_halfvec:
             try:
