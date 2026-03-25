@@ -206,6 +206,26 @@ class TaxonomyOntology:
             return 1.0
         return (2.0 * float(self._depth_by_taxon[lca])) / float(denom)
 
+    def lin_similarity(self, tax_id_a: str, tax_id_b: str, *, mode: str = "observed") -> Optional[float]:
+        """Return Lin similarity: 2*IC(LCA) / (IC(a) + IC(b)).
+
+        Returns None if the LCA cannot be determined.
+        Returns 1.0 if both IC values are zero (e.g. both are the root taxon).
+        Requires prepare_taxon_counts(..., mode=mode) to have been called first.
+        """
+        taxon_a = self._require_taxon(tax_id_a)
+        taxon_b = self._require_taxon(tax_id_b)
+        lca = self.lowest_common_ancestor(taxon_a, taxon_b)
+        if lca is None:
+            return None
+        ic_a = self.information_content(taxon_a, mode=mode)
+        ic_b = self.information_content(taxon_b, mode=mode)
+        ic_lca = self.information_content(lca, mode=mode)
+        denom = ic_a + ic_b
+        if denom == 0.0:
+            return 1.0
+        return (2.0 * ic_lca) / denom
+
     def prepare_taxon_counts(
         self,
         annotations: Mapping[str, Collection[str]],

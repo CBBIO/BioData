@@ -124,6 +124,83 @@ def test_read_taxonomy_annotations_tsv(tmp_path: Path) -> None:
     assert rows["Q2"] == {"10090"}
 
 
+def test_lin_similarity_requires_prepared_counts(taxdump_dir: Path) -> None:
+    tax = load_taxonomy(str(taxdump_dir))
+    with pytest.raises(TaxonCountsNotPreparedError):
+        tax.lin_similarity("83333", "9606")
+
+
+def test_lin_similarity_same_taxon(taxdump_dir: Path) -> None:
+    # lin_similarity(a, a) == 1.0 for any taxon with IC > 0
+    tax = load_taxonomy(str(taxdump_dir))
+    ann = {"Q1": {"83333"}, "Q2": {"562"}, "Q3": {"9606"}, "Q4": {"10090"}}
+    tax.prepare_taxon_counts(ann, mode="observed")
+    assert tax.lin_similarity("83333", "83333") == pytest.approx(1.0)
+    assert tax.lin_similarity("9606", "9606") == pytest.approx(1.0)
+
+
+def test_lin_similarity_root_taxon_returns_one(taxdump_dir: Path) -> None:
+    # Root taxon has IC=0; lin_similarity(root, root) → denom=0, returns 1.0 by convention
+    tax = load_taxonomy(str(taxdump_dir))
+    ann = {"Q1": {"83333"}, "Q2": {"9606"}}
+    tax.prepare_taxon_counts(ann, mode="observed")
+    assert tax.lin_similarity("1", "1") == pytest.approx(1.0)
+
+
+def test_lin_similarity_distant_taxa_zero(taxdump_dir: Path) -> None:
+    # LCA of bacteria and eukaryote is root (IC=0) → lin similarity = 0
+    tax = load_taxonomy(str(taxdump_dir))
+    ann = {"Q1": {"83333"}, "Q2": {"9606"}, "Q3": {"10090"}, "Q4": {"562"}}
+    tax.prepare_taxon_counts(ann, mode="observed")
+    assert tax.lin_similarity("83333", "9606") == pytest.approx(0.0)
+    assert tax.lin_similarity("562", "10090") == pytest.approx(0.0)
+
+
+def test_lin_similarity_symmetric(taxdump_dir: Path) -> None:
+    tax = load_taxonomy(str(taxdump_dir))
+    ann = {"Q1": {"83333"}, "Q2": {"562"}, "Q3": {"9606"}, "Q4": {"10090"}}
+    tax.prepare_taxon_counts(ann, mode="observed")
+    assert tax.lin_similarity("9606", "10090") == pytest.approx(tax.lin_similarity("10090", "9606"))
+    assert tax.lin_similarity("83333", "562") == pytest.approx(tax.lin_similarity("562", "83333"))
+
+
+def test_lin_similarity_known_values(taxdump_dir: Path) -> None:
+    # With 4 equally weighted entities the probabilities are exact fractions.
+    # Tree used: 83333 -> 562 -> 1224 -> 2 -> 1 (bacteria branch)
+    #            9606, 10090 -> 2759 -> 1 (eukaryote branch)
+    # counts: 1→4, 2→2, 1224→2, 562→2, 83333→1, 2759→2, 9606→1, 10090→1
+    # IC(83333)=log4, IC(562)=log2, IC(9606)=IC(10090)=log4, IC(2759)=log2, IC(1)=0
+    import math
+
+    tax = load_taxonomy(str(taxdump_dir))
+    ann = {"Q1": {"83333"}, "Q2": {"562"}, "Q3": {"9606"}, "Q4": {"10090"}}
+    tax.prepare_taxon_counts(ann, mode="observed")
+
+    # lin("9606", "10090"): LCA=2759, IC_lca=log2, IC_a=log4, IC_b=log4
+    # = 2*log2 / (log4+log4) = 2*log2 / (4*log2) = 0.5
+    assert tax.lin_similarity("9606", "10090") == pytest.approx(0.5)
+
+    # lin("83333", "562"): LCA=562, IC_lca=log2, IC_a=log4, IC_b=log2
+    # = 2*log2 / (log4 + log2) = 2*log2 / (3*log2) = 2/3
+    assert tax.lin_similarity("83333", "562") == pytest.approx(2.0 / 3.0)
+
+    # lin("562", "1224"): LCA=1224, IC_lca=log2, IC_a=log2, IC_b=log2
+    # = 2*log2 / (log2 + log2) = 1.0
+    assert tax.lin_similarity("562", "1224") == pytest.approx(1.0)
+
+
+def test_lin_similarity_monotone_with_proximity(taxdump_dir: Path) -> None:
+    # Closer pairs should have higher Lin similarity than distant ones.
+    tax = load_taxonomy(str(taxdump_dir))
+    ann = {"Q1": {"83333"}, "Q2": {"562"}, "Q3": {"9606"}, "Q4": {"10090"}}
+    tax.prepare_taxon_counts(ann, mode="observed")
+    # E. coli strain vs E. coli species (close) > E. coli vs Homo sapiens (far)
+    close = tax.lin_similarity("83333", "562")
+    far = tax.lin_similarity("83333", "9606")
+    assert close is not None and far is not None
+    assert close > far
+
+
 def test_taxonomy_smoke_deterministic_outputs(taxdump_dir: Path) -> None:
     tax = load_taxonomy(str(taxdump_dir))
     ann = {"A": {"83333"}, "B": {"9606"}, "C": {"10090"}}
