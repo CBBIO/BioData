@@ -4,11 +4,14 @@ from pathlib import Path
 
 import pytest
 
+import CBBIO.Taxonomy as taxonomy_mod
 from CBBIO.Taxonomy import (
     TaxonCountsNotPreparedError,
     TaxonNotFoundError,
     TaxonomyError,
+    compute_taxon_ic_and_lin_maps,
     load_taxonomy,
+    normalize_taxonomy_id,
     read_taxonomy_annotations_tsv,
 )
 
@@ -75,6 +78,23 @@ def test_taxonomy_errors(taxdump_dir: Path) -> None:
         tax.prepare_taxon_counts({}, mode="invalid")
 
 
+def test_taxonomy_whole_db_ic(monkeypatch: pytest.MonkeyPatch, taxdump_dir: Path) -> None:
+    import math
+
+    tax = load_taxonomy(str(taxdump_dir))
+
+    monkeypatch.setattr(
+        taxonomy_mod,
+        "_fetch_whole_db_taxonomy_annotations",
+        lambda: {"Q1": {"83333"}, "Q2": {"562"}, "Q3": {"9606"}, "Q4": {"10090"}},
+    )
+
+    tax.prepare_taxon_counts({}, mode="whole_db")
+
+    assert tax.information_content("83333", mode="whole_db") == pytest.approx(math.log(4.0))
+    assert tax.lin_similarity("83333", "562", mode="whole_db") == pytest.approx(2.0 / 3.0)
+
+
 def test_taxonomy_observed_ic(taxdump_dir: Path) -> None:
     tax = load_taxonomy(str(taxdump_dir))
     ann = {
@@ -122,6 +142,48 @@ def test_read_taxonomy_annotations_tsv(tmp_path: Path) -> None:
     rows = read_taxonomy_annotations_tsv(str(path))
     assert rows["Q1"] == {"9606"}
     assert rows["Q2"] == {"10090"}
+
+
+def test_normalize_taxonomy_id() -> None:
+    assert normalize_taxonomy_id("4577") == "4577"
+    assert normalize_taxonomy_id("4577.0") == "4577"
+    assert normalize_taxonomy_id(4577.0) == "4577"
+    assert normalize_taxonomy_id("") == ""
+    assert normalize_taxonomy_id("nan") == ""
+
+
+def test_compute_taxon_ic_and_lin_maps(taxdump_dir: Path) -> None:
+    tax = load_taxonomy(str(taxdump_dir))
+    query_ic_map, lin_map = compute_taxon_ic_and_lin_maps(
+        tax,
+        ["83333", "9606", "nan", "999999"],
+        ["562", "10090", "9606", "10090"],
+    )
+
+    assert query_ic_map["83333"] > 0.0
+    assert query_ic_map["9606"] > 0.0
+    assert query_ic_map[""] == 0.0
+    assert query_ic_map["999999"] == 0.0
+    assert lin_map[("83333", "562")] == pytest.approx(tax.lin_similarity("83333", "562", mode="subtree"))
+    assert lin_map[("9606", "10090")] == pytest.approx(tax.lin_similarity("9606", "10090", mode="subtree"))
+    assert lin_map[("", "9606")] == 0.0
+    assert lin_map[("999999", "10090")] == 0.0
+
+
+def test_compute_taxon_ic_and_lin_maps_accepts_observed_background(taxdump_dir: Path) -> None:
+    import math
+
+    tax = load_taxonomy(str(taxdump_dir))
+    query_ic_map, lin_map = compute_taxon_ic_and_lin_maps(
+        tax,
+        ["83333", "9606"],
+        ["562", "10090"],
+        observed_tax_ids=["83333", "562", "9606", "10090"],
+    )
+
+    assert query_ic_map["83333"] == pytest.approx(math.log(4.0))
+    assert query_ic_map["9606"] == pytest.approx(math.log(4.0))
+    assert lin_map[("83333", "562")] == pytest.approx(tax.lin_similarity("83333", "562", mode="subtree"))
 
 
 def test_lin_similarity_requires_prepared_counts(taxdump_dir: Path) -> None:

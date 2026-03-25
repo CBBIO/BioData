@@ -8,7 +8,7 @@ from __future__ import annotations
 import math
 from collections import defaultdict
 from pathlib import Path
-from typing import Collection, Dict, List, Mapping, Optional, Sequence, Set, Tuple
+from typing import Collection, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
 
 class TaxonomyError(Exception):
@@ -67,6 +67,10 @@ class TaxonomyOntology:
             "parent_id": self._parent_by_taxon[value],
             "depth": self._depth_by_taxon[value],
         }
+
+    def normalize_taxon_id(self, tax_id: object) -> str:
+        """Return a canonical taxonomy-ID string suitable for lookups."""
+        return normalize_taxonomy_id(tax_id)
 
     def ancestors(self, tax_id: str, *, include_self: bool = False) -> List[str]:
         taxon = self._require_taxon(tax_id)
@@ -234,9 +238,10 @@ class TaxonomyOntology:
     ) -> None:
         mode_value = _normalize_mode(mode)
 
-        if mode_value == "observed":
+        if mode_value in {"observed", "whole_db"}:
+            source_annotations = annotations if mode_value == "observed" else _fetch_whole_db_taxonomy_annotations()
             entity_to_expanded_taxa: Dict[str, Set[str]] = {}
-            for entity_id, raw_taxa in annotations.items():
+            for entity_id, raw_taxa in source_annotations.items():
                 expanded: Set[str] = set()
                 for raw_tax_id in raw_taxa:
                     tax_id = str(raw_tax_id)
@@ -270,7 +275,7 @@ class TaxonomyOntology:
         probabilities = self._prepared_probabilities.get(mode_value)
         if probabilities is None:
             raise TaxonCountsNotPreparedError(
-                "Call prepare_taxon_counts(..., mode='observed'|'subtree') before IC operations."
+                "Call prepare_taxon_counts(..., mode='observed'|'whole_db'|'subtree') before IC operations."
             )
 
         probability = float(probabilities.get(value, 0.0))
@@ -308,6 +313,101 @@ def load_taxonomy(
     return TaxonomyOntology(taxdump_dir, names_priority=names_priority, quiet=quiet)
 
 
+def normalize_taxonomy_id(value: object) -> str:
+    """Convert taxonomy IDs to canonical string form.
+
+    Integer-like floats such as ``4577.0`` are normalized to ``"4577"``.
+    Empty values and NaN-like strings normalize to ``""``.
+    """
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if not text or text.lower() == "nan":
+        return ""
+    try:
+        numeric = float(text)
+    except Exception:
+        return text
+    if not math.isfinite(numeric):
+        return ""
+    if numeric.is_integer():
+        return str(int(numeric))
+    return text
+
+
+def compute_taxon_ic_and_lin_maps(
+    taxonomy: TaxonomyOntology,
+    query_tax_ids: Iterable[object],
+    subject_tax_ids: Optional[Iterable[object]] = None,
+    *,
+    observed_tax_ids: Optional[Iterable[object]] = None,
+    observed_mode: str = "observed",
+) -> Tuple[Dict[str, float], Dict[Tuple[str, str], float]]:
+    """Compute taxonomy IC and Lin-similarity lookup maps.
+
+    Returns ``(query_taxon_ic_map, taxon_lin_similarity_map)`` where:
+    - ``query_taxon_ic_map`` maps normalized query taxonomy IDs to observed IC
+    - ``taxon_lin_similarity_map`` maps ``(query_tax_id, subject_tax_id)`` pairs to
+      Lin similarity using ``mode='subtree'``
+
+    When ``observed_mode='whole_db'``, observed IC is prepared from the full BioData protein table.
+    When ``observed_tax_ids`` is provided, observed IC is computed from that background.
+    Otherwise, observed IC uses the union of query and subject taxonomy IDs.
+    """
+    normalized_query_tax_ids = [normalize_taxonomy_id(value) for value in query_tax_ids]
+    normalized_subject_tax_ids = (
+        [normalize_taxonomy_id(value) for value in subject_tax_ids]
+        if subject_tax_ids is not None
+        else None
+    )
+
+    observed_mode_value = _normalize_mode(observed_mode)
+    if observed_tax_ids is not None:
+        normalized_observed_tax_ids = [normalize_taxonomy_id(value) for value in observed_tax_ids]
+        all_taxa: Set[str] = set()
+        for tax_id in normalized_observed_tax_ids:
+            if tax_id and taxonomy.has_taxon(tax_id):
+                all_taxa.add(tax_id)
+        annotations: Dict[str, Set[str]] = {tax_id: {tax_id} for tax_id in all_taxa}
+        taxonomy.prepare_taxon_counts(annotations, mode="observed")
+        observed_mode_value = "observed"
+    elif observed_mode_value == "whole_db":
+        taxonomy.prepare_taxon_counts({}, mode="whole_db")
+    else:
+        all_taxa: Set[str] = set()
+        for tax_id in normalized_query_tax_ids:
+            if tax_id and taxonomy.has_taxon(tax_id):
+                all_taxa.add(tax_id)
+        if normalized_subject_tax_ids is not None:
+            for tax_id in normalized_subject_tax_ids:
+                if tax_id and taxonomy.has_taxon(tax_id):
+                    all_taxa.add(tax_id)
+        annotations = {tax_id: {tax_id} for tax_id in all_taxa}
+        taxonomy.prepare_taxon_counts(annotations, mode="observed")
+
+    query_taxon_ic_map: Dict[str, float] = {}
+    for tax_id in set(normalized_query_tax_ids):
+        if not tax_id or not taxonomy.has_taxon(tax_id):
+            query_taxon_ic_map[tax_id] = 0.0
+        else:
+            query_taxon_ic_map[tax_id] = taxonomy.information_content(tax_id, mode=observed_mode_value)
+
+    taxon_lin_similarity_map: Dict[Tuple[str, str], float] = {}
+    if normalized_subject_tax_ids is not None:
+        taxonomy.prepare_taxon_counts({}, mode="subtree")
+        for query_tax_id, subject_tax_id in set(zip(normalized_query_tax_ids, normalized_subject_tax_ids)):
+            if not query_tax_id or not taxonomy.has_taxon(query_tax_id):
+                taxon_lin_similarity_map[(query_tax_id, subject_tax_id)] = 0.0
+                continue
+            if not subject_tax_id or not taxonomy.has_taxon(subject_tax_id):
+                taxon_lin_similarity_map[(query_tax_id, subject_tax_id)] = 0.0
+                continue
+            sim = taxonomy.lin_similarity(query_tax_id, subject_tax_id, mode="subtree")
+            taxon_lin_similarity_map[(query_tax_id, subject_tax_id)] = 0.0 if sim is None else float(sim)
+
+    return query_taxon_ic_map, taxon_lin_similarity_map
+
+
 def read_taxonomy_annotations_tsv(
     path: str,
     *,
@@ -336,9 +436,34 @@ def read_taxonomy_annotations_tsv(
 
 def _normalize_mode(mode: str) -> str:
     value = str(mode).strip().lower()
-    if value not in {"observed", "subtree"}:
-        raise TaxonomyError("Unknown mode. Use one of: observed, subtree.")
+    if value not in {"observed", "whole_db", "subtree"}:
+        raise TaxonomyError("Unknown mode. Use one of: observed, whole_db, subtree.")
     return value
+
+
+def _fetch_whole_db_taxonomy_annotations() -> Dict[str, Set[str]]:
+    try:
+        from .BioData import BioDataClient
+    except ModuleNotFoundError as exc:
+        raise TaxonomyError("Missing BioData client dependencies for mode='whole_db'.") from exc
+
+    with BioDataClient() as client:
+        rows = client.query_all(
+            """
+            SELECT id, taxonomy_id
+            FROM protein
+            WHERE taxonomy_id IS NOT NULL;
+            """
+        )
+
+    annotations: Dict[str, Set[str]] = {}
+    for row in rows:
+        entity_id = str(row.get("id", "")).strip()
+        tax_id = normalize_taxonomy_id(row.get("taxonomy_id"))
+        if not entity_id or not tax_id:
+            continue
+        annotations.setdefault(entity_id, set()).add(tax_id)
+    return annotations
 
 
 def _split_taxdump_fields(line: str) -> List[str]:
@@ -463,6 +588,8 @@ __all__ = [
     "TaxonomyError",
     "TaxonNotFoundError",
     "TaxonCountsNotPreparedError",
+    "compute_taxon_ic_and_lin_maps",
     "load_taxonomy",
+    "normalize_taxonomy_id",
     "read_taxonomy_annotations_tsv",
 ]

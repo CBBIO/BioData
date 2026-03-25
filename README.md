@@ -186,7 +186,8 @@ Key capabilities:
 
 - Taxon navigation: `taxon`, `lineage`, `ancestors`, `descendants`, `common_ancestors`
 - LCA and branch distances: `lowest_common_ancestor`, `minimal_branch_length`
-- Taxon IC modes: `prepare_taxon_counts`, `information_content` (`observed`, `subtree`)
+- Taxon IC and similarity: `prepare_taxon_counts`, `information_content`, `lin_similarity` (`observed`, `whole_db`, `subtree`)
+- Taxon ID normalization and reusable feature maps: `normalize_taxonomy_id`, `compute_taxon_ic_and_lin_maps`
 - Taxonomy annotation reader: `read_taxonomy_annotations_tsv`
 
 Detailed API reference: `docs/Taxonomy.md`
@@ -234,7 +235,7 @@ All notebooks are under `notebooks/` and include a top setup cell for notebook-o
 - Load NCBI taxonomy (`nodes.dmp` + `names.dmp`)
 - Compute LCA ID/rank/clade for a taxon pair
 - Check same-clade membership at target ranks (genus/family/order)
-- Compute normalized LCA depth and Wu-Palmer taxonomy similarity
+- Compute normalized LCA depth, Wu-Palmer taxonomy similarity, taxon IC, and Lin similarity
 
 ### `sequence_to_neighbors_prott5.ipynb`
 
