@@ -14,6 +14,7 @@ DistanceMetric: TypeAlias = Literal["l2", "cosine", "inner_product"]
 SimilarityMethod: TypeAlias = Literal["resnik", "lin", "schlicker", "wang"]
 EmbeddingModel: TypeAlias = int | str
 EmbeddingVector: TypeAlias = Sequence[float]
+SearchBackend: TypeAlias = Literal["auto", "gpu", "pgvector", "faiss_gpu", "torch_gpu"]
 
 
 @dataclass(frozen=True)
@@ -48,6 +49,7 @@ __all__ = [
     "SimilarityMethod",
     "EmbeddingModel",
     "EmbeddingVector",
+    "SearchBackend",
     "EmbeddingType",
     "Neighbor",
     "GOAnnotation",

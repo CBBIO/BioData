@@ -115,6 +115,7 @@ from .types import (
     GOID,
     Neighbor,
     ProteinID,
+    SearchBackend,
     SimilarityMethod,
     StructureID,
 )
@@ -131,6 +132,7 @@ __all__ = [
     "DistanceMetric",
     "EmbeddingModel",
     "EmbeddingVector",
+    "SearchBackend",
     "ProteinID",
     "GOID",
     "StructureID",

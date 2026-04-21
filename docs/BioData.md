@@ -10,6 +10,11 @@
 
 The central class is `BioDataClient`, which manages an open DB connection and exposes high-level retrieval/search APIs.
 
+Search implementation note:
+- `BioDataClient` is the public entrypoint and facade.
+- Neighbor-search routing and backend implementations are delegated to the internal `CBBIO/search/` package.
+- This split keeps DB access and domain lookups in `BioData.py` while isolating search-specific logic such as pgvector SQL, backend routing, GPU residency, and diagnostics.
+
 ## Exceptions
 - `BioDataError`: base module exception.
 - `DriverDependencyError`: missing optional runtime dependency (`psycopg`, `pgvector`, `pyyaml`, or `numpy` depending on path).
@@ -221,24 +226,39 @@ Batch version of `get_protein_embedding`.
 - Returns `{}` for empty input.
 - Raises `DriverDependencyError` when `as_numpy=True` without NumPy.
 
-### `find_nearest_neighbors(query_embedding, embedding_type_id, layer_index=0, k=None, *, metric=None, exclude_protein_ids=None, use_ann=False, ann_ef_search=200, ann_candidate_pool=None)`
-Nearest-neighbor search with pgvector.
-- Supports exact search or ANN preselection (`use_ann=True`).
+### `find_nearest_neighbors(query_embedding, embedding_type_id, layer_index=0, k=None, *, metric=None, exclude_protein_ids=None, use_ann=False, ann_ef_search=200, ann_candidate_pool=None, backend=None, device=None)`
+Nearest-neighbor search with backend routing.
+- Supports `backend="auto"|"gpu"|"pgvector"|"faiss_gpu"|"torch_gpu"`.
+- `auto` uses static heuristics based on batch size, hardware availability, and resident GPU index state.
+- `gpu` prefers accelerated backends and falls back cleanly when unavailable.
+- `use_ann=True` is supported by pgvector and FAISS; Torch fallback degrades to exact search.
 - Applies metric operator from `_metric_operator`.
 - Supports excluding specific protein IDs.
-- ANN mode details:
+- pgvector ANN mode details:
   - uses inferred embedding dimension for halfvec cast,
   - candidate pool defaults to `max(k*20, 200)` when not set,
   - can set session-level `hnsw.ef_search`.
 - Returns list of `Neighbor` dataclass values.
+- Diagnostics for the last routed search are exposed via `client.last_search_diagnostics`.
 - Raises `BioDataError` if `k < 1`.
 
-### `find_nearest_neighbors_for_proteins(protein_ids, embedding_type_id, layer_index=0, k=None, *, metric=None, include_query=False)`
-Batch nearest-neighbor search for multiple query proteins in one SQL statement.
-- Uses a CTE with per-query lateral nearest-neighbor subquery.
+Internal implementation:
+- public method on `BioDataClient`
+- delegated to `CBBIO/search/service.py`
+- backend-specific helpers are isolated from the main client module
+
+### `find_nearest_neighbors_for_proteins(protein_ids, embedding_type_id, layer_index=0, k=None, *, metric=None, include_query=False, backend=None, device=None)`
+Batch nearest-neighbor search for multiple query proteins.
+- Supports the same backend routing options as `find_nearest_neighbors(...)`.
+- Uses pgvector SQL for the PostgreSQL path and exact GPU search for FAISS/Torch paths.
 - Returns mapping: `query_protein_id -> list[Neighbor]`.
 - Query proteins without embeddings are omitted.
+- Diagnostics for the last routed search are exposed via `client.last_search_diagnostics`.
 - Raises `BioDataError` if `k < 1`.
+
+Internal implementation:
+- public method on `BioDataClient`
+- delegated to `CBBIO/search/service.py`
 
 ### `fetch_go_annotations(protein_ids)`
 Batch fetch GO annotations for proteins.
@@ -250,7 +270,7 @@ Fetches only GO IDs grouped by protein.
 - If `protein_ids is None`, scans all annotation rows.
 - Returns mapping `protein_id -> set[go_id]`.
 
-### `neighbors_with_go(query_uniprot_id, embedding_type_id, layer_index=0, k=None, *, metric=None, include_query=False, use_ann=False)`
+### `neighbors_with_go(query_uniprot_id, embedding_type_id, layer_index=0, k=None, *, metric=None, include_query=False, use_ann=False, backend=None, device=None)`
 End-to-end helper pipeline:
 1. Load query protein embedding.
 2. Run nearest-neighbor search.

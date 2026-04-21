@@ -7,13 +7,14 @@ It focuses on embedding search and GO annotation retrieval.
 from __future__ import annotations
 
 import os
-import warnings
 from collections.abc import Mapping as MappingABC
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Sequence, Set, Tuple, Union, cast
 
-from .types import DistanceMetric, EmbeddingModel, EmbeddingType, GOAnnotation, Neighbor
+from .search.types import DEFAULT_BACKEND_THRESHOLDS as _DEFAULT_BACKEND_THRESHOLDS
+from .search.types import ResolvedSearchBackend, _BackendAvailability, _GpuSearchState, _ResolvedBackend
+from .types import DistanceMetric, EmbeddingModel, EmbeddingType, GOAnnotation, Neighbor, SearchBackend
 
 
 Params = Union[Sequence[Any], Mapping[str, Any], None]
@@ -36,6 +37,20 @@ class NotFoundError(BioDataError):
     """Raised when an expected BioData record is not found."""
 
 
+from .search.utils import (
+    _as_numpy_matrix,
+    _cuda_device_index,
+    _import_faiss,
+    _import_torch,
+    _normalize_distance,
+    _preferred_faiss_device,
+    _preferred_torch_device,
+    _prepare_index_vectors,
+    _tensor_to_list,
+    _torch_normalize,
+)
+
+
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.yaml"
 REQUIRED_TABLES: Tuple[str, ...] = (
     "protein",
@@ -45,6 +60,7 @@ REQUIRED_TABLES: Tuple[str, ...] = (
     "protein_go_term_annotation",
     "go_terms",
 )
+DEFAULT_SEARCH_BACKEND: SearchBackend = "auto"
 
 
 def _default_config_dict() -> ConfigDict:
@@ -63,6 +79,8 @@ def _default_config_dict() -> ConfigDict:
         "search": {
             "default_metric": "l2",
             "default_k": 10,
+            "default_backend": "auto",
+            "backend_thresholds": _DEFAULT_BACKEND_THRESHOLDS,
         },
     }
 
@@ -97,6 +115,26 @@ def _parse_bool(value: str, *, env_name: str) -> bool:
     raise BioDataError(f"Invalid boolean value for {env_name}: {value!r}")
 
 
+def _normalize_backend_thresholds(raw: object) -> Dict[str, Dict[str, int]]:
+    normalized = {
+        hardware: dict(values)
+        for hardware, values in _DEFAULT_BACKEND_THRESHOLDS.items()
+    }
+    if not isinstance(raw, MappingABC):
+        return normalized
+
+    for hardware_key, threshold_values in cast(Mapping[Any, Any], raw).items():
+        hardware = str(hardware_key).strip().lower()
+        if hardware not in normalized or not isinstance(threshold_values, MappingABC):
+            continue
+        for threshold_key, threshold_value in cast(Mapping[Any, Any], threshold_values).items():
+            try:
+                normalized[hardware][str(threshold_key)] = int(threshold_value)
+            except (TypeError, ValueError):
+                continue
+    return normalized
+
+
 def _apply_env_overrides(config: Mapping[str, Any]) -> ConfigDict:
     db = _to_config_dict(config.get("database"))
     client = _to_config_dict(config.get("client"))
@@ -124,6 +162,8 @@ def _apply_env_overrides(config: Mapping[str, Any]) -> ConfigDict:
         search["default_metric"] = os.getenv("BIODATA_DEFAULT_METRIC")
     if os.getenv("BIODATA_DEFAULT_K") is not None:
         search["default_k"] = int(os.getenv("BIODATA_DEFAULT_K", "10"))
+    if os.getenv("BIODATA_DEFAULT_BACKEND") is not None:
+        search["default_backend"] = os.getenv("BIODATA_DEFAULT_BACKEND")
 
     return {
         "database": db,
@@ -177,6 +217,9 @@ def _config_defaults(config: Mapping[str, Any]) -> ConfigDict:
     metric = str(search_config.get("default_metric", "l2")).strip().lower()
     if metric not in {"l2", "cosine", "inner_product"}:
         raise BioDataError(f"Invalid search.default_metric: {metric!r}")
+    backend = str(search_config.get("default_backend", DEFAULT_SEARCH_BACKEND)).strip().lower()
+    if backend not in {"auto", "gpu", "pgvector", "faiss_gpu", "torch_gpu"}:
+        raise BioDataError(f"Invalid search.default_backend: {backend!r}")
 
     return {
         "host": host,
@@ -189,6 +232,8 @@ def _config_defaults(config: Mapping[str, Any]) -> ConfigDict:
         "register_halfvec": bool(client_config.get("register_halfvec", True)),
         "default_metric": metric,
         "default_k": int(search_config.get("default_k", 10)),
+        "default_backend": backend,
+        "backend_thresholds": _normalize_backend_thresholds(search_config.get("backend_thresholds")),
     }
 
 
@@ -205,6 +250,7 @@ DEFAULT_AUTOCOMMIT = _DEFAULTS["autocommit"]
 DEFAULT_REGISTER_HALFVEC = _DEFAULTS["register_halfvec"]
 DEFAULT_SEARCH_METRIC: DistanceMetric = _DEFAULTS["default_metric"]
 DEFAULT_SEARCH_K = _DEFAULTS["default_k"]
+DEFAULT_SEARCH_BACKEND_NAME: SearchBackend = _DEFAULTS["default_backend"]
 
 
 class BioDataClient:
@@ -226,9 +272,17 @@ class BioDataClient:
         self.register_halfvec = defaults["register_halfvec"] if register_halfvec is None else register_halfvec
         self.default_metric: DistanceMetric = defaults["default_metric"]
         self.default_k: int = defaults["default_k"]
+        self.default_backend: SearchBackend = defaults["default_backend"]
+        self.backend_thresholds: Dict[str, Dict[str, int]] = cast(Dict[str, Dict[str, int]], defaults["backend_thresholds"])
         self._conn: Any = None
         self._ann_index_presence_cache: Dict[Tuple[int, int, str], bool] = {}
         self._ann_index_warned: Set[Tuple[int, int, str]] = set()
+        self._search_backend_warned: Set[Tuple[str, str, str, str, bool]] = set()
+        self._gpu_search_state: Optional[_GpuSearchState] = None
+        self._last_search_diagnostics: Dict[str, Any] = {}
+        from .search.service import SearchService
+
+        self._search = SearchService(self)
 
     def __enter__(self) -> "BioDataClient":
         self.connect()
@@ -240,6 +294,10 @@ class BioDataClient:
     @property
     def is_connected(self) -> bool:
         return self._conn is not None
+
+    @property
+    def last_search_diagnostics(self) -> Dict[str, Any]:
+        return dict(self._last_search_diagnostics)
 
     def connect(self) -> None:
         """Open a psycopg connection and register pgvector halfvec support."""
@@ -275,6 +333,7 @@ class BioDataClient:
             return
         self._conn.close()
         self._conn = None
+        self._gpu_search_state = None
 
     @contextmanager
     def transaction(self) -> Iterator[None]:
@@ -873,104 +932,23 @@ class BioDataClient:
         use_ann: bool = False,
         ann_ef_search: int = 200,
         ann_candidate_pool: Optional[int] = None,
+        backend: Optional[SearchBackend] = None,
+        device: Optional[str] = None,
     ) -> List[Neighbor]:
-        """Find nearest proteins using pgvector distance operators.
-
-        Metrics:
-        - ``l2``: ``<->``
-        - ``cosine``: ``<=>``
-        - ``inner_product``: ``<#>``
-        """
-        conn = self._require_connection()
-        effective_metric = metric or self.default_metric
-        operator = _metric_operator(effective_metric)
-        effective_k = self.default_k if k is None else int(k)
-        if effective_k < 1:
-            raise BioDataError("k must be >= 1")
-
-        excluded_ids = [str(value) for value in (exclude_protein_ids or [])]
-        if use_ann:
-            dim = _embedding_dimension(query_embedding)
-            candidate_limit = (
-                max(effective_k, int(ann_candidate_pool))
-                if ann_candidate_pool is not None
-                else max(effective_k * 20, 200)
-            )
-            extra_where = ""
-            params = [
-                embedding_type_id,
-                layer_index,
-                query_embedding,
-                candidate_limit,
-                query_embedding,
-            ]
-            if excluded_ids:
-                extra_where = " AND p.id <> ALL(%s)"
-                params.append(excluded_ids)
-
-            sql = (
-                "WITH ann_candidates AS ("
-                "    SELECT se.sequence_id, "
-                "           se.layer_index, "
-                "           se.embedding "
-                "    FROM sequence_embeddings se "
-                "    WHERE se.embedding_type_id = %s "
-                "      AND se.layer_index = %s "
-                f"    ORDER BY (se.embedding::halfvec({dim})) {operator} %s::halfvec "
-                "    LIMIT %s"
-                "), protein_candidates AS ("
-                "    SELECT p.id AS protein_id, "
-                "           c.layer_index, "
-                f"           c.embedding {operator} %s::halfvec AS distance "
-                "    FROM ann_candidates c "
-                "    JOIN protein p ON p.sequence_id = c.sequence_id "
-                "    WHERE TRUE"
-                f"{extra_where}"
-                "), dedup AS ("
-                "    SELECT protein_id, "
-                "           MIN(layer_index) AS layer_index, "
-                "           MIN(distance) AS distance "
-                "    FROM protein_candidates "
-                "    GROUP BY protein_id"
-                ") "
-                "SELECT protein_id, layer_index, distance "
-                "FROM dedup "
-                "ORDER BY distance "
-                "LIMIT %s;"
-            )
-            params.append(effective_k)
-        else:
-            extra_where = ""
-            params = [query_embedding, embedding_type_id, layer_index]
-            if excluded_ids:
-                extra_where = " AND p.id <> ALL(%s)"
-                params.append(excluded_ids)
-
-            sql = (
-                "SELECT p.id AS protein_id, "
-                "       se.layer_index, "
-                f"       se.embedding {operator} %s::halfvec AS distance "
-                "FROM sequence_embeddings se "
-                "JOIN sequence s ON se.sequence_id = s.id "
-                "JOIN protein p ON p.sequence_id = s.id "
-                "WHERE se.embedding_type_id = %s "
-                "  AND se.layer_index = %s"
-                f"{extra_where} "
-                f"ORDER BY se.embedding {operator} %s::halfvec "
-                "LIMIT %s;"
-            )
-            params.extend([query_embedding, effective_k])
-
-        with _cursor(conn) as cur:
-            if use_ann and ann_ef_search > 0:
-                cur.execute(f"SET hnsw.ef_search = {int(ann_ef_search)};")
-            cur.execute(sql, tuple(params))
-            rows = cur.fetchall()
-
-        neighbors: List[Neighbor] = []
-        for protein_id, row_layer, distance in rows:
-            neighbors.append(Neighbor(protein_id=str(protein_id), layer_index=int(row_layer), distance=float(distance)))
-        return neighbors
+        """Find nearest proteins using the configured search backend."""
+        return self._search.find_nearest_neighbors(
+            query_embedding,
+            embedding_type_id,
+            layer_index=layer_index,
+            k=k,
+            metric=metric,
+            exclude_protein_ids=exclude_protein_ids,
+            use_ann=use_ann,
+            ann_ef_search=ann_ef_search,
+            ann_candidate_pool=ann_candidate_pool,
+            backend=backend,
+            device=device,
+        )
 
     def find_nearest_neighbors_for_proteins(
         self,
@@ -981,107 +959,329 @@ class BioDataClient:
         *,
         metric: Optional[DistanceMetric] = None,
         include_query: bool = False,
+        backend: Optional[SearchBackend] = None,
+        device: Optional[str] = None,
     ) -> Dict[str, List[Neighbor]]:
-        """Find nearest neighbors for many proteins in one query.
-
-        Returns a mapping from query protein ID to a list of neighbors.
-        Query proteins missing embeddings are omitted from the mapping.
-        """
-        ids = [str(value) for value in protein_ids]
-        if not ids:
-            return {}
-
-        conn = self._require_connection()
-        effective_metric = metric or self.default_metric
-        operator = _metric_operator(effective_metric)
-        effective_k = self.default_k if k is None else int(k)
-        if effective_k < 1:
-            raise BioDataError("k must be >= 1")
-        dim_row = self.query_one(
-            """
-            SELECT embedding
-            FROM sequence_embeddings
-            WHERE embedding_type_id = %s
-              AND layer_index = %s
-            LIMIT 1;
-            """,
-            (embedding_type_id, layer_index),
-        )
-        if dim_row is None or dim_row.get("embedding") is None:
-            return {}
-        dim = _embedding_dimension(dim_row["embedding"])
-        self._warn_if_missing_ann_index(embedding_type_id, layer_index, effective_metric)
-
-        exclude_clause = ""
-        if not include_query:
-            exclude_clause = " AND se2.sequence_id <> q.query_sequence_id "
-
-        sql = (
-            "WITH query_embeddings AS ("
-            "    SELECT p.id AS query_protein_id, "
-            "           p.sequence_id AS query_sequence_id, "
-            "           se.embedding AS query_embedding "
-            "    FROM protein p "
-            "    JOIN sequence s ON p.sequence_id = s.id "
-            "    JOIN sequence_embeddings se ON se.sequence_id = s.id "
-            "    WHERE p.id = ANY(%s) "
-            "      AND se.embedding_type_id = %s "
-            "      AND se.layer_index = %s"
-            ") "
-            "SELECT q.query_protein_id, "
-            "       n.protein_id, "
-            "       n.layer_index, "
-            "       n.distance "
-            "FROM query_embeddings q "
-            "LEFT JOIN LATERAL ("
-            "    SELECT p2.id AS protein_id, "
-            "           c.layer_index, "
-            "           c.distance "
-            "    FROM ("
-            "        SELECT se2.sequence_id, "
-            "               se2.layer_index, "
-            f"               (se2.embedding::halfvec({dim})) {operator} "
-            f"               (q.query_embedding::halfvec({dim})) AS distance "
-            "        FROM sequence_embeddings se2 "
-            "        WHERE se2.embedding_type_id = %s "
-            "          AND se2.layer_index = %s "
-            f"         {exclude_clause}"
-            f"        ORDER BY (se2.embedding::halfvec({dim})) {operator} (q.query_embedding::halfvec({dim})) "
-            "        LIMIT %s"
-            "    ) c "
-            "    JOIN protein p2 ON p2.sequence_id = c.sequence_id "
-            "    ORDER BY c.distance"
-            ") n ON TRUE "
-            "ORDER BY q.query_protein_id, n.distance;"
-        )
-
-        params = (
-            ids,
+        """Find nearest neighbors for many proteins using the configured backend."""
+        return self._search.find_nearest_neighbors_for_proteins(
+            protein_ids,
             embedding_type_id,
-            layer_index,
-            embedding_type_id,
-            layer_index,
-            effective_k,
+            layer_index=layer_index,
+            k=k,
+            metric=metric,
+            include_query=include_query,
+            backend=backend,
+            device=device,
         )
 
-        with _cursor(conn) as cur:
-            cur.execute(sql, params)
-            rows = cur.fetchall()
+    def _find_nearest_neighbors_pgvector(
+        self,
+        query_embedding: Any,
+        *,
+        embedding_type_id: int,
+        layer_index: int,
+        k: int,
+        metric: DistanceMetric,
+        exclude_protein_ids: Sequence[str],
+        use_ann: bool,
+        ann_ef_search: int,
+        ann_candidate_pool: Optional[int],
+    ) -> List[Neighbor]:
+        return self._search.find_nearest_neighbors_pgvector(
+            query_embedding,
+            embedding_type_id=embedding_type_id,
+            layer_index=layer_index,
+            k=k,
+            metric=metric,
+            exclude_protein_ids=exclude_protein_ids,
+            use_ann=use_ann,
+            ann_ef_search=ann_ef_search,
+            ann_candidate_pool=ann_candidate_pool,
+        )
 
-        grouped: Dict[str, List[Neighbor]] = {}
-        for query_protein_id, neighbor_id, row_layer, distance in rows:
-            query_id = str(query_protein_id)
-            grouped.setdefault(query_id, [])
-            if neighbor_id is None:
-                continue
-            grouped[query_id].append(
-                Neighbor(
-                    protein_id=str(neighbor_id),
-                    layer_index=int(row_layer),
-                    distance=float(distance),
-                )
-            )
-        return grouped
+    def _find_nearest_neighbors_for_proteins_pgvector(
+        self,
+        protein_ids: Sequence[str],
+        *,
+        embedding_type_id: int,
+        layer_index: int,
+        k: int,
+        metric: DistanceMetric,
+        include_query: bool,
+    ) -> Dict[str, List[Neighbor]]:
+        return self._search.find_nearest_neighbors_for_proteins_pgvector(
+            protein_ids,
+            embedding_type_id=embedding_type_id,
+            layer_index=layer_index,
+            k=k,
+            metric=metric,
+            include_query=include_query,
+        )
+
+    def _find_nearest_neighbors_faiss(
+        self,
+        query_embedding: Any,
+        *,
+        embedding_type_id: int,
+        layer_index: int,
+        k: int,
+        metric: DistanceMetric,
+        exclude_protein_ids: Sequence[str],
+        device: Optional[str],
+        use_ann: bool,
+    ) -> List[Neighbor]:
+        return self._search.find_nearest_neighbors_faiss(
+            query_embedding,
+            embedding_type_id=embedding_type_id,
+            layer_index=layer_index,
+            k=k,
+            metric=metric,
+            exclude_protein_ids=exclude_protein_ids,
+            device=device,
+            use_ann=use_ann,
+        )
+
+    def _find_nearest_neighbors_torch(
+        self,
+        query_embedding: Any,
+        *,
+        embedding_type_id: int,
+        layer_index: int,
+        k: int,
+        metric: DistanceMetric,
+        exclude_protein_ids: Sequence[str],
+        device: Optional[str],
+    ) -> List[Neighbor]:
+        return self._search.find_nearest_neighbors_torch(
+            query_embedding,
+            embedding_type_id=embedding_type_id,
+            layer_index=layer_index,
+            k=k,
+            metric=metric,
+            exclude_protein_ids=exclude_protein_ids,
+            device=device,
+        )
+
+    def _find_nearest_neighbors_for_queries_faiss(
+        self,
+        query_ids: Sequence[str],
+        query_vectors: Sequence[Any],
+        *,
+        embedding_type_id: int,
+        layer_index: int,
+        k: int,
+        metric: DistanceMetric,
+        include_query: bool,
+        device: Optional[str],
+    ) -> Dict[str, List[Neighbor]]:
+        return self._search.find_nearest_neighbors_for_queries_faiss(
+            query_ids,
+            query_vectors,
+            embedding_type_id=embedding_type_id,
+            layer_index=layer_index,
+            k=k,
+            metric=metric,
+            include_query=include_query,
+            device=device,
+        )
+
+    def _find_nearest_neighbors_for_queries_torch(
+        self,
+        query_ids: Sequence[str],
+        query_vectors: Sequence[Any],
+        *,
+        embedding_type_id: int,
+        layer_index: int,
+        k: int,
+        metric: DistanceMetric,
+        include_query: bool,
+        device: Optional[str],
+    ) -> Dict[str, List[Neighbor]]:
+        return self._search.find_nearest_neighbors_for_queries_torch(
+            query_ids,
+            query_vectors,
+            embedding_type_id=embedding_type_id,
+            layer_index=layer_index,
+            k=k,
+            metric=metric,
+            include_query=include_query,
+            device=device,
+        )
+
+    def _search_faiss_state(
+        self,
+        state: _GpuSearchState,
+        *,
+        query_ids: Sequence[str],
+        query_vectors: Any,
+        k: int,
+        per_query_excluded: Mapping[str, Set[str]],
+    ) -> Dict[str, List[Neighbor]]:
+        return self._search.search_faiss_state(
+            state,
+            query_ids=query_ids,
+            query_vectors=query_vectors,
+            k=k,
+            per_query_excluded=per_query_excluded,
+        )
+
+    def _search_torch_state(
+        self,
+        state: _GpuSearchState,
+        *,
+        query_ids: Sequence[str],
+        query_vectors: Any,
+        k: int,
+        per_query_excluded: Mapping[str, Set[str]],
+    ) -> Dict[str, List[Neighbor]]:
+        return self._search.search_torch_state(
+            state,
+            query_ids=query_ids,
+            query_vectors=query_vectors,
+            k=k,
+            per_query_excluded=per_query_excluded,
+        )
+
+    def _neighbors_from_candidate_rows(
+        self,
+        state: _GpuSearchState,
+        *,
+        candidate_indices: Sequence[Any],
+        candidate_distances: Sequence[Any],
+        k: int,
+        excluded_protein_ids: Set[str],
+        l2_squared: bool,
+    ) -> List[Neighbor]:
+        return self._search.neighbors_from_candidate_rows(
+            state,
+            candidate_indices=candidate_indices,
+            candidate_distances=candidate_distances,
+            k=k,
+            excluded_protein_ids=excluded_protein_ids,
+            l2_squared=l2_squared,
+        )
+
+    def _resolve_search_backend(
+        self,
+        *,
+        requested_backend: SearchBackend,
+        embedding_type_id: int,
+        layer_index: int,
+        metric: DistanceMetric,
+        batch_size: int,
+        ann_requested: bool,
+        device: Optional[str],
+    ) -> _ResolvedBackend:
+        return self._search.resolve_search_backend(
+            requested_backend=requested_backend,
+            embedding_type_id=embedding_type_id,
+            layer_index=layer_index,
+            metric=metric,
+            batch_size=batch_size,
+            ann_requested=ann_requested,
+            device=device,
+        )
+
+    def _detect_backend_availability(self, *, device: Optional[str]) -> _BackendAvailability:
+        return self._search.detect_backend_availability(device=device)
+
+    def _get_or_load_gpu_search_state(
+        self,
+        *,
+        backend: ResolvedSearchBackend,
+        embedding_type_id: int,
+        layer_index: int,
+        metric: DistanceMetric,
+        device: Optional[str],
+        ann_requested: bool,
+    ) -> _GpuSearchState:
+        return self._search.get_or_load_gpu_search_state(
+            backend=backend,
+            embedding_type_id=embedding_type_id,
+            layer_index=layer_index,
+            metric=metric,
+            device=device,
+            ann_requested=ann_requested,
+        )
+
+    def _load_gpu_search_state(
+        self,
+        *,
+        backend: ResolvedSearchBackend,
+        embedding_type_id: int,
+        layer_index: int,
+        metric: DistanceMetric,
+        device: str,
+        ann_requested: bool,
+    ) -> _GpuSearchState:
+        return self._search.load_gpu_search_state(
+            backend=backend,
+            embedding_type_id=embedding_type_id,
+            layer_index=layer_index,
+            metric=metric,
+            device=device,
+            ann_requested=ann_requested,
+        )
+
+    def _load_search_vectors(self, *, embedding_type_id: int, layer_index: int) -> Tuple[List[str], Any]:
+        return self._search.load_search_vectors(embedding_type_id=embedding_type_id, layer_index=layer_index)
+
+    def _gpu_state_matches(
+        self,
+        *,
+        backend: ResolvedSearchBackend,
+        embedding_type_id: int,
+        layer_index: int,
+        metric: DistanceMetric,
+        device: Optional[str],
+        ann_enabled: bool,
+    ) -> bool:
+        return self._search.gpu_state_matches(
+            backend=backend,
+            embedding_type_id=embedding_type_id,
+            layer_index=layer_index,
+            metric=metric,
+            device=device,
+            ann_enabled=ann_enabled,
+        )
+
+    def _record_search_diagnostics(
+        self,
+        resolved: _ResolvedBackend,
+        *,
+        requested_backend: SearchBackend,
+        embedding_type_id: int,
+        layer_index: int,
+        metric: DistanceMetric,
+        k: int,
+        query_count: int,
+    ) -> None:
+        self._search.record_search_diagnostics(
+            resolved,
+            requested_backend=requested_backend,
+            embedding_type_id=embedding_type_id,
+            layer_index=layer_index,
+            metric=metric,
+            k=k,
+            query_count=query_count,
+        )
+
+    def _warn_if_search_backend_degraded(
+        self,
+        resolved: _ResolvedBackend,
+        *,
+        requested_backend: SearchBackend,
+        embedding_type_id: int,
+        layer_index: int,
+        metric: DistanceMetric,
+    ) -> None:
+        self._search.warn_if_search_backend_degraded(
+            resolved,
+            requested_backend=requested_backend,
+            embedding_type_id=embedding_type_id,
+            layer_index=layer_index,
+            metric=metric,
+        )
 
     def _warn_if_missing_ann_index(
         self,
@@ -1089,43 +1289,11 @@ class BioDataClient:
         layer_index: int,
         metric: DistanceMetric,
     ) -> None:
-        metric_name = str(metric).strip().lower()
-        opclass = _metric_opclass(metric_name)
-        cache_key = (int(embedding_type_id), int(layer_index), metric_name)
-        cached = self._ann_index_presence_cache.get(cache_key)
-        if cached is None:
-            has_index = bool(
-                self.scalar(
-                    """
-                    SELECT EXISTS (
-                        SELECT 1
-                        FROM pg_indexes
-                        WHERE schemaname = 'public'
-                          AND tablename = 'sequence_embeddings'
-                          AND indexdef ILIKE '%%USING hnsw%%'
-                          AND indexdef ILIKE %s
-                          AND indexdef ILIKE %s
-                          AND indexdef ILIKE %s
-                    );
-                    """,
-                    (
-                        f"%embedding_type_id = {int(embedding_type_id)}%",
-                        f"%layer_index = {int(layer_index)}%",
-                        f"%{opclass}%",
-                    ),
-                )
-            )
-            self._ann_index_presence_cache[cache_key] = has_index
-            cached = has_index
-        if (not cached) and cache_key not in self._ann_index_warned:
-            warnings.warn(
-                "No matching HNSW index detected for sequence_embeddings "
-                f"(embedding_type_id={embedding_type_id}, layer_index={layer_index}, metric={metric_name}). "
-                "Nearest-neighbor search will run in slow mode.",
-                RuntimeWarning,
-                stacklevel=2,
-            )
-            self._ann_index_warned.add(cache_key)
+        self._search.warn_if_missing_ann_index(
+            embedding_type_id=embedding_type_id,
+            layer_index=layer_index,
+            metric=metric,
+        )
 
     def fetch_go_annotations(self, protein_ids: Sequence[str]) -> Dict[str, List[GOAnnotation]]:
         """Fetch GO annotations grouped by protein ID."""
@@ -1205,6 +1373,8 @@ class BioDataClient:
         metric: Optional[DistanceMetric] = None,
         include_query: bool = False,
         use_ann: bool = False,
+        backend: Optional[SearchBackend] = None,
+        device: Optional[str] = None,
     ) -> Tuple[List[Neighbor], Dict[str, List[GOAnnotation]]]:
         """End-to-end helper: query embedding -> neighbors -> GO annotations."""
         query_embedding = self.get_protein_embedding(
@@ -1226,6 +1396,8 @@ class BioDataClient:
             metric=metric,
             exclude_protein_ids=[] if include_query else [query_uniprot_id],
             use_ann=use_ann,
+            backend=backend,
+            device=device,
         )
 
         annotations = self.fetch_go_annotations([n.protein_id for n in neighbors])
@@ -1380,6 +1552,7 @@ __all__ = [
     "NotFoundError",
     "DistanceMetric",
     "EmbeddingModel",
+    "SearchBackend",
     "DEFAULT_DATABASE",
     "DEFAULT_DSN",
     "DEFAULT_HOST",

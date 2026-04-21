@@ -5,6 +5,7 @@ Utilities for working with a PostgreSQL BioData database, protein embeddings (`p
 ## What Is In This Repo
 
 - `CBBIO/BioData.py`: database client (`BioDataClient`) for proteins, embeddings, nearest neighbors, and GO annotations.
+- `CBBIO/search/`: internal search subsystem for backend routing, pgvector search, and GPU search helpers.
 - `CBBIO/GO.py`: ontology utilities (`GOOntology`) built on `goatools`.
 - `CBBIO/Taxonomy.py`: taxonomy utilities (`TaxonomyOntology`) for NCBI taxdump lineage/LCA/IC analysis.
 - `CBBIO/embeddings.py`: model-agnostic embedding generation interfaces, I/O helpers, and metadata types.
@@ -112,6 +113,7 @@ Environment overrides are supported:
 - `BIODATA_REGISTER_HALFVEC`
 - `BIODATA_DEFAULT_METRIC`
 - `BIODATA_DEFAULT_K`
+- `BIODATA_DEFAULT_BACKEND`
 
 ## CBBIO Modules
 
@@ -138,7 +140,12 @@ Key capabilities:
 - Sequence/metadata batch fetch: `get_protein_sequences`, `get_protein_species_taxonomy`
 - Embeddings and distances: `get_protein_embedding`, `distance_to_protein`, `distance_between_proteins`
 - Neighbor search: `find_nearest_neighbors`, `find_nearest_neighbors_for_proteins`, `neighbors_with_go`
+  - Supports backend routing across `pgvector`, `faiss_gpu`, `torch_gpu`, or `auto`
 - GO annotation retrieval: `fetch_go_annotations`, `fetch_protein_go_ids`
+
+Internal layout note:
+- `BioDataClient` remains the public facade.
+- Search backend routing and implementations now live under `CBBIO/search/`, which keeps `BioData.py` focused on DB/client responsibilities.
 
 Detailed API reference: `docs/BioData.md`
 

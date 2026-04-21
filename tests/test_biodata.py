@@ -670,6 +670,359 @@ def test_neighbors_with_go_raises_when_query_embedding_missing() -> None:
         )
 
 
+def test_find_nearest_neighbors_auto_pgvector_records_diagnostics(monkeypatch: pytest.MonkeyPatch) -> None:
+    responses = [_Response(all=[("P1", 0, 0.1)])]
+    client, _ = _client_with_fake_conn(responses)
+
+    def _detect(*, device: str | None) -> bd._BackendAvailability:
+        return bd._BackendAvailability(
+            faiss_gpu=False,
+            torch_gpu=False,
+            preferred_device=None,
+            torch_device=None,
+            faiss_device=None,
+            hardware_class="cpu",
+        )
+
+    monkeypatch.setattr(client, "_detect_backend_availability", _detect)
+
+    neighbors = client.find_nearest_neighbors(
+        [0.1, 0.2],
+        embedding_type_id=1,
+        k=1,
+        backend="auto",
+    )
+
+    assert [neighbor.protein_id for neighbor in neighbors] == ["P1"]
+    assert client.last_search_diagnostics["requested_backend"] == "auto"
+    assert client.last_search_diagnostics["resolved_backend"] == "pgvector"
+    assert client.last_search_diagnostics["reason"] == "auto_pgvector_threshold"
+
+
+def test_find_nearest_neighbors_prefers_resident_torch_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _ = _client_with_fake_conn([])
+    client._gpu_search_state = bd._GpuSearchState(
+        backend="torch_gpu",
+        embedding_type_id=3,
+        layer_index=0,
+        metric="cosine",
+        device="mps",
+        ann_enabled=False,
+        protein_ids=["Q1"],
+        protein_rows={"Q1": [0]},
+        vectors=None,
+    )
+
+    def _detect(*, device: str | None) -> bd._BackendAvailability:
+        return bd._BackendAvailability(
+            faiss_gpu=False,
+            torch_gpu=True,
+            preferred_device="mps",
+            torch_device="mps",
+            faiss_device=None,
+            hardware_class="mps",
+        )
+
+    monkeypatch.setattr(client, "_detect_backend_availability", _detect)
+    monkeypatch.setattr(
+        client,
+        "_find_nearest_neighbors_torch",
+        lambda *args, **kwargs: [bd.Neighbor(protein_id="P2", layer_index=0, distance=0.2)],
+    )
+
+    neighbors = client.find_nearest_neighbors(
+        [0.1, 0.2],
+        embedding_type_id=3,
+        layer_index=0,
+        k=1,
+        metric="cosine",
+        backend="auto",
+    )
+
+    assert [neighbor.protein_id for neighbor in neighbors] == ["P2"]
+    assert client.last_search_diagnostics["resolved_backend"] == "torch_gpu"
+    assert client.last_search_diagnostics["reason"] == "resident_torch"
+    assert client.last_search_diagnostics["resident"] is True
+
+
+def test_find_nearest_neighbors_gpu_request_degrades_ann_to_torch(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _ = _client_with_fake_conn([])
+
+    def _detect(*, device: str | None) -> bd._BackendAvailability:
+        return bd._BackendAvailability(
+            faiss_gpu=False,
+            torch_gpu=True,
+            preferred_device="mps",
+            torch_device="mps",
+            faiss_device=None,
+            hardware_class="mps",
+        )
+
+    monkeypatch.setattr(client, "_detect_backend_availability", _detect)
+    monkeypatch.setattr(
+        client,
+        "_find_nearest_neighbors_torch",
+        lambda *args, **kwargs: [bd.Neighbor(protein_id="P2", layer_index=0, distance=0.2)],
+    )
+
+    neighbors = client.find_nearest_neighbors(
+        [0.1, 0.2],
+        embedding_type_id=1,
+        k=1,
+        backend="gpu",
+        use_ann=True,
+    )
+
+    assert [neighbor.protein_id for neighbor in neighbors] == ["P2"]
+    assert client.last_search_diagnostics["resolved_backend"] == "torch_gpu"
+    assert client.last_search_diagnostics["degraded"] is True
+    assert client.last_search_diagnostics["ann_requested"] is True
+    assert client.last_search_diagnostics["ann_used"] is False
+
+
+def test_find_nearest_neighbors_gpu_request_warns_when_faiss_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _ = _client_with_fake_conn([])
+
+    def _detect(*, device: str | None) -> bd._BackendAvailability:
+        return bd._BackendAvailability(
+            faiss_gpu=False,
+            torch_gpu=True,
+            preferred_device="mps",
+            torch_device="mps",
+            faiss_device=None,
+            hardware_class="mps",
+        )
+
+    monkeypatch.setattr(client, "_detect_backend_availability", _detect)
+    monkeypatch.setattr(
+        client,
+        "_find_nearest_neighbors_torch",
+        lambda *args, **kwargs: [bd.Neighbor(protein_id="P2", layer_index=0, distance=0.2)],
+    )
+
+    with pytest.warns(RuntimeWarning, match="torch_gpu because faiss_gpu is not available"):
+        client.find_nearest_neighbors(
+            [0.1, 0.2],
+            embedding_type_id=1,
+            k=1,
+            backend="gpu",
+        )
+
+
+def test_find_nearest_neighbors_gpu_request_warns_when_no_accelerator_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    responses = [_Response(all=[("P1", 0, 0.1)])]
+    client, _ = _client_with_fake_conn(responses)
+
+    def _detect(*, device: str | None) -> bd._BackendAvailability:
+        return bd._BackendAvailability(
+            faiss_gpu=False,
+            torch_gpu=False,
+            preferred_device=None,
+            torch_device=None,
+            faiss_device=None,
+            hardware_class="cpu",
+        )
+
+    monkeypatch.setattr(client, "_detect_backend_availability", _detect)
+
+    with pytest.warns(RuntimeWarning, match="Falling back to pgvector"):
+        client.find_nearest_neighbors(
+            [0.1, 0.2],
+            embedding_type_id=1,
+            k=1,
+            backend="gpu",
+        )
+
+
+def test_find_nearest_neighbors_for_proteins_auto_routes_to_torch_by_batch_size(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, _ = _client_with_fake_conn([])
+    query_ids = [f"Q{i}" for i in range(8)]
+
+    def _detect(*, device: str | None) -> bd._BackendAvailability:
+        return bd._BackendAvailability(
+            faiss_gpu=False,
+            torch_gpu=True,
+            preferred_device="mps",
+            torch_device="mps",
+            faiss_device=None,
+            hardware_class="mps",
+        )
+
+    monkeypatch.setattr(client, "_detect_backend_availability", _detect)
+    monkeypatch.setattr(
+        client,
+        "get_protein_embeddings",
+        lambda protein_ids, **kwargs: {str(protein_id): [0.1, 0.2] for protein_id in protein_ids},
+    )
+    monkeypatch.setattr(
+        client,
+        "_find_nearest_neighbors_for_queries_torch",
+        lambda query_ids, query_vectors, **kwargs: {
+            str(query_id): [bd.Neighbor(protein_id="N1", layer_index=0, distance=0.1)]
+            for query_id in query_ids
+        },
+    )
+
+    grouped = client.find_nearest_neighbors_for_proteins(
+        query_ids,
+        embedding_type_id=1,
+        k=1,
+        backend="auto",
+    )
+
+    assert sorted(grouped.keys()) == query_ids
+    assert client.last_search_diagnostics["resolved_backend"] == "torch_gpu"
+    assert client.last_search_diagnostics["reason"] == "auto_torch_threshold"
+    assert client.last_search_diagnostics["query_count"] == len(query_ids)
+
+
+def test_find_nearest_neighbors_for_proteins_auto_warns_when_faiss_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, _ = _client_with_fake_conn([])
+    query_ids = [f"Q{i}" for i in range(8)]
+
+    def _detect(*, device: str | None) -> bd._BackendAvailability:
+        return bd._BackendAvailability(
+            faiss_gpu=False,
+            torch_gpu=True,
+            preferred_device="mps",
+            torch_device="mps",
+            faiss_device=None,
+            hardware_class="mps",
+        )
+
+    monkeypatch.setattr(client, "_detect_backend_availability", _detect)
+    monkeypatch.setattr(
+        client,
+        "get_protein_embeddings",
+        lambda protein_ids, **kwargs: {str(protein_id): [0.1, 0.2] for protein_id in protein_ids},
+    )
+    monkeypatch.setattr(
+        client,
+        "_find_nearest_neighbors_for_queries_torch",
+        lambda query_ids, query_vectors, **kwargs: {
+            str(query_id): [bd.Neighbor(protein_id="N1", layer_index=0, distance=0.1)]
+            for query_id in query_ids
+        },
+    )
+
+    with pytest.warns(RuntimeWarning, match="torch_gpu because faiss_gpu is not available"):
+        client.find_nearest_neighbors_for_proteins(
+            query_ids,
+            embedding_type_id=1,
+            k=1,
+            backend="auto",
+        )
+
+
+def test_find_nearest_neighbors_auto_ann_warns_when_degraded_to_torch(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _ = _client_with_fake_conn([])
+    client.backend_thresholds["mps"]["torch_gpu_min_batch"] = 1
+
+    def _detect(*, device: str | None) -> bd._BackendAvailability:
+        return bd._BackendAvailability(
+            faiss_gpu=False,
+            torch_gpu=True,
+            preferred_device="mps",
+            torch_device="mps",
+            faiss_device=None,
+            hardware_class="mps",
+        )
+
+    monkeypatch.setattr(client, "_detect_backend_availability", _detect)
+    monkeypatch.setattr(
+        client,
+        "_find_nearest_neighbors_torch",
+        lambda *args, **kwargs: [bd.Neighbor(protein_id="P2", layer_index=0, distance=0.2)],
+    )
+
+    with pytest.warns(RuntimeWarning, match="requested ANN-capable GPU search"):
+        client.find_nearest_neighbors(
+            [0.1, 0.2],
+            embedding_type_id=1,
+            k=1,
+            backend="auto",
+            use_ann=True,
+        )
+
+
+def test_find_nearest_neighbors_explicit_faiss_unavailable_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _ = _client_with_fake_conn([])
+
+    def _detect(*, device: str | None) -> bd._BackendAvailability:
+        return bd._BackendAvailability(
+            faiss_gpu=False,
+            torch_gpu=False,
+            preferred_device=None,
+            torch_device=None,
+            faiss_device=None,
+            hardware_class="cpu",
+        )
+
+    monkeypatch.setattr(client, "_detect_backend_availability", _detect)
+
+    with pytest.raises(bd.BioDataError, match="faiss_gpu"):
+        client.find_nearest_neighbors(
+            [0.1, 0.2],
+            embedding_type_id=1,
+            k=1,
+            backend="faiss_gpu",
+        )
+
+
+def test_search_torch_state_returns_exact_neighbors_and_respects_exclusions() -> None:
+    torch = pytest.importorskip("torch")
+    client = bd.BioDataClient()
+    normalized = bd._prepare_index_vectors(
+        [[1.0, 0.0], [0.8, 0.2], [0.0, 1.0]],
+        metric="cosine",
+    )
+    state = bd._GpuSearchState(
+        backend="torch_gpu",
+        embedding_type_id=1,
+        layer_index=0,
+        metric="cosine",
+        device="cpu",
+        ann_enabled=False,
+        protein_ids=["A", "B", "C"],
+        protein_rows={"A": [0], "B": [1], "C": [2]},
+        vectors=torch.as_tensor(normalized, dtype=torch.float32, device="cpu"),
+    )
+
+    grouped = client._search_torch_state(
+        state,
+        query_ids=["Q1"],
+        query_vectors=bd._as_numpy_matrix([[1.0, 0.0]]),
+        k=2,
+        per_query_excluded={"Q1": {"A"}},
+    )
+
+    assert [neighbor.protein_id for neighbor in grouped["Q1"]] == ["B", "C"]
+    assert grouped["Q1"][0].distance < grouped["Q1"][1].distance
+
+
+def test_as_numpy_matrix_accepts_vector_like_rows() -> None:
+    np = pytest.importorskip("numpy")
+
+    class _VectorLike:
+        def __init__(self, values: Sequence[float]) -> None:
+            self._values = list(values)
+
+        def to_list(self) -> List[float]:
+            return list(self._values)
+
+    matrix = bd._as_numpy_matrix([_VectorLike([1.0, 2.0]), _VectorLike([3.0, 4.0])])
+
+    assert matrix.shape == (2, 2)
+    assert matrix.dtype == np.float32
+    assert matrix.tolist() == [[1.0, 2.0], [3.0, 4.0]]
+
+
 def test_health_check_reports_missing_tables() -> None:
     responses = [
         _Response(one=("BioData",), description=[("current_database",)]),

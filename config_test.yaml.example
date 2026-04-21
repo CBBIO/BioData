@@ -12,3 +12,17 @@ client:
 search:
   default_metric: cosine
   default_k: 10
+  default_backend: auto
+  backend_thresholds:
+    cuda:
+      faiss_gpu_min_batch: 8
+      torch_gpu_min_batch: 16
+      resident_gpu_min_batch: 1
+    mps:
+      faiss_gpu_min_batch: 1000000
+      torch_gpu_min_batch: 8
+      resident_gpu_min_batch: 1
+    cpu:
+      faiss_gpu_min_batch: 1000000
+      torch_gpu_min_batch: 1000000
+      resident_gpu_min_batch: 1000000
