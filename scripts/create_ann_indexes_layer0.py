@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Create ANN (HNSW) indexes for all embedding types at last layer (0).
+"""Create ANN (HNSW) indexes for selected embedding types and metrics.
 
 Creates one index per (embedding_type_id, metric) on:
   public.sequence_embeddings (embedding)
 with a partial predicate:
-  embedding_type_id = <id> AND layer_index = 0
+  embedding_type_id = <id> AND layer_index = <layer>
 
 Metrics/operator classes:
   - l2 -> halfvec_l2_ops
@@ -14,6 +14,7 @@ Metrics/operator classes:
 
 from __future__ import annotations
 
+import argparse
 import re
 import sys
 from pathlib import Path
@@ -25,6 +26,11 @@ if str(_SCRIPT_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_REPO_ROOT))
 
 from CBBIO.BioData import BioDataClient, _embedding_dimension
+
+try:
+    from psycopg.errors import DiskFull
+except ModuleNotFoundError:  # pragma: no cover - script dependency path
+    DiskFull = None  # type: ignore[assignment]
 
 
 METRIC_OPCLASS: Dict[str, str] = {
@@ -38,12 +44,81 @@ def _slug(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", value.strip().lower()).strip("_")
 
 
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Create HNSW ANN indexes for selected embedding types and metrics.",
+    )
+    parser.add_argument(
+        "--embedding-type-id",
+        type=int,
+        action="append",
+        default=None,
+        help="Limit index creation to one or more embedding_type_id values. Repeat to pass multiple.",
+    )
+    parser.add_argument(
+        "--metric",
+        choices=sorted(METRIC_OPCLASS),
+        action="append",
+        default=None,
+        help="Limit index creation to one or more metrics. Repeat to pass multiple.",
+    )
+    parser.add_argument(
+        "--layer-index",
+        type=int,
+        default=0,
+        help="Layer index to index. Default: 0.",
+    )
+    parser.add_argument(
+        "--max-parallel-maintenance-workers",
+        type=int,
+        default=0,
+        help="Session setting for max_parallel_maintenance_workers. Default: 0.",
+    )
+    parser.add_argument(
+        "--max-parallel-workers-per-gather",
+        type=int,
+        default=0,
+        help="Session setting for max_parallel_workers_per_gather. Default: 0.",
+    )
+    parser.add_argument(
+        "--maintenance-work-mem",
+        type=str,
+        default=None,
+        help="Optional session setting for maintenance_work_mem, for example 256MB.",
+    )
+    return parser.parse_args()
+
+
 def main() -> None:
+    args = _parse_args()
     created: List[Tuple[str, int, str]] = []
+    selected_embedding_ids = (
+        {int(value) for value in args.embedding_type_id}
+        if args.embedding_type_id
+        else None
+    )
+    selected_metrics = list(dict.fromkeys(args.metric or METRIC_OPCLASS.keys()))
+    layer_index = int(args.layer_index)
     with BioDataClient() as client:
         embedding_types = client.list_embedding_types()
+        if selected_embedding_ids is not None:
+            embedding_types = [emb for emb in embedding_types if int(emb.id) in selected_embedding_ids]
         conn = client._require_connection()  # noqa: SLF001 - local maintenance script
         with conn.cursor() as cur:
+            cur.execute(
+                "SELECT set_config('max_parallel_maintenance_workers', %s, false);",
+                (str(max(0, int(args.max_parallel_maintenance_workers))),),
+            )
+            cur.execute(
+                "SELECT set_config('max_parallel_workers_per_gather', %s, false);",
+                (str(max(0, int(args.max_parallel_workers_per_gather))),),
+            )
+            if args.maintenance_work_mem:
+                cur.execute(
+                    "SELECT set_config('maintenance_work_mem', %s, false);",
+                    (str(args.maintenance_work_mem).strip(),),
+                )
+
             for emb in embedding_types:
                 emb_id = int(emb.id)
                 emb_slug = _slug(str(emb.name))
@@ -52,29 +127,44 @@ def main() -> None:
                     SELECT embedding
                     FROM sequence_embeddings
                     WHERE embedding_type_id = %s
-                      AND layer_index = 0
+                      AND layer_index = %s
                     LIMIT 1;
                     """,
-                    (emb_id,),
+                    (emb_id, layer_index),
                 )
                 if row is None or row.get("embedding") is None:
-                    print(f"- skipping embedding_type_id={emb_id} ({emb.name}): no layer 0 embeddings found")
+                    print(
+                        f"- skipping embedding_type_id={emb_id} ({emb.name}): "
+                        f"no layer {layer_index} embeddings found"
+                    )
                     continue
                 dim = int(_embedding_dimension(row["embedding"]))
-                for metric_name, opclass in METRIC_OPCLASS.items():
-                    index_name = f"ix_seqemb_e{emb_id}_{emb_slug}_l0_hnsw_{metric_name}"
+                for metric_name in selected_metrics:
+                    opclass = METRIC_OPCLASS[metric_name]
+                    index_name = f"ix_seqemb_e{emb_id}_{emb_slug}_l{layer_index}_hnsw_{metric_name}"
                     sql = (
                         f"CREATE INDEX IF NOT EXISTS {index_name} "
                         "ON public.sequence_embeddings "
                         f"USING hnsw ((embedding::halfvec({dim})) {opclass}) "
-                        f"WHERE embedding_type_id = {emb_id} AND layer_index = 0;"
+                        f"WHERE embedding_type_id = {emb_id} AND layer_index = {layer_index};"
                     )
-                    cur.execute(sql)
+                    try:
+                        cur.execute(sql)
+                    except Exception as exc:
+                        if DiskFull is not None and isinstance(exc, DiskFull):
+                            raise SystemExit(
+                                "PostgreSQL ran out of Docker shared memory while building the HNSW index.\n"
+                                "Try either:\n"
+                                "  1. restart the container with a larger shared-memory segment, e.g. --shm-size=1g\n"
+                                "  2. rerun this script with parallel workers disabled (already the default here)\n"
+                                "  3. optionally lower build memory, e.g. --maintenance-work-mem 128MB\n"
+                            ) from exc
+                        raise
                     created.append((str(emb.name), emb_id, metric_name))
 
     print("Index creation statements executed:")
     for emb_name, emb_id, metric_name in created:
-        print(f"- embedding_type_id={emb_id} ({emb_name}), metric={metric_name}, layer=0")
+        print(f"- embedding_type_id={emb_id} ({emb_name}), metric={metric_name}, layer={layer_index}")
 
 
 if __name__ == "__main__":
