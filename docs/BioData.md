@@ -228,10 +228,10 @@ Batch version of `get_protein_embedding`.
 
 ### `find_nearest_neighbors(query_embedding, embedding_type_id, layer_index=0, k=None, *, metric=None, exclude_protein_ids=None, use_ann=False, ann_ef_search=200, ann_candidate_pool=None, backend=None, device=None)`
 Nearest-neighbor search with backend routing.
-- Supports `backend="auto"|"gpu"|"pgvector"|"faiss_gpu"|"torch_gpu"`.
+- Supports `backend="auto"|"gpu"|"pgvector"|"faiss_cpu"|"faiss_gpu"|"cuvs_gpu"|"torch_gpu"`.
 - `auto` uses static heuristics based on batch size, hardware availability, and resident GPU index state.
 - `gpu` prefers accelerated backends and falls back cleanly when unavailable.
-- `use_ann=True` is supported by pgvector and FAISS; Torch fallback degrades to exact search.
+- `use_ann=True` is supported by pgvector, FAISS, and cuVS; Torch fallback degrades to exact search.
 - Applies metric operator from `_metric_operator`.
 - Supports excluding specific protein IDs.
 - pgvector ANN mode details:

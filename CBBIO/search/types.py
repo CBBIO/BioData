@@ -8,21 +8,24 @@ from typing import Any, Dict, List, Literal, Optional, Union
 from ..types import DistanceMetric
 
 
-ResolvedSearchBackend = Union[Literal["pgvector"], Literal["faiss_gpu"], Literal["torch_gpu"]]
+ResolvedSearchBackend = Union[Literal["pgvector"], Literal["faiss_cpu"], Literal["faiss_gpu"], Literal["cuvs_gpu"], Literal["torch_gpu"]]
 
 DEFAULT_BACKEND_THRESHOLDS: Dict[str, Dict[str, int]] = {
     "cuda": {
         "faiss_gpu_min_batch": 8,
+        "cuvs_gpu_min_batch": 8,
         "torch_gpu_min_batch": 16,
         "resident_gpu_min_batch": 1,
     },
     "mps": {
         "faiss_gpu_min_batch": 1_000_000,
+        "cuvs_gpu_min_batch": 1_000_000,
         "torch_gpu_min_batch": 8,
         "resident_gpu_min_batch": 1,
     },
     "cpu": {
         "faiss_gpu_min_batch": 1_000_000,
+        "cuvs_gpu_min_batch": 1_000_000,
         "torch_gpu_min_batch": 1_000_000,
         "resident_gpu_min_batch": 1_000_000,
     },
@@ -37,6 +40,9 @@ class _BackendAvailability:
     torch_device: Optional[str]
     faiss_device: Optional[str]
     hardware_class: str
+    faiss_cpu: bool = False
+    cuvs_gpu: bool = False
+    cuvs_device: Optional[str] = None
 
 
 @dataclass
@@ -50,6 +56,9 @@ class _ResolvedBackend:
     batch_size: int
     resident: bool
     hardware_class: str
+    chunk_size: Optional[int] = None
+    estimated_bytes: Optional[int] = None
+    free_bytes: Optional[int] = None
 
 
 @dataclass
@@ -65,6 +74,7 @@ class _GpuSearchState:
     vectors: Any
     faiss_index: Any = None
     faiss_resources: Any = None
+    cuvs_index: Any = None
 
 
 __all__ = [

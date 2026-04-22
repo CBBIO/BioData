@@ -40,9 +40,12 @@ class NotFoundError(BioDataError):
 from .search.utils import (
     _as_numpy_matrix,
     _cuda_device_index,
+    _import_cupy,
+    _import_cuvs,
     _import_faiss,
     _import_torch,
     _normalize_distance,
+    _preferred_cuvs_device,
     _preferred_faiss_device,
     _preferred_torch_device,
     _prepare_index_vectors,
@@ -218,7 +221,7 @@ def _config_defaults(config: Mapping[str, Any]) -> ConfigDict:
     if metric not in {"l2", "cosine", "inner_product"}:
         raise BioDataError(f"Invalid search.default_metric: {metric!r}")
     backend = str(search_config.get("default_backend", DEFAULT_SEARCH_BACKEND)).strip().lower()
-    if backend not in {"auto", "gpu", "pgvector", "faiss_gpu", "torch_gpu"}:
+    if backend not in {"auto", "gpu", "pgvector", "faiss_cpu", "faiss_gpu", "cuvs_gpu", "torch_gpu"}:
         raise BioDataError(f"Invalid search.default_backend: {backend!r}")
 
     return {
@@ -280,6 +283,7 @@ class BioDataClient:
         self._search_backend_warned: Set[Tuple[str, str, str, str, bool]] = set()
         self._gpu_search_state: Optional[_GpuSearchState] = None
         self._last_search_diagnostics: Dict[str, Any] = {}
+        self._search_workload_cache: Dict[Tuple[int, int], Dict[str, int]] = {}
         from .search.service import SearchService
 
         self._search = SearchService(self)
@@ -1041,6 +1045,50 @@ class BioDataClient:
             use_ann=use_ann,
         )
 
+    def _find_nearest_neighbors_faiss_cpu(
+        self,
+        query_embedding: Any,
+        *,
+        embedding_type_id: int,
+        layer_index: int,
+        k: int,
+        metric: DistanceMetric,
+        exclude_protein_ids: Sequence[str],
+        use_ann: bool,
+    ) -> List[Neighbor]:
+        return self._search.find_nearest_neighbors_faiss_cpu(
+            query_embedding,
+            embedding_type_id=embedding_type_id,
+            layer_index=layer_index,
+            k=k,
+            metric=metric,
+            exclude_protein_ids=exclude_protein_ids,
+            use_ann=use_ann,
+        )
+
+    def _find_nearest_neighbors_cuvs(
+        self,
+        query_embedding: Any,
+        *,
+        embedding_type_id: int,
+        layer_index: int,
+        k: int,
+        metric: DistanceMetric,
+        exclude_protein_ids: Sequence[str],
+        device: Optional[str],
+        use_ann: bool,
+    ) -> List[Neighbor]:
+        return self._search.find_nearest_neighbors_cuvs(
+            query_embedding,
+            embedding_type_id=embedding_type_id,
+            layer_index=layer_index,
+            k=k,
+            metric=metric,
+            exclude_protein_ids=exclude_protein_ids,
+            device=device,
+            use_ann=use_ann,
+        )
+
     def _find_nearest_neighbors_torch(
         self,
         query_embedding: Any,
@@ -1085,6 +1133,54 @@ class BioDataClient:
             device=device,
         )
 
+    def _find_nearest_neighbors_for_queries_faiss_cpu(
+        self,
+        query_ids: Sequence[str],
+        query_vectors: Sequence[Any],
+        *,
+        embedding_type_id: int,
+        layer_index: int,
+        k: int,
+        metric: DistanceMetric,
+        include_query: bool,
+        use_ann: bool = False,
+    ) -> Dict[str, List[Neighbor]]:
+        return self._search.find_nearest_neighbors_for_queries_faiss_cpu(
+            query_ids,
+            query_vectors,
+            embedding_type_id=embedding_type_id,
+            layer_index=layer_index,
+            k=k,
+            metric=metric,
+            include_query=include_query,
+            use_ann=use_ann,
+        )
+
+    def _find_nearest_neighbors_for_queries_cuvs(
+        self,
+        query_ids: Sequence[str],
+        query_vectors: Sequence[Any],
+        *,
+        embedding_type_id: int,
+        layer_index: int,
+        k: int,
+        metric: DistanceMetric,
+        include_query: bool,
+        device: Optional[str],
+        use_ann: bool = False,
+    ) -> Dict[str, List[Neighbor]]:
+        return self._search.find_nearest_neighbors_for_queries_cuvs(
+            query_ids,
+            query_vectors,
+            embedding_type_id=embedding_type_id,
+            layer_index=layer_index,
+            k=k,
+            metric=metric,
+            include_query=include_query,
+            device=device,
+            use_ann=use_ann,
+        )
+
     def _find_nearest_neighbors_for_queries_torch(
         self,
         query_ids: Sequence[str],
@@ -1118,6 +1214,23 @@ class BioDataClient:
         per_query_excluded: Mapping[str, Set[str]],
     ) -> Dict[str, List[Neighbor]]:
         return self._search.search_faiss_state(
+            state,
+            query_ids=query_ids,
+            query_vectors=query_vectors,
+            k=k,
+            per_query_excluded=per_query_excluded,
+        )
+
+    def _search_cuvs_state(
+        self,
+        state: _GpuSearchState,
+        *,
+        query_ids: Sequence[str],
+        query_vectors: Any,
+        k: int,
+        per_query_excluded: Mapping[str, Set[str]],
+    ) -> Dict[str, List[Neighbor]]:
+        return self._search.search_cuvs_state(
             state,
             query_ids=query_ids,
             query_vectors=query_vectors,

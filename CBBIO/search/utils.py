@@ -91,6 +91,26 @@ def _import_faiss(*, allow_missing: bool = False) -> Any:
     return faiss
 
 
+def _import_cupy(*, allow_missing: bool = False) -> Any:
+    try:
+        import cupy  # type: ignore
+    except ModuleNotFoundError as exc:
+        if allow_missing:
+            return None
+        raise DriverDependencyError("CuPy is required for cuvs_gpu search backend. Install with: pip install cupy-cuda12x") from exc
+    return cupy
+
+
+def _import_cuvs(*, allow_missing: bool = False) -> Any:
+    try:
+        import cuvs  # type: ignore
+    except ModuleNotFoundError as exc:
+        if allow_missing:
+            return None
+        raise DriverDependencyError("cuVS is required for cuvs_gpu search backend. Install with: pip install cuvs-cu12") from exc
+    return cuvs
+
+
 def _preferred_torch_device(device: Optional[str]) -> Optional[str]:
     try:
         import torch  # type: ignore
@@ -134,6 +154,27 @@ def _preferred_faiss_device(device: Optional[str]) -> Optional[str]:
     return None
 
 
+def _preferred_cuvs_device(device: Optional[str]) -> Optional[str]:
+    requested = str(device or "").strip().lower()
+    if requested == "mps":
+        return None
+
+    cupy = _import_cupy(allow_missing=True)
+    if cupy is None or _import_cuvs(allow_missing=True) is None:
+        return None
+
+    try:
+        device_count = int(cupy.cuda.runtime.getDeviceCount())
+    except Exception:
+        return None
+    if device_count < 1:
+        return None
+
+    if requested.startswith("cuda"):
+        return requested
+    return "cuda:0"
+
+
 def _cuda_device_index(device: str) -> int:
     lowered = str(device).strip().lower()
     if not lowered.startswith("cuda"):
@@ -174,8 +215,11 @@ __all__ = [
     "_normalize_distance",
     "_import_torch",
     "_import_faiss",
+    "_import_cupy",
+    "_import_cuvs",
     "_preferred_torch_device",
     "_preferred_faiss_device",
+    "_preferred_cuvs_device",
     "_cuda_device_index",
     "_torch_normalize",
     "_tensor_to_list",

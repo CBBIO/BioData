@@ -140,7 +140,7 @@ Key capabilities:
 - Sequence/metadata batch fetch: `get_protein_sequences`, `get_protein_species_taxonomy`
 - Embeddings and distances: `get_protein_embedding`, `distance_to_protein`, `distance_between_proteins`
 - Neighbor search: `find_nearest_neighbors`, `find_nearest_neighbors_for_proteins`, `neighbors_with_go`
-  - Supports backend routing across `pgvector`, `faiss_gpu`, `torch_gpu`, or `auto`
+  - Supports backend routing across `pgvector`, `faiss_cpu`, `faiss_gpu`, `cuvs_gpu`, `torch_gpu`, or `auto`
 - GO annotation retrieval: `fetch_go_annotations`, `fetch_protein_go_ids`
 
 Internal layout note:
