@@ -189,7 +189,7 @@ def test_prostt5_loader_keeps_tied_embeddings_when_loading_hf_checkpoint(
         def from_pretrained(_name: str) -> _FakeConfig:
             return _FakeConfig()
 
-    class _FakeAutoTokenizer:
+    class _FakeT5Tokenizer:
         @staticmethod
         def from_pretrained(_name: str, do_lower_case: bool = False) -> _FakeTokenizer:
             assert do_lower_case is False
@@ -205,7 +205,7 @@ def test_prostt5_loader_keeps_tied_embeddings_when_loading_hf_checkpoint(
 
     fake_transformers = types.SimpleNamespace(
         AutoConfig=_FakeAutoConfig,
-        AutoTokenizer=_FakeAutoTokenizer,
+        T5Tokenizer=_FakeT5Tokenizer,
         T5EncoderModel=_FakeT5EncoderModel,
     )
     monkeypatch.setitem(sys.modules, "transformers", fake_transformers)

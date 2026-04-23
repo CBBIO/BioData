@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import builtins
 import sys
+import types
 from typing import Any
 
 import pytest
@@ -125,3 +126,39 @@ def test_esm2_available_layers_and_count() -> None:
     )
     assert generator.available_layers() == [0, 1, 2, 3]
     assert generator.num_layers() == 4
+
+
+def test_esm2_generator_falls_back_to_transformers_when_pretrained_loader_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeAutoModel:
+        observed_name: str | None = None
+
+        @staticmethod
+        def from_pretrained(name: str) -> _FakeModel:
+            _FakeAutoModel.observed_name = name
+            return _FakeModel()
+
+    class _FakeAutoTokenizer:
+        observed_name: str | None = None
+
+        @staticmethod
+        def from_pretrained(name: str) -> _FakeAlphabet:
+            _FakeAutoTokenizer.observed_name = name
+            return _FakeAlphabet()
+
+    fake_transformers = types.SimpleNamespace(
+        AutoModel=_FakeAutoModel,
+        AutoTokenizer=_FakeAutoTokenizer,
+    )
+    fake_esm = types.SimpleNamespace()
+
+    monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
+    monkeypatch.setitem(sys.modules, "esm", fake_esm)
+    monkeypatch.setitem(sys.modules, "esm.pretrained", types.SimpleNamespace())
+
+    generator = Esm2EmbeddingGenerator(model_name="esm2_t33_650M_UR50D", device="cpu")
+
+    assert generator.model_metadata.model_name == "esm2_t33_650M_UR50D"
+    assert _FakeAutoModel.observed_name == "facebook/esm2_t33_650M_UR50D"
+    assert _FakeAutoTokenizer.observed_name == "facebook/esm2_t33_650M_UR50D"

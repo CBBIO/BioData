@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 from importlib import metadata as importlib_metadata
 import re
 import uuid
@@ -39,6 +40,15 @@ ESM2_PRETRAINED_LOADERS: Dict[str, str] = {
     "esm2_t6_8m_ur50d": "esm2_t6_8M_UR50D",
 }
 
+ESM2_HF_MODEL_NAMES: Dict[str, str] = {
+    "esm2_t33_650m_ur50d": "facebook/esm2_t33_650M_UR50D",
+    "esm2_t36_3b_ur50d": "facebook/esm2_t36_3B_UR50D",
+    "esm2_t48_15b_ur50d": "facebook/esm2_t48_15B_UR50D",
+    "esm2_t30_150m_ur50d": "facebook/esm2_t30_150M_UR50D",
+    "esm2_t12_35m_ur50d": "facebook/esm2_t12_35M_UR50D",
+    "esm2_t6_8m_ur50d": "facebook/esm2_t6_8M_UR50D",
+}
+
 
 class Esm2Preprocessor(PreprocessorAdapter):
     """Preprocessing for ESM2 protein sequences."""
@@ -52,11 +62,29 @@ class Esm2Preprocessor(PreprocessorAdapter):
 class Esm2TokenizerAdapter(TokenizerAdapter):
     """Tokenizer adapter using ESM alphabet batch converter."""
 
-    def __init__(self, batch_converter: Any, padding_idx: int) -> None:
+    def __init__(
+        self,
+        batch_converter: Any | None = None,
+        padding_idx: int | None = None,
+        *,
+        tokenizer: Any | None = None,
+        device: str = "cpu",
+    ) -> None:
         self.batch_converter = batch_converter
-        self.padding_idx = int(padding_idx)
+        self.padding_idx = int(padding_idx) if padding_idx is not None else None
+        self.tokenizer = tokenizer
+        self.device = str(device)
 
     def tokenize(self, sequence: str) -> Any:
+        if self.tokenizer is not None:
+            encoded = self.tokenizer(sequence, add_special_tokens=True, return_tensors="pt")
+            return {
+                "input_ids": encoded["input_ids"].to(self.device),
+                "attention_mask": encoded["attention_mask"].to(self.device),
+            }
+
+        if self.batch_converter is None or self.padding_idx is None:
+            raise EmbeddingBackendError("ESM2 tokenizer adapter is missing batch converter configuration.")
         labels, strs, tokens = self.batch_converter([("query", sequence)])
         _ = labels, strs
         lens = (tokens != self.padding_idx).sum(1)
@@ -73,8 +101,6 @@ class Esm2ModelAdapter(ModelAdapter):
     def infer(self, tokens: Any, *, layer_index: int | Sequence[int] | None = None) -> Any:
         if not isinstance(tokens, dict):
             raise EmbeddingInputError("Esm2ModelAdapter expects tokenized input as a dict.")
-        if "tokens" not in tokens or "lens" not in tokens:
-            raise EmbeddingInputError("Token dict must contain 'tokens' and 'lens'.")
 
         try:
             import torch  # type: ignore
@@ -85,26 +111,42 @@ class Esm2ModelAdapter(ModelAdapter):
 
         total = self._total_layers()
         requested = _resolve_layer_indices(layer_index, total_layers=total)
-        # ESM2 repr_layers uses native indices, where top layer is `num_layers`.
-        repr_layers = requested
+        if "tokens" in tokens and "lens" in tokens:
+            with torch.no_grad():
+                out = self.model(tokens["tokens"], repr_layers=requested, return_contacts=False)
 
-        with torch.no_grad():
-            out = self.model(tokens["tokens"], repr_layers=repr_layers, return_contacts=False)
+            reps = out.get("representations")
+            if not isinstance(reps, dict):
+                raise EmbeddingBackendError("ESM2 output missing 'representations' dictionary.")
 
-        reps = out.get("representations")
-        if not isinstance(reps, dict):
-            raise EmbeddingBackendError("ESM2 output missing 'representations' dictionary.")
+            layers: Dict[int, Any] = {}
+            tokens_len = int(tokens["lens"][0].item())
+            start = 1
+            end = max(tokens_len - 1, 1)  # remove BOS and EOS
+            for idx in requested:
+                tensor = reps.get(idx)
+                if tensor is None:
+                    raise EmbeddingBackendError(f"ESM2 output does not include requested layer {idx}.")
+                layers[idx] = tensor[0, start:end]
+            return {"layers": layers, "token_span": (start, end)}
 
-        layers: Dict[int, Any] = {}
-        tokens_len = int(tokens["lens"][0].item())
-        start = 1
-        end = max(tokens_len - 1, 1)  # remove BOS and EOS
-        for idx in requested:
-            tensor = reps.get(idx)
-            if tensor is None:
-                raise EmbeddingBackendError(f"ESM2 output does not include requested layer {idx}.")
-            layers[idx] = tensor[0, start:end]
-        return {"layers": layers, "token_span": (start, end)}
+        if "input_ids" in tokens and "attention_mask" in tokens:
+            with torch.no_grad():
+                out = self.model(
+                    input_ids=tokens["input_ids"],
+                    attention_mask=tokens["attention_mask"],
+                    output_hidden_states=True,
+                    return_dict=True,
+                )
+            hidden_states = getattr(out, "hidden_states", None)
+            if hidden_states is None:
+                raise EmbeddingBackendError("ESM2 HF output missing hidden_states.")
+            valid_len = int(tokens["attention_mask"][0].sum().item())
+            start = 1
+            end = max(valid_len - 1, 1)
+            return {"layers": {idx: hidden_states[idx][0, start:end] for idx in requested}, "token_span": (start, end)}
+
+        raise EmbeddingInputError("Token dict must contain either 'tokens'/'lens' or 'input_ids'/'attention_mask'.")
 
     def available_layers(self) -> List[int] | None:
         total = self._total_layers()
@@ -190,16 +232,31 @@ class Esm2EmbeddingGenerator(EmbeddingGenerator):
                     f"Unsupported ESM2 model name: {model_name!r}. "
                     f"Supported: {sorted(ESM2_PRETRAINED_LOADERS.keys())}"
                 )
-            loader = getattr(esm.pretrained, loader_name, None)
-            if loader is None or not callable(loader):
-                raise EmbeddingDependencyError(f"ESM pretrained loader not available: {loader_name}")
-            resolved_model, resolved_alphabet = loader()
+            pretrained_module = None
+            try:
+                pretrained_module = importlib.import_module("esm.pretrained")
+            except Exception:
+                pretrained_module = getattr(esm, "pretrained", None)
+            loader = getattr(pretrained_module, loader_name, None) if pretrained_module is not None else None
+            if loader is not None and callable(loader):
+                resolved_model, resolved_alphabet = loader()
+            else:
+                try:
+                    from transformers import AutoModel, AutoTokenizer  # type: ignore
+                except ModuleNotFoundError as exc:
+                    raise EmbeddingDependencyError(
+                        "Neither esm.pretrained nor transformers fallback is available for ESM2 loading."
+                    ) from exc
+                hf_name = _resolve_esm2_hf_model_name(resolved_name)
+                resolved_model = AutoModel.from_pretrained(hf_name)
+                resolved_converter = AutoTokenizer.from_pretrained(hf_name)
 
         if resolved_converter is None:
-            get_converter = getattr(resolved_alphabet, "get_batch_converter", None)
-            if get_converter is None or not callable(get_converter):
-                raise EmbeddingBackendError("ESM2 alphabet does not expose get_batch_converter().")
-            resolved_converter = get_converter()
+            if resolved_alphabet is not None:
+                get_converter = getattr(resolved_alphabet, "get_batch_converter", None)
+                if get_converter is None or not callable(get_converter):
+                    raise EmbeddingBackendError("ESM2 alphabet does not expose get_batch_converter().")
+                resolved_converter = get_converter()
 
         to_fn = getattr(resolved_model, "to", None)
         if callable(to_fn):
@@ -208,15 +265,17 @@ class Esm2EmbeddingGenerator(EmbeddingGenerator):
         if callable(eval_fn):
             eval_fn()
 
-        padding_idx = getattr(resolved_alphabet, "padding_idx", None)
-        if padding_idx is None:
-            raise EmbeddingBackendError("ESM2 alphabet missing padding_idx.")
-
         available_count = _resolve_esm2_layer_count(resolved_model)
+        padding_idx = getattr(resolved_alphabet, "padding_idx", None) if resolved_alphabet is not None else None
         super().__init__(
             model_reference=resolved_name,
             preprocessor=Esm2Preprocessor(),
-            tokenizer=Esm2TokenizerAdapter(resolved_converter, padding_idx=int(padding_idx)),
+            tokenizer=Esm2TokenizerAdapter(
+                resolved_converter if resolved_alphabet is not None else None,
+                int(padding_idx) if padding_idx is not None else None,
+                tokenizer=resolved_converter if resolved_alphabet is None else None,
+                device=device,
+            ),
             model=Esm2ModelAdapter(resolved_model, available_layer_count=available_count),
             postprocessor=Esm2Postprocessor(),
         )
@@ -351,12 +410,27 @@ def _resolve_esm2_layer_count(model: Any) -> int:
     num_layers = getattr(model, "num_layers", None)
     if isinstance(num_layers, int):
         return int(num_layers)
+    config = getattr(model, "config", None)
+    if config is not None:
+        num_hidden_layers = getattr(config, "num_hidden_layers", None)
+        if isinstance(num_hidden_layers, int):
+            return int(num_hidden_layers)
     args = getattr(model, "args", None)
     if args is not None:
         value = getattr(args, "layers", None)
         if isinstance(value, int):
             return int(value)
     raise EmbeddingBackendError("Could not infer ESM2 num_layers from model.")
+
+
+def _resolve_esm2_hf_model_name(model_name: str) -> str:
+    normalized = str(model_name).strip().lower()
+    if normalized.startswith("facebook/"):
+        return str(model_name).strip()
+    resolved = ESM2_HF_MODEL_NAMES.get(normalized)
+    if resolved is None:
+        raise EmbeddingInputError(f"Unsupported ESM2 Hugging Face fallback model name: {model_name!r}.")
+    return resolved
 
 
 def _normalize_requested_layers(layer_index: int | Sequence[int] | None) -> List[int] | None:

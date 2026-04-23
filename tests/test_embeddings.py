@@ -464,6 +464,62 @@ def test_prott5_generator_raises_dependency_error_when_transformers_missing(
         ProtT5EmbeddingGenerator()
 
 
+def test_prott5_generator_uses_t5_tokenizer_for_transformers_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeAutoConfig:
+        observed_name: str | None = None
+
+        @staticmethod
+        def from_pretrained(name: str) -> object:
+            _FakeAutoConfig.observed_name = name
+            return types.SimpleNamespace()
+
+    class _FakeT5EncoderModel:
+        observed_name: str | None = None
+        observed_config: object | None = None
+
+        @staticmethod
+        def from_pretrained(name: str, config: object | None = None) -> object:
+            _FakeT5EncoderModel.observed_name = name
+            _FakeT5EncoderModel.observed_config = config
+
+            class _FakeLoadedModel:
+                def to(self, _device: str) -> "_FakeLoadedModel":
+                    return self
+
+                def eval(self) -> None:
+                    return None
+
+            return _FakeLoadedModel()
+
+    class _FakeT5Tokenizer:
+        observed_name: str | None = None
+        observed_do_lower_case: bool | None = None
+
+        @staticmethod
+        def from_pretrained(name: str, do_lower_case: bool = False) -> object:
+            _FakeT5Tokenizer.observed_name = name
+            _FakeT5Tokenizer.observed_do_lower_case = do_lower_case
+            return object()
+
+    fake_transformers = types.SimpleNamespace(
+        AutoConfig=_FakeAutoConfig,
+        T5EncoderModel=_FakeT5EncoderModel,
+        T5Tokenizer=_FakeT5Tokenizer,
+    )
+
+    monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
+
+    generator = ProtT5EmbeddingGenerator(model_name="Rostlab/prot_t5_xl_uniref50", device="cpu")
+
+    assert generator.model_reference == "Rostlab/prot_t5_xl_uniref50"
+    assert _FakeAutoConfig.observed_name == "Rostlab/prot_t5_xl_uniref50"
+    assert _FakeT5EncoderModel.observed_name == "Rostlab/prot_t5_xl_uniref50"
+    assert _FakeT5Tokenizer.observed_name == "Rostlab/prot_t5_xl_uniref50"
+    assert _FakeT5Tokenizer.observed_do_lower_case is False
+
+
 class _FakeScalar:
     def __init__(self, value: float) -> None:
         self.value = value

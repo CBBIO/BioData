@@ -193,14 +193,14 @@ class ProtT5EmbeddingGenerator(EmbeddingGenerator):
 
         if resolved_tokenizer is None or resolved_model is None:
             try:
-                from transformers import AutoConfig, AutoTokenizer, T5EncoderModel  # type: ignore
+                from transformers import AutoConfig, T5EncoderModel, T5Tokenizer  # type: ignore
             except ModuleNotFoundError as exc:
                 raise EmbeddingDependencyError(
                     "transformers is required for ProtT5 loading. Install with: pip install transformers"
                 ) from exc
 
             if resolved_tokenizer is None:
-                resolved_tokenizer = AutoTokenizer.from_pretrained(model_name, do_lower_case=False)
+                resolved_tokenizer = T5Tokenizer.from_pretrained(model_name, do_lower_case=False)
             if resolved_model is None:
                 config = AutoConfig.from_pretrained(model_name)
                 # Silence tied-weights warning for ProtT5 checkpoints with both shared and encoder embeds present.
