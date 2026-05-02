@@ -292,6 +292,14 @@ All notebooks are under `notebooks/` and include a top setup cell for notebook-o
 - Compute sequence identity
 - Build tables and density plots (with linear fit and `R²`)
 
+### `sequence_similarity_vs_embedding_distance.ipynb`
+
+- Fetch the 10 nearest embedding neighbors of a target protein
+- Retrieve amino-acid sequences for the target and all neighbors
+- Run local (Smith-Waterman) and global (Needleman-Wunsch) pairwise alignments
+- Print all alignment details (score, identity, positives, aligned strings)
+- Plot global % identity vs (1 − cosine distance) for the 10 neighbors
+
 ## Running Tests
 
 ```bash
