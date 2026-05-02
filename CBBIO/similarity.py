@@ -6,7 +6,7 @@ This module is intentionally independent from database access code.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, Optional
+from typing import Literal
 
 
 AlignmentMode = Literal["local", "global"]
