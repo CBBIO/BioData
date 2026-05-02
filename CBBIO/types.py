@@ -15,6 +15,8 @@ SimilarityMethod: TypeAlias = Literal["resnik", "lin", "schlicker", "wang"]
 EmbeddingModel: TypeAlias = int | str
 EmbeddingVector: TypeAlias = Sequence[float]
 SearchBackend: TypeAlias = Literal["auto", "gpu", "pgvector", "faiss_cpu", "faiss_gpu", "cuvs_gpu", "torch_gpu"]
+AlignmentAlgorithm: TypeAlias = Literal["local", "global", "semiglobal"]
+ScoringMatrix: TypeAlias = str
 
 
 @dataclass(frozen=True)
@@ -47,6 +49,8 @@ __all__ = [
     "StructureID",
     "DistanceMetric",
     "SimilarityMethod",
+    "AlignmentAlgorithm",
+    "ScoringMatrix",
     "EmbeddingModel",
     "EmbeddingVector",
     "SearchBackend",

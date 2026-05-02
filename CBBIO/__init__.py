@@ -106,7 +106,21 @@ from .embeddings_esm1b import (
     Esm1bPreprocessor,
     Esm1bTokenizerAdapter,
 )
+from .sequence_similarity import (
+    DEFAULT_ALGORITHM,
+    DEFAULT_GAP_EXTEND,
+    DEFAULT_GAP_OPEN,
+    DEFAULT_MATRIX,
+    SequenceSimilarityDependencyError,
+    SequenceSimilarityError,
+    SequenceSimilarityInputError,
+    SimilarityResult,
+    compute_similarity,
+    pairwise_similarity_matrix,
+    similarity_to_dict,
+)
 from .types import (
+    AlignmentAlgorithm,
     DistanceMetric,
     EmbeddingModel,
     EmbeddingType,
@@ -115,6 +129,7 @@ from .types import (
     GOID,
     Neighbor,
     ProteinID,
+    ScoringMatrix,
     SearchBackend,
     SimilarityMethod,
     StructureID,
@@ -218,4 +233,18 @@ __all__ = [
     "load_embedding_records_npy",
     "save_embedding_records_pickle",
     "save_embedding_records_npy",
+    # sequence similarity
+    "AlignmentAlgorithm",
+    "ScoringMatrix",
+    "SimilarityResult",
+    "SequenceSimilarityError",
+    "SequenceSimilarityDependencyError",
+    "SequenceSimilarityInputError",
+    "DEFAULT_ALGORITHM",
+    "DEFAULT_MATRIX",
+    "DEFAULT_GAP_OPEN",
+    "DEFAULT_GAP_EXTEND",
+    "compute_similarity",
+    "pairwise_similarity_matrix",
+    "similarity_to_dict",
 ]
