@@ -106,6 +106,19 @@ from .embeddings_esm1b import (
     Esm1bPreprocessor,
     Esm1bTokenizerAdapter,
 )
+from .similarity import (
+    AlignmentMode,
+    AlignmentResult,
+    DEFAULT_GAP_EXTEND,
+    DEFAULT_GAP_OPEN,
+    DEFAULT_MATRIX,
+    DEFAULT_MODE,
+    InvalidSequenceError,
+    SequenceSimilarityError,
+    SimilarityDependencyError,
+    UnknownMatrixError,
+    align_sequences,
+)
 from .types import (
     DistanceMetric,
     EmbeddingModel,
@@ -218,4 +231,15 @@ __all__ = [
     "load_embedding_records_npy",
     "save_embedding_records_pickle",
     "save_embedding_records_npy",
+    "AlignmentMode",
+    "AlignmentResult",
+    "DEFAULT_GAP_EXTEND",
+    "DEFAULT_GAP_OPEN",
+    "DEFAULT_MATRIX",
+    "DEFAULT_MODE",
+    "InvalidSequenceError",
+    "SequenceSimilarityError",
+    "SimilarityDependencyError",
+    "UnknownMatrixError",
+    "align_sequences",
 ]

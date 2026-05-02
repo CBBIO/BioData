@@ -3,3 +3,4 @@ pgvector
 numpy
 pyyaml
 goatools
+parasail
