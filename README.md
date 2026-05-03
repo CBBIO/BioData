@@ -199,6 +199,40 @@ Key capabilities:
 
 Detailed API reference: `docs/Taxonomy.md`
 
+### `CBBIO.similarity`
+
+Main entrypoint:
+
+- `align_sequences`
+
+Typical usage:
+
+```python
+from CBBIO.similarity import align_sequences
+
+result = align_sequences("ACDEFGHIKLMNPQRSTVWY", "ACDEFHIKLMNPQRSTVWY")
+print(f"% Identity: {result.identity:.1f}%")
+print(f"Score:      {result.score}")
+print(result.query_aligned)
+print(result.midline)
+print(result.ref_aligned)
+```
+
+Key capabilities:
+
+- Local alignment (Smith-Waterman) and global alignment (Needleman-Wunsch) via
+  `mode="local"` / `mode="global"`
+- Returns `AlignmentResult` with: `score`, `alignment_length`, `matches`,
+  `mismatches`, `gaps`, `identity` (%), `positives` (%), `query_aligned`,
+  `ref_aligned`, `midline`
+- Configurable gap penalties (`gap_open`, `gap_extend`) and substitution matrix
+  (`matrix`; any parasail-bundled matrix, e.g. `"blosum50"`, `"pam250"`,
+  `"dnafull"`)
+- Compatible with sequences returned by `BioDataClient` (`get_protein_sequence`,
+  `get_protein_sequences`)
+
+Detailed API reference: `docs/Similarity.md`
+
 ### `CBBIO.embeddings`
 
 Main entrypoints:
@@ -257,6 +291,14 @@ All notebooks are under `notebooks/` and include a top setup cell for notebook-o
 - Compute semantic similarity by GO category
 - Compute sequence identity
 - Build tables and density plots (with linear fit and `R²`)
+
+### `sequence_similarity_vs_embedding_distance.ipynb`
+
+- Fetch the 10 nearest embedding neighbors of a target protein
+- Retrieve amino-acid sequences for the target and all neighbors
+- Run local (Smith-Waterman) and global (Needleman-Wunsch) pairwise alignments
+- Print all alignment details (score, identity, positives, aligned strings)
+- Plot global % identity vs (1 − cosine distance) for the 10 neighbors
 
 ## Running Tests
 
