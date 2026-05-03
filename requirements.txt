@@ -4,3 +4,12 @@ numpy
 pyyaml
 goatools
 parasail
+faiss-cpu
+biopython
+
+# embedding model dependencies
+torch
+transformers
+sentencepiece
+protobuf
+esm
