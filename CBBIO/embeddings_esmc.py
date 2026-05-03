@@ -5,11 +5,12 @@ from __future__ import annotations
 from importlib import metadata as importlib_metadata
 import re
 import uuid
-from typing import Any, Dict, List, Sequence
+from typing import Any, Dict, List, Sequence, cast
 
 from .embeddings import (
     EmbeddingBackendError,
     EmbeddingDependencyError,
+    EmbeddingPayload,
     EmbeddingRecord,
     EmbeddingGenerator,
     EmbeddingGenerationError,
@@ -22,11 +23,11 @@ from .embeddings import (
     PreprocessorAdapter,
     RunMetadata,
     TokenizerAdapter,
-    _as_float_vector,
-    _normalize_generation_exception,
-    _validate_generation_input,
-    _validate_sequence,
+    as_float_matrix,
+    normalize_generation_exception,
     utc_now_iso,
+    validate_generation_input,
+    validate_sequence,
 )
 
 
@@ -45,7 +46,7 @@ class EsmcPreprocessor(PreprocessorAdapter):
 
     def preprocess(self, raw_sequence: str) -> str:
         sequence = str(raw_sequence).strip().upper()
-        _validate_sequence(sequence, context="ESM-C preprocessing")
+        validate_sequence(sequence, context="ESM-C preprocessing")
         return re.sub(r"[UZOB]", "X", sequence)
 
 
@@ -119,26 +120,20 @@ class EsmcModelAdapter(ModelAdapter):
 class EsmcPostprocessor(PostprocessorAdapter):
     """Postprocessing for ESM-C outputs without pooling."""
 
-    def postprocess(self, model_output: Any) -> Sequence[float]:
+    def postprocess(self, model_output: Any) -> EmbeddingPayload:
         if not isinstance(model_output, dict):
             raise EmbeddingBackendError("EsmcPostprocessor expects a dict payload from model adapter.")
-        layers_obj = model_output.get("layers")
-        if not isinstance(layers_obj, dict):
+        model_output_map = cast(Dict[str, Any], model_output)
+        layers_obj_raw = model_output_map.get("layers")
+        if not isinstance(layers_obj_raw, dict):
             raise EmbeddingBackendError("EsmcPostprocessor expects a 'layers' dict in model output.")
+        layers_obj = cast(Dict[int, Any], layers_obj_raw)
         if not layers_obj:
             raise EmbeddingBackendError("EsmcPostprocessor received no layers.")
 
         first_key = sorted(layers_obj.keys())[0]
         layer_tensor = layers_obj[first_key]
-        if hasattr(layer_tensor, "tolist") and callable(layer_tensor.tolist):
-            values = layer_tensor.tolist()
-            if isinstance(values, list):
-                return [[float(col) for col in row] for row in values if isinstance(row, list)]
-
-        rows: List[List[float]] = []
-        for row in layer_tensor:
-            rows.append(_as_float_vector(row))
-        return rows
+        return as_float_matrix(layer_tensor)
 
 
 class EsmcEmbeddingGenerator(EmbeddingGenerator):
@@ -209,14 +204,16 @@ class EsmcEmbeddingGenerator(EmbeddingGenerator):
 
         for index, record in enumerate(records):
             try:
-                normalized = _validate_generation_input(record, index=index)
+                normalized = validate_generation_input(record, index=index)
                 prepared = self.preprocessor.preprocess(normalized.sequence)
                 tokenized = self.tokenizer.tokenize(prepared)
                 model_output = self.model.infer(tokenized, layer_index=layer_index)
 
-                layers_obj = model_output.get("layers") if isinstance(model_output, dict) else None
-                if not isinstance(layers_obj, dict):
+                model_output_map = cast(Dict[str, Any], model_output) if isinstance(model_output, dict) else None
+                layers_obj_raw = model_output_map.get("layers") if model_output_map is not None else None
+                if not isinstance(layers_obj_raw, dict):
                     raise EmbeddingBackendError("ESM-C model output missing layers dictionary.")
+                layers_obj = cast(Dict[int, Any], layers_obj_raw)
 
                 for layer_id, layer_tensor in sorted(layers_obj.items(), key=lambda item: int(item[0])):
                     matrix = _as_matrix(layer_tensor)
@@ -240,7 +237,7 @@ class EsmcEmbeddingGenerator(EmbeddingGenerator):
                         )
                     )
             except Exception as exc:
-                normalized_exc: EmbeddingGenerationError = _normalize_generation_exception(exc)
+                normalized_exc: EmbeddingGenerationError = normalize_generation_exception(exc)
                 if fail_fast:
                     raise normalized_exc
                 result.errors.append(
@@ -277,13 +274,16 @@ class EsmcEmbeddingGenerator(EmbeddingGenerator):
 def _layers_from_embeddings(embeddings: Any) -> Dict[int, Any]:
     # Accept common tensor-like outputs and normalize to {layer_idx: residue_tensor}.
     shape = getattr(embeddings, "shape", None)
-    ndim = len(shape) if shape is not None else None
+    shape_seq = cast(Sequence[Any], shape) if shape is not None else None
+    ndim = len(shape_seq) if shape_seq is not None else None
 
     if ndim == 4:
         # [batch, layers, residues, hidden]
-        return {int(i): embeddings[0, i] for i in range(int(shape[1]))}
+        assert shape_seq is not None
+        return {int(i): embeddings[0, i] for i in range(int(shape_seq[1]))}
     if ndim == 3:
-        first_dim = int(shape[0])
+        assert shape_seq is not None
+        first_dim = int(shape_seq[0])
         # Heuristic: if first dim is 1, assume [batch, residues, hidden] final-layer only.
         if first_dim == 1:
             return {0: embeddings[0]}
@@ -294,11 +294,13 @@ def _layers_from_embeddings(embeddings: Any) -> Dict[int, Any]:
         return {0: embeddings}
 
     # Fallback for list-like objects.
-    values = embeddings.tolist() if hasattr(embeddings, "tolist") and callable(embeddings.tolist) else embeddings
+    tolist = getattr(embeddings, "tolist", None)
+    values = tolist() if callable(tolist) else embeddings
     if isinstance(values, list):
-        if values and isinstance(values[0], list) and values[0] and isinstance(values[0][0], list):
-            return {int(i): values[i] for i in range(len(values))}
-        return {0: values}
+        list_values = cast(List[Any], values)
+        if list_values and isinstance(list_values[0], list) and list_values[0] and isinstance(list_values[0][0], list):
+            return {int(i): list_values[i] for i in range(len(list_values))}
+        return {0: list_values}
     raise EmbeddingBackendError("Could not normalize ESM-C embeddings output.")
 
 
@@ -331,13 +333,7 @@ def _select_layers(
 
 
 def _as_matrix(layer_tensor: Any) -> List[List[float]]:
-    if hasattr(layer_tensor, "tolist") and callable(layer_tensor.tolist):
-        as_list = layer_tensor.tolist()
-    else:
-        as_list = layer_tensor
-    if not isinstance(as_list, list):
-        raise EmbeddingBackendError("Layer tensor could not be converted to a row-major list.")
-    return [_as_float_vector(row) for row in as_list]
+    return as_float_matrix(layer_tensor)
 
 
 def _resolve_layer_count(model_name: str) -> int | None:

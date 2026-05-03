@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Generator
 
 import pytest
 
@@ -18,7 +19,7 @@ _RUN_HINT = (
 
 
 @pytest.fixture(scope="module")
-def integration_client() -> bd.BioDataClient:
+def integration_client() -> Generator[bd.BioDataClient, None, None]:
     config_path = Path(os.getenv("BIODATA_TEST_CONFIG", "config_test.yaml"))
     if not config_path.exists():
         pytest.skip(f"{_RUN_HINT}\nMissing config file: {config_path}")
@@ -130,4 +131,3 @@ def test_integration_embedding_neighbor_search(integration_client: bd.BioDataCli
     )
     assert isinstance(neighbors, list)
     assert len(neighbors) <= 3
-

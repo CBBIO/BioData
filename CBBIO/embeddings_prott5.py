@@ -5,11 +5,12 @@ from __future__ import annotations
 from importlib import metadata as importlib_metadata
 import re
 import uuid
-from typing import Any, Dict, List, Sequence
+from typing import Any, Dict, List, Sequence, cast
 
 from .embeddings import (
     EmbeddingBackendError,
     EmbeddingDependencyError,
+    EmbeddingPayload,
     EmbeddingRecord,
     EmbeddingGenerator,
     EmbeddingGenerationError,
@@ -22,11 +23,11 @@ from .embeddings import (
     PreprocessorAdapter,
     RunMetadata,
     TokenizerAdapter,
-    _as_float_vector,
-    _normalize_generation_exception,
-    _validate_generation_input,
-    _validate_sequence,
+    as_float_matrix,
+    normalize_generation_exception,
     utc_now_iso,
+    validate_generation_input,
+    validate_sequence,
 )
 
 
@@ -39,7 +40,7 @@ class ProtT5Preprocessor(PreprocessorAdapter):
 
     def preprocess(self, raw_sequence: str) -> str:
         sequence = str(raw_sequence).strip().upper()
-        _validate_sequence(sequence, context="ProtT5 preprocessing")
+        validate_sequence(sequence, context="ProtT5 preprocessing")
         replaced = re.sub(r"[UZOB]", "X", sequence)
         return " ".join(list(replaced))
 
@@ -68,8 +69,9 @@ class ProtT5TokenizerAdapter(TokenizerAdapter):
                 padding="longest",
                 return_tensors="pt",
             )
-            input_ids = encoded["input_ids"].to(self.device)
-            attention_mask = encoded["attention_mask"].to(self.device)
+            encoded_map = cast(Dict[str, Any], encoded)
+            input_ids = encoded_map["input_ids"].to(self.device)
+            attention_mask = encoded_map["attention_mask"].to(self.device)
             return {"input_ids": input_ids, "attention_mask": attention_mask}
 
         batch_encode_plus = getattr(self.tokenizer, "batch_encode_plus", None)
@@ -79,8 +81,10 @@ class ProtT5TokenizerAdapter(TokenizerAdapter):
                 add_special_tokens=True,
                 padding="longest",
             )
-            input_ids = torch.tensor(ids["input_ids"]).to(self.device)
-            attention_mask = torch.tensor(ids["attention_mask"]).to(self.device)
+            ids_map = cast(Dict[str, Any], ids)
+            tensor_fn = getattr(torch, "tensor")
+            input_ids = tensor_fn(ids_map["input_ids"]).to(self.device)
+            attention_mask = tensor_fn(ids_map["attention_mask"]).to(self.device)
             return {"input_ids": input_ids, "attention_mask": attention_mask}
 
         raise EmbeddingBackendError(
@@ -106,6 +110,7 @@ class ProtT5ModelAdapter(ModelAdapter):
             raise EmbeddingInputError("ProtT5ModelAdapter expects tokenized input as a dict.")
         if "input_ids" not in tokens or "attention_mask" not in tokens:
             raise EmbeddingInputError("Token dict must contain 'input_ids' and 'attention_mask'.")
+        token_map = cast(Dict[str, Any], tokens)
 
         try:
             import torch  # type: ignore
@@ -116,8 +121,8 @@ class ProtT5ModelAdapter(ModelAdapter):
 
         with torch.no_grad():
             model_output = self.model(
-                input_ids=tokens["input_ids"],
-                attention_mask=tokens["attention_mask"],
+                input_ids=token_map["input_ids"],
+                attention_mask=token_map["attention_mask"],
                 output_hidden_states=True,
                 return_dict=True,
             )
@@ -127,7 +132,7 @@ class ProtT5ModelAdapter(ModelAdapter):
 
         total_layers = len(hidden_states)
         layer_indices = _resolve_layer_indices(layer_index, total_layers=total_layers)
-        residue_len = _residue_length_from_mask(tokens["attention_mask"])
+        residue_len = _residue_length_from_mask(token_map["attention_mask"])
 
         selected_layers: Dict[int, Any] = {}
         # Important convention:
@@ -148,28 +153,20 @@ class ProtT5ModelAdapter(ModelAdapter):
 class ProtT5Postprocessor(PostprocessorAdapter):
     """Postprocessing for ProtT5 outputs without pooling."""
 
-    def postprocess(self, model_output: Any) -> Sequence[float]:
+    def postprocess(self, model_output: Any) -> EmbeddingPayload:
         if not isinstance(model_output, dict):
             raise EmbeddingBackendError("ProtT5Postprocessor expects a dict payload from model adapter.")
-        layers_obj = model_output.get("layers")
-        if not isinstance(layers_obj, dict):
+        model_output_map = cast(Dict[str, Any], model_output)
+        layers_obj_raw = model_output_map.get("layers")
+        if not isinstance(layers_obj_raw, dict):
             raise EmbeddingBackendError("ProtT5Postprocessor expects a 'layers' dict in model output.")
+        layers_obj = cast(Dict[int, Any], layers_obj_raw)
         if not layers_obj:
             raise EmbeddingBackendError("ProtT5Postprocessor received no layers.")
 
         first_key = sorted(layers_obj.keys())[0]
         layer_tensor = layers_obj[first_key]
-        if hasattr(layer_tensor, "tolist") and callable(layer_tensor.tolist):
-            values = layer_tensor.tolist()
-            if isinstance(values, list):
-                # Preserve per-residue structure and numeric coercion.
-                return [[float(col) for col in row] for row in values if isinstance(row, list)]
-
-        # Fallback path for non-tensor-compatible objects.
-        rows: List[List[float]] = []
-        for row in layer_tensor:
-            rows.append(_as_float_vector(row))
-        return rows
+        return as_float_matrix(layer_tensor)
 
 
 class ProtT5EmbeddingGenerator(EmbeddingGenerator):
@@ -188,8 +185,8 @@ class ProtT5EmbeddingGenerator(EmbeddingGenerator):
         tokenizer: Any | None = None,
         model: Any | None = None,
     ) -> None:
-        resolved_tokenizer = tokenizer
-        resolved_model = model
+        resolved_tokenizer: Any | None = tokenizer
+        resolved_model: Any | None = model
 
         if resolved_tokenizer is None or resolved_model is None:
             try:
@@ -200,12 +197,13 @@ class ProtT5EmbeddingGenerator(EmbeddingGenerator):
                 ) from exc
 
             if resolved_tokenizer is None:
-                resolved_tokenizer = T5Tokenizer.from_pretrained(model_name, do_lower_case=False)
+                tokenizer_cls = cast(Any, T5Tokenizer)
+                resolved_tokenizer = tokenizer_cls.from_pretrained(model_name, do_lower_case=False)
             if resolved_model is None:
-                config = AutoConfig.from_pretrained(model_name)
+                config = cast(Any, AutoConfig).from_pretrained(model_name)
                 # Silence tied-weights warning for ProtT5 checkpoints with both shared and encoder embeds present.
                 setattr(config, "tie_word_embeddings", False)
-                resolved_model = T5EncoderModel.from_pretrained(model_name, config=config)
+                resolved_model = cast(Any, T5EncoderModel).from_pretrained(model_name, config=config)
 
         super().__init__(
             model_reference=model_name,
@@ -247,14 +245,16 @@ class ProtT5EmbeddingGenerator(EmbeddingGenerator):
 
         for index, record in enumerate(records):
             try:
-                normalized = _validate_generation_input(record, index=index)
+                normalized = validate_generation_input(record, index=index)
                 prepared = self.preprocessor.preprocess(normalized.sequence)
                 tokenized = self.tokenizer.tokenize(prepared)
                 model_output = self.model.infer(tokenized, layer_index=layer_index)
 
-                layers_obj = model_output.get("layers") if isinstance(model_output, dict) else None
-                if not isinstance(layers_obj, dict):
+                model_output_map = cast(Dict[str, Any], model_output) if isinstance(model_output, dict) else None
+                layers_obj_raw = model_output_map.get("layers") if model_output_map is not None else None
+                if not isinstance(layers_obj_raw, dict):
                     raise EmbeddingBackendError("ProtT5 model output missing layers dictionary.")
+                layers_obj = cast(Dict[int, Any], layers_obj_raw)
 
                 for layer_id, layer_tensor in sorted(layers_obj.items(), key=lambda item: int(item[0])):
                     matrix = _as_matrix(layer_tensor)
@@ -278,7 +278,7 @@ class ProtT5EmbeddingGenerator(EmbeddingGenerator):
                         )
                     )
             except Exception as exc:
-                normalized_exc: EmbeddingGenerationError = _normalize_generation_exception(exc)
+                normalized_exc: EmbeddingGenerationError = normalize_generation_exception(exc)
                 if fail_fast:
                     raise normalized_exc
                 result.errors.append(
@@ -362,18 +362,7 @@ def _residue_length_from_mask(attention_mask: Any) -> int:
 
 
 def _as_matrix(layer_tensor: Any) -> List[List[float]]:
-    if hasattr(layer_tensor, "tolist") and callable(layer_tensor.tolist):
-        as_list = layer_tensor.tolist()
-    else:
-        as_list = layer_tensor
-
-    if not isinstance(as_list, list):
-        raise EmbeddingBackendError("Layer tensor could not be converted to a row-major list.")
-
-    rows: List[List[float]] = []
-    for row in as_list:
-        rows.append(_as_float_vector(row))
-    return rows
+    return as_float_matrix(layer_tensor)
 
 
 def _normalize_requested_layers(layer_index: int | Sequence[int] | None) -> List[int] | None:

@@ -2,27 +2,32 @@
 
 from __future__ import annotations
 
-import math
 import warnings
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, cast
 
-from ..BioData import BioDataError, NotFoundError, _cursor, _embedding_dimension, _metric_opclass, _metric_operator
+from ..BioData import BioDataError, NotFoundError, cursor, embedding_dimension, metric_opclass, metric_operator
 from ..types import DistanceMetric, Neighbor, SearchBackend
-from .types import DEFAULT_BACKEND_THRESHOLDS, ResolvedSearchBackend, _BackendAvailability, _GpuSearchState, _ResolvedBackend
+from .types import (
+    DEFAULT_BACKEND_THRESHOLDS,
+    BackendAvailability,
+    GpuSearchState,
+    ResolvedBackend,
+    ResolvedSearchBackend,
+)
 from .utils import (
-    _as_numpy_matrix,
-    _cuda_device_index,
-    _import_cupy,
-    _import_cuvs,
-    _import_faiss,
-    _import_torch,
-    _normalize_distance,
-    _preferred_cuvs_device,
-    _preferred_faiss_device,
-    _preferred_torch_device,
-    _prepare_index_vectors,
-    _tensor_to_list,
-    _torch_normalize,
+    as_numpy_matrix,
+    cuda_device_index,
+    import_cupy,
+    import_cuvs,
+    import_faiss,
+    import_torch,
+    normalize_distance,
+    preferred_cuvs_device,
+    preferred_faiss_device,
+    preferred_torch_device,
+    prepare_index_vectors,
+    tensor_to_list,
+    torch_normalize,
 )
 
 
@@ -64,7 +69,7 @@ class SearchService:
             )
         )
         stats = {
-            "dim": int(_embedding_dimension(sample["embedding"])),
+            "dim": int(embedding_dimension(sample["embedding"])),
             "row_count": row_count,
         }
         self._client._search_workload_cache[cache_key] = stats
@@ -74,9 +79,9 @@ class SearchService:
         resolved_device = str(device or "").strip().lower()
         if not resolved_device.startswith("cuda"):
             return None
-        device_index = _cuda_device_index(resolved_device)
+        device_index = cuda_device_index(resolved_device)
 
-        cupy = _import_cupy(allow_missing=True)
+        cupy = import_cupy(allow_missing=True)
         if cupy is not None:
             try:
                 with cupy.cuda.Device(device_index):
@@ -85,7 +90,7 @@ class SearchService:
             except Exception:
                 pass
 
-        torch = _import_torch()
+        torch = import_torch()
         if bool(getattr(torch.cuda, "is_available", lambda: False)()):
             try:
                 free_bytes, total_bytes = torch.cuda.mem_get_info(device_index)
@@ -155,7 +160,7 @@ class SearchService:
 
     def _apply_auto_gpu_heuristics(
         self,
-        resolved: _ResolvedBackend,
+        resolved: ResolvedBackend,
         *,
         requested_backend: SearchBackend,
         embedding_type_id: int,
@@ -163,7 +168,7 @@ class SearchService:
         metric: DistanceMetric,
         batch_size: int,
         device: Optional[str],
-    ) -> _ResolvedBackend:
+    ) -> ResolvedBackend:
         del metric
         if str(requested_backend) != "auto":
             return resolved
@@ -178,7 +183,7 @@ class SearchService:
         # and only larger batches should pay the GPU warmup cost.
         if not resolved.resident:
             if batch_size <= 100:
-                return _ResolvedBackend(
+                return ResolvedBackend(
                     "pgvector",
                     None,
                     resolved.ann_requested,
@@ -190,7 +195,7 @@ class SearchService:
                     resolved.hardware_class,
                 )
             if batch_size < 1000 and availability.faiss_cpu:
-                return _ResolvedBackend(
+                return ResolvedBackend(
                     "faiss_cpu",
                     "cpu",
                     resolved.ann_requested,
@@ -223,7 +228,7 @@ class SearchService:
 
         if effective_chunk is None:
             fallback_backend = "faiss_cpu" if self._client._detect_backend_availability(device=None).faiss_cpu else "pgvector"
-            return _ResolvedBackend(
+            return ResolvedBackend(
                 fallback_backend,
                 "cpu" if fallback_backend == "faiss_cpu" else None,
                 resolved.ann_requested,
@@ -238,7 +243,7 @@ class SearchService:
                 free_bytes=free_bytes,
             )
 
-        return _ResolvedBackend(
+        return ResolvedBackend(
             resolved.backend,
             resolved.device,
             resolved.ann_requested,
@@ -492,10 +497,10 @@ class SearchService:
         ann_candidate_pool: Optional[int],
     ) -> List[Neighbor]:
         conn = self._client._require_connection()
-        operator = _metric_operator(metric)
+        operator = metric_operator(metric)
         excluded_ids = [str(value) for value in exclude_protein_ids]
         if use_ann:
-            dim = _embedding_dimension(query_embedding)
+            dim = embedding_dimension(query_embedding)
             candidate_limit = max(k, int(ann_candidate_pool)) if ann_candidate_pool is not None else max(k * 20, 200)
             extra_where = ""
             params = [
@@ -562,7 +567,7 @@ class SearchService:
             )
             params.extend([query_embedding, k])
 
-        with _cursor(conn) as cur:
+        with cursor(conn) as cur:
             if use_ann and ann_ef_search > 0:
                 cur.execute(f"SET hnsw.ef_search = {int(ann_ef_search)};")
             cur.execute(sql, tuple(params))
@@ -584,7 +589,7 @@ class SearchService:
         include_query: bool,
     ) -> Dict[str, List[Neighbor]]:
         conn = self._client._require_connection()
-        operator = _metric_operator(metric)
+        operator = metric_operator(metric)
         dim_row = self._client.query_one(
             """
             SELECT embedding
@@ -597,7 +602,7 @@ class SearchService:
         )
         if dim_row is None or dim_row.get("embedding") is None:
             return {}
-        dim = _embedding_dimension(dim_row["embedding"])
+        dim = embedding_dimension(dim_row["embedding"])
         self._client._warn_if_missing_ann_index(embedding_type_id, layer_index, metric)
 
         exclude_clause = ""
@@ -652,7 +657,7 @@ class SearchService:
             k,
         )
 
-        with _cursor(conn) as cur:
+        with cursor(conn) as cur:
             cur.execute(sql, params)
             rows = cur.fetchall()
 
@@ -691,7 +696,7 @@ class SearchService:
             device=device,
             ann_requested=use_ann,
         )
-        query_matrix = _as_numpy_matrix([query_embedding])
+        query_matrix = as_numpy_matrix([query_embedding])
         grouped = self._client._search_faiss_state(
             state,
             query_ids=["__single__"],
@@ -720,7 +725,7 @@ class SearchService:
             device="cpu",
             ann_requested=use_ann,
         )
-        query_matrix = _as_numpy_matrix([query_embedding])
+        query_matrix = as_numpy_matrix([query_embedding])
         grouped = self._client._search_faiss_state(
             state,
             query_ids=["__single__"],
@@ -749,7 +754,7 @@ class SearchService:
             device=device,
             ann_requested=False,
         )
-        query_matrix = _as_numpy_matrix([query_embedding])
+        query_matrix = as_numpy_matrix([query_embedding])
         grouped = self._client._search_torch_state(
             state,
             query_ids=["__single__"],
@@ -779,7 +784,7 @@ class SearchService:
             device=device,
             ann_requested=use_ann,
         )
-        query_matrix = _as_numpy_matrix([query_embedding])
+        query_matrix = as_numpy_matrix([query_embedding])
         grouped = self._client._search_cuvs_state(
             state,
             query_ids=["__single__"],
@@ -809,8 +814,10 @@ class SearchService:
             device=device,
             ann_requested=False,
         )
-        query_matrix = _as_numpy_matrix(query_vectors)
-        per_query_excluded = {query_id: set() if include_query else {str(query_id)} for query_id in query_ids}
+        query_matrix = as_numpy_matrix(query_vectors)
+        per_query_excluded: Dict[str, Set[str]] = {
+            str(query_id): set() if include_query else {str(query_id)} for query_id in query_ids
+        }
         return self._client._search_faiss_state(
             state,
             query_ids=query_ids,
@@ -839,8 +846,10 @@ class SearchService:
             device="cpu",
             ann_requested=use_ann,
         )
-        query_matrix = _as_numpy_matrix(query_vectors)
-        per_query_excluded = {query_id: set() if include_query else {str(query_id)} for query_id in query_ids}
+        query_matrix = as_numpy_matrix(query_vectors)
+        per_query_excluded: Dict[str, Set[str]] = {
+            str(query_id): set() if include_query else {str(query_id)} for query_id in query_ids
+        }
         return self._client._search_faiss_state(
             state,
             query_ids=query_ids,
@@ -870,8 +879,10 @@ class SearchService:
             device=device,
             ann_requested=use_ann,
         )
-        query_matrix = _as_numpy_matrix(query_vectors)
-        per_query_excluded = {query_id: set() if include_query else {str(query_id)} for query_id in query_ids}
+        query_matrix = as_numpy_matrix(query_vectors)
+        per_query_excluded: Dict[str, Set[str]] = {
+            str(query_id): set() if include_query else {str(query_id)} for query_id in query_ids
+        }
         return self._client._search_cuvs_state(
             state,
             query_ids=query_ids,
@@ -900,8 +911,10 @@ class SearchService:
             device=device,
             ann_requested=False,
         )
-        query_matrix = _as_numpy_matrix(query_vectors)
-        per_query_excluded = {query_id: set() if include_query else {str(query_id)} for query_id in query_ids}
+        query_matrix = as_numpy_matrix(query_vectors)
+        per_query_excluded: Dict[str, Set[str]] = {
+            str(query_id): set() if include_query else {str(query_id)} for query_id in query_ids
+        }
         return self._client._search_torch_state(
             state,
             query_ids=query_ids,
@@ -912,7 +925,7 @@ class SearchService:
 
     def search_faiss_state(
         self,
-        state: _GpuSearchState,
+        state: GpuSearchState,
         *,
         query_ids: Sequence[str],
         query_vectors: Any,
@@ -957,15 +970,15 @@ class SearchService:
 
     def search_cuvs_state(
         self,
-        state: _GpuSearchState,
+        state: GpuSearchState,
         *,
         query_ids: Sequence[str],
         query_vectors: Any,
         k: int,
         per_query_excluded: Mapping[str, Set[str]],
     ) -> Dict[str, List[Neighbor]]:
-        cupy = _import_cupy()
-        _import_cuvs()
+        cupy = import_cupy()
+        import_cuvs()
         from cuvs.neighbors import brute_force as cuvs_brute_force  # type: ignore
         from cuvs.neighbors import cagra as cuvs_cagra  # type: ignore
 
@@ -991,10 +1004,14 @@ class SearchService:
         grouped: Dict[str, List[Neighbor]] = {str(query_id): [] for query_id in query_ids}
         while True:
             if state.ann_enabled:
-                search_params = cuvs_cagra.SearchParams()
-                distances, indices = cuvs_cagra.search(search_params, state.cuvs_index, query_matrix, requested)
+                search_params = cast(Any, cuvs_cagra).SearchParams()
+                distances, indices = cast(Any, cuvs_cagra).search(
+                    search_params, state.cuvs_index, query_matrix, requested
+                )
             else:
-                distances, indices = cuvs_brute_force.search(state.cuvs_index, query_matrix, requested)
+                distances, indices = cast(Any, cuvs_brute_force).search(
+                    state.cuvs_index, query_matrix, requested
+                )
 
             host_distances = cupy.asnumpy(distances)
             host_indices = cupy.asnumpy(indices)
@@ -1013,20 +1030,20 @@ class SearchService:
 
     def search_torch_state(
         self,
-        state: _GpuSearchState,
+        state: GpuSearchState,
         *,
         query_ids: Sequence[str],
         query_vectors: Any,
         k: int,
         per_query_excluded: Mapping[str, Set[str]],
     ) -> Dict[str, List[Neighbor]]:
-        torch = _import_torch()
+        torch = import_torch()
         query_tensor = torch.as_tensor(query_vectors, dtype=torch.float32, device=state.device)
         if query_tensor.ndim == 1:
             query_tensor = query_tensor.reshape(1, -1)
 
         if state.metric == "cosine":
-            query_tensor = _torch_normalize(query_tensor, torch=torch)
+            query_tensor = torch_normalize(query_tensor, torch=torch)
 
         index_tensor = state.vectors
         if state.metric == "l2":
@@ -1051,8 +1068,8 @@ class SearchService:
             values, indices = torch.topk(scores, k=top_k, largest=sort_desc)
             grouped[query_id_str] = self._client._neighbors_from_candidate_rows(
                 state,
-                candidate_indices=_tensor_to_list(indices),
-                candidate_distances=_tensor_to_list(values),
+                candidate_indices=tensor_to_list(indices),
+                candidate_distances=tensor_to_list(values),
                 k=k,
                 excluded_protein_ids=excluded,
                 l2_squared=False,
@@ -1061,7 +1078,7 @@ class SearchService:
 
     def neighbors_from_candidate_rows(
         self,
-        state: _GpuSearchState,
+        state: GpuSearchState,
         *,
         candidate_indices: Sequence[Any],
         candidate_distances: Sequence[Any],
@@ -1081,7 +1098,7 @@ class SearchService:
                 Neighbor(
                     protein_id=protein_id,
                     layer_index=state.layer_index,
-                    distance=_normalize_distance(metric=state.metric, value=raw_distance, l2_squared=l2_squared),
+                    distance=normalize_distance(metric=state.metric, value=raw_distance, l2_squared=l2_squared),
                 )
             )
             if len(neighbors) >= k:
@@ -1098,7 +1115,7 @@ class SearchService:
         batch_size: int,
         ann_requested: bool,
         device: Optional[str],
-    ) -> _ResolvedBackend:
+    ) -> ResolvedBackend:
         requested = str(requested_backend).strip().lower()
         if requested not in {"auto", "gpu", "pgvector", "faiss_cpu", "faiss_gpu", "cuvs_gpu", "torch_gpu"}:
             raise BioDataError(f"Unsupported search backend: {requested_backend!r}")
@@ -1143,69 +1160,69 @@ class SearchService:
         resident_min_batch = int(thresholds.get("resident_gpu_min_batch", 1))
 
         if requested == "pgvector":
-            return _ResolvedBackend("pgvector", None, ann_requested, ann_requested, False, "explicit_pgvector", batch_size, False, availability.hardware_class)
+            return ResolvedBackend("pgvector", None, ann_requested, ann_requested, False, "explicit_pgvector", batch_size, False, availability.hardware_class)
         if requested == "faiss_cpu":
             if not availability.faiss_cpu:
                 raise BioDataError("Requested backend 'faiss_cpu' is not available on this host.")
-            return _ResolvedBackend("faiss_cpu", "cpu", ann_requested, ann_requested, False, "explicit_faiss_cpu", batch_size, resident_faiss_cpu, availability.hardware_class)
+            return ResolvedBackend("faiss_cpu", "cpu", ann_requested, ann_requested, False, "explicit_faiss_cpu", batch_size, resident_faiss_cpu, availability.hardware_class)
         if requested == "faiss_gpu":
             if not availability.faiss_gpu or availability.faiss_device is None:
                 raise BioDataError("Requested backend 'faiss_gpu' is not available on this host.")
-            return _ResolvedBackend("faiss_gpu", availability.faiss_device, ann_requested, ann_requested, False, "explicit_faiss_gpu", batch_size, resident_faiss, availability.hardware_class)
+            return ResolvedBackend("faiss_gpu", availability.faiss_device, ann_requested, ann_requested, False, "explicit_faiss_gpu", batch_size, resident_faiss, availability.hardware_class)
         if requested == "cuvs_gpu":
             if not availability.cuvs_gpu or availability.cuvs_device is None:
                 raise BioDataError("Requested backend 'cuvs_gpu' is not available on this host.")
-            return _ResolvedBackend("cuvs_gpu", availability.cuvs_device, ann_requested, ann_requested, False, "explicit_cuvs_gpu", batch_size, resident_cuvs, availability.hardware_class)
+            return ResolvedBackend("cuvs_gpu", availability.cuvs_device, ann_requested, ann_requested, False, "explicit_cuvs_gpu", batch_size, resident_cuvs, availability.hardware_class)
         if requested == "torch_gpu":
             if not availability.torch_gpu or availability.torch_device is None:
                 raise BioDataError("Requested backend 'torch_gpu' is not available on this host.")
-            return _ResolvedBackend("torch_gpu", availability.torch_device, ann_requested, False, bool(ann_requested), "explicit_torch_gpu", batch_size, resident_torch, availability.hardware_class)
+            return ResolvedBackend("torch_gpu", availability.torch_device, ann_requested, False, bool(ann_requested), "explicit_torch_gpu", batch_size, resident_torch, availability.hardware_class)
 
         if requested == "gpu":
             if availability.faiss_gpu and availability.faiss_device is not None:
-                return _ResolvedBackend("faiss_gpu", availability.faiss_device, ann_requested, ann_requested, False, "gpu_preferred_faiss", batch_size, resident_faiss, availability.hardware_class)
+                return ResolvedBackend("faiss_gpu", availability.faiss_device, ann_requested, ann_requested, False, "gpu_preferred_faiss", batch_size, resident_faiss, availability.hardware_class)
             if availability.cuvs_gpu and availability.cuvs_device is not None:
-                return _ResolvedBackend("cuvs_gpu", availability.cuvs_device, ann_requested, ann_requested, False, "gpu_fallback_cuvs", batch_size, resident_cuvs, availability.hardware_class)
+                return ResolvedBackend("cuvs_gpu", availability.cuvs_device, ann_requested, ann_requested, False, "gpu_fallback_cuvs", batch_size, resident_cuvs, availability.hardware_class)
             if availability.torch_gpu and availability.torch_device is not None:
                 reason = "gpu_degraded_torch_after_ann" if ann_requested else "gpu_fallback_torch"
-                return _ResolvedBackend("torch_gpu", availability.torch_device, ann_requested, False, bool(ann_requested), reason, batch_size, resident_torch, availability.hardware_class)
-            return _ResolvedBackend("pgvector", None, ann_requested, ann_requested, False, "gpu_requested_but_unavailable", batch_size, False, availability.hardware_class)
+                return ResolvedBackend("torch_gpu", availability.torch_device, ann_requested, False, bool(ann_requested), reason, batch_size, resident_torch, availability.hardware_class)
+            return ResolvedBackend("pgvector", None, ann_requested, ann_requested, False, "gpu_requested_but_unavailable", batch_size, False, availability.hardware_class)
 
         if resident_faiss and availability.faiss_gpu and availability.faiss_device is not None and batch_size >= resident_min_batch:
-            return _ResolvedBackend("faiss_gpu", availability.faiss_device, ann_requested, ann_requested, False, "resident_faiss", batch_size, True, availability.hardware_class)
+            return ResolvedBackend("faiss_gpu", availability.faiss_device, ann_requested, ann_requested, False, "resident_faiss", batch_size, True, availability.hardware_class)
         if resident_cuvs and availability.cuvs_gpu and availability.cuvs_device is not None and batch_size >= resident_min_batch:
-            return _ResolvedBackend("cuvs_gpu", availability.cuvs_device, ann_requested, ann_requested, False, "resident_cuvs", batch_size, True, availability.hardware_class)
+            return ResolvedBackend("cuvs_gpu", availability.cuvs_device, ann_requested, ann_requested, False, "resident_cuvs", batch_size, True, availability.hardware_class)
         if resident_torch and availability.torch_gpu and availability.torch_device is not None and batch_size >= resident_min_batch:
-            return _ResolvedBackend("torch_gpu", availability.torch_device, ann_requested, False, bool(ann_requested), "resident_torch", batch_size, True, availability.hardware_class)
+            return ResolvedBackend("torch_gpu", availability.torch_device, ann_requested, False, bool(ann_requested), "resident_torch", batch_size, True, availability.hardware_class)
         if ann_requested:
             if availability.faiss_gpu and availability.faiss_device is not None and batch_size >= faiss_min_batch:
-                return _ResolvedBackend("faiss_gpu", availability.faiss_device, True, True, False, "ann_auto_faiss", batch_size, False, availability.hardware_class)
+                return ResolvedBackend("faiss_gpu", availability.faiss_device, True, True, False, "ann_auto_faiss", batch_size, False, availability.hardware_class)
             if availability.cuvs_gpu and availability.cuvs_device is not None and batch_size >= cuvs_min_batch:
-                return _ResolvedBackend("cuvs_gpu", availability.cuvs_device, True, True, False, "ann_auto_cuvs", batch_size, False, availability.hardware_class)
+                return ResolvedBackend("cuvs_gpu", availability.cuvs_device, True, True, False, "ann_auto_cuvs", batch_size, False, availability.hardware_class)
             if availability.torch_gpu and availability.torch_device is not None and batch_size >= torch_min_batch:
-                return _ResolvedBackend("torch_gpu", availability.torch_device, True, False, True, "ann_degraded_torch", batch_size, False, availability.hardware_class)
-            return _ResolvedBackend("pgvector", None, True, True, False, "ann_auto_pgvector", batch_size, False, availability.hardware_class)
+                return ResolvedBackend("torch_gpu", availability.torch_device, True, False, True, "ann_degraded_torch", batch_size, False, availability.hardware_class)
+            return ResolvedBackend("pgvector", None, True, True, False, "ann_auto_pgvector", batch_size, False, availability.hardware_class)
         if availability.faiss_gpu and availability.faiss_device is not None and batch_size >= faiss_min_batch:
-            return _ResolvedBackend("faiss_gpu", availability.faiss_device, False, False, False, "auto_faiss_threshold", batch_size, False, availability.hardware_class)
+            return ResolvedBackend("faiss_gpu", availability.faiss_device, False, False, False, "auto_faiss_threshold", batch_size, False, availability.hardware_class)
         if availability.cuvs_gpu and availability.cuvs_device is not None and batch_size >= cuvs_min_batch:
-            return _ResolvedBackend("cuvs_gpu", availability.cuvs_device, False, False, False, "auto_cuvs_threshold", batch_size, False, availability.hardware_class)
+            return ResolvedBackend("cuvs_gpu", availability.cuvs_device, False, False, False, "auto_cuvs_threshold", batch_size, False, availability.hardware_class)
         if availability.torch_gpu and availability.torch_device is not None and batch_size >= torch_min_batch:
-            return _ResolvedBackend("torch_gpu", availability.torch_device, False, False, False, "auto_torch_threshold", batch_size, False, availability.hardware_class)
-        return _ResolvedBackend("pgvector", None, ann_requested, ann_requested, False, "auto_pgvector_threshold", batch_size, False, availability.hardware_class)
+            return ResolvedBackend("torch_gpu", availability.torch_device, False, False, False, "auto_torch_threshold", batch_size, False, availability.hardware_class)
+        return ResolvedBackend("pgvector", None, ann_requested, ann_requested, False, "auto_pgvector_threshold", batch_size, False, availability.hardware_class)
 
-    def detect_backend_availability(self, *, device: Optional[str]) -> _BackendAvailability:
-        torch_device = _preferred_torch_device(device)
-        faiss_device = _preferred_faiss_device(device)
-        cuvs_device = _preferred_cuvs_device(device)
-        faiss_cpu_available = _import_faiss(allow_missing=True) is not None
+    def detect_backend_availability(self, *, device: Optional[str]) -> BackendAvailability:
+        torch_device = preferred_torch_device(device)
+        faiss_device = preferred_faiss_device(device)
+        cuvs_device = preferred_cuvs_device(device)
+        faiss_cpu_available = import_faiss(allow_missing=True) is not None
         faiss_available = False
         if faiss_device is not None:
-            faiss = _import_faiss(allow_missing=True)
+            faiss = import_faiss(allow_missing=True)
             if faiss is not None:
                 get_num_gpus = getattr(faiss, "get_num_gpus", None)
                 if callable(get_num_gpus):
                     try:
-                        faiss_available = int(get_num_gpus()) > 0
+                        faiss_available = int(cast(Any, get_num_gpus)()) > 0
                     except Exception:
                         faiss_available = False
                 else:
@@ -1216,7 +1233,7 @@ class SearchService:
         hardware_class = "cpu"
         if preferred_device is not None:
             hardware_class = "cuda" if preferred_device.startswith("cuda") else "mps"
-        return _BackendAvailability(
+        return BackendAvailability(
             faiss_gpu=faiss_available,
             torch_gpu=torch_available,
             preferred_device=preferred_device,
@@ -1237,7 +1254,7 @@ class SearchService:
         metric: DistanceMetric,
         device: Optional[str],
         ann_requested: bool,
-    ) -> _GpuSearchState:
+    ) -> GpuSearchState:
         resolved_device = str(device or "")
         if not resolved_device:
             raise BioDataError(f"{backend} selected without a usable accelerator device.")
@@ -1249,7 +1266,7 @@ class SearchService:
             device=resolved_device,
             ann_enabled=ann_requested if backend in {"faiss_gpu", "cuvs_gpu"} else False,
         ):
-            return cast(_GpuSearchState, self._client._gpu_search_state)
+            return cast(GpuSearchState, self._client._gpu_search_state)
         state = self._client._load_gpu_search_state(
             backend=backend,
             embedding_type_id=embedding_type_id,
@@ -1270,33 +1287,33 @@ class SearchService:
         metric: DistanceMetric,
         device: str,
         ann_requested: bool,
-    ) -> _GpuSearchState:
+    ) -> GpuSearchState:
         import numpy as np
 
         protein_ids, vectors = self._client._load_search_vectors(embedding_type_id=embedding_type_id, layer_index=layer_index)
-        normalized_vectors = _prepare_index_vectors(vectors, metric=metric)
+        normalized_vectors = prepare_index_vectors(vectors, metric=metric)
         protein_rows: Dict[str, List[int]] = {}
         for index, protein_id in enumerate(protein_ids):
             protein_rows.setdefault(protein_id, []).append(index)
 
         if backend == "torch_gpu":
-            torch = _import_torch()
+            torch = import_torch()
             tensor = torch.as_tensor(normalized_vectors, dtype=torch.float32, device=device)
-            return _GpuSearchState(backend, embedding_type_id, layer_index, metric, device, False, protein_ids, protein_rows, tensor)
+            return GpuSearchState(backend, embedding_type_id, layer_index, metric, device, False, protein_ids, protein_rows, tensor)
 
         if backend == "cuvs_gpu":
-            cupy = _import_cupy()
-            _import_cuvs()
+            cupy = import_cupy()
+            import_cuvs()
             from cuvs.neighbors import brute_force as cuvs_brute_force  # type: ignore
             from cuvs.neighbors import cagra as cuvs_cagra  # type: ignore
             dataset = cupy.asarray(normalized_vectors, dtype=cupy.float32)
             metric_name = "sqeuclidean" if metric == "l2" else str(metric)
             if ann_requested:
-                index_params = cuvs_cagra.IndexParams(metric=metric_name)
-                index = cuvs_cagra.build(index_params, dataset)
+                index_params = cast(Any, cuvs_cagra).IndexParams(metric=metric_name)
+                index = cast(Any, cuvs_cagra).build(index_params, dataset)
             else:
-                index = cuvs_brute_force.build(dataset, metric=metric_name)
-            return _GpuSearchState(
+                index = cast(Any, cuvs_brute_force).build(dataset, metric=metric_name)
+            return GpuSearchState(
                 backend=backend,
                 embedding_type_id=embedding_type_id,
                 layer_index=layer_index,
@@ -1309,7 +1326,7 @@ class SearchService:
                 cuvs_index=index,
             )
 
-        faiss = _import_faiss()
+        faiss = import_faiss()
         dim = int(normalized_vectors.shape[1])
         metric_type = getattr(faiss, "METRIC_L2" if metric == "l2" else "METRIC_INNER_PRODUCT")
         if ann_requested:
@@ -1326,7 +1343,7 @@ class SearchService:
             cpu_index.add(np.asarray(normalized_vectors, dtype=np.float32))
 
         if backend == "faiss_cpu":
-            return _GpuSearchState(
+            return GpuSearchState(
                 backend=backend,
                 embedding_type_id=embedding_type_id,
                 layer_index=layer_index,
@@ -1340,8 +1357,8 @@ class SearchService:
             )
 
         resources = getattr(faiss, "StandardGpuResources")()
-        gpu_index = getattr(faiss, "index_cpu_to_gpu")(resources, _cuda_device_index(device), cpu_index)
-        return _GpuSearchState(
+        gpu_index = getattr(faiss, "index_cpu_to_gpu")(resources, cuda_device_index(device), cpu_index)
+        return GpuSearchState(
             backend=backend,
             embedding_type_id=embedding_type_id,
             layer_index=layer_index,
@@ -1373,7 +1390,7 @@ class SearchService:
                 f"No embeddings found for embedding_type_id={embedding_type_id}, layer_index={layer_index}."
             )
         protein_ids = [str(row["protein_id"]) for row in rows]
-        vectors = _as_numpy_matrix([row["embedding"] for row in rows])
+        vectors = as_numpy_matrix([row["embedding"] for row in rows])
         return protein_ids, vectors
 
     def gpu_state_matches(
@@ -1399,7 +1416,7 @@ class SearchService:
 
     def record_search_diagnostics(
         self,
-        resolved: _ResolvedBackend,
+        resolved: ResolvedBackend,
         *,
         requested_backend: SearchBackend,
         embedding_type_id: int,
@@ -1438,7 +1455,7 @@ class SearchService:
 
     def warn_if_search_backend_degraded(
         self,
-        resolved: _ResolvedBackend,
+        resolved: ResolvedBackend,
         *,
         requested_backend: SearchBackend,
         embedding_type_id: int,
@@ -1517,7 +1534,7 @@ class SearchService:
         metric: DistanceMetric,
     ) -> None:
         metric_name = str(metric).strip().lower()
-        opclass = _metric_opclass(metric_name)
+        opclass = metric_opclass(cast(DistanceMetric, metric_name))
         cache_key = (int(embedding_type_id), int(layer_index), metric_name)
         cached = self._client._ann_index_presence_cache.get(cache_key)
         if cached is None:

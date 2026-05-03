@@ -33,7 +33,7 @@ DEFAULT_BACKEND_THRESHOLDS: Dict[str, Dict[str, int]] = {
 
 
 @dataclass
-class _BackendAvailability:
+class BackendAvailability:
     faiss_gpu: bool
     torch_gpu: bool
     preferred_device: Optional[str]
@@ -46,7 +46,7 @@ class _BackendAvailability:
 
 
 @dataclass
-class _ResolvedBackend:
+class ResolvedBackend:
     backend: ResolvedSearchBackend
     device: Optional[str]
     ann_requested: bool
@@ -62,7 +62,7 @@ class _ResolvedBackend:
 
 
 @dataclass
-class _GpuSearchState:
+class GpuSearchState:
     backend: ResolvedSearchBackend
     embedding_type_id: int
     layer_index: int
@@ -77,9 +77,17 @@ class _GpuSearchState:
     cuvs_index: Any = None
 
 
+_BackendAvailability = BackendAvailability
+_ResolvedBackend = ResolvedBackend
+_GpuSearchState = GpuSearchState
+
+
 __all__ = [
     "ResolvedSearchBackend",
     "DEFAULT_BACKEND_THRESHOLDS",
+    "BackendAvailability",
+    "ResolvedBackend",
+    "GpuSearchState",
     "_BackendAvailability",
     "_ResolvedBackend",
     "_GpuSearchState",

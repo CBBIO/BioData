@@ -10,15 +10,20 @@ import os
 from collections.abc import Mapping as MappingABC
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Sequence, Set, Tuple, Union, cast
+from typing import Any, Callable, Dict, Generator, List, Mapping, Optional, Sequence, Set, Tuple, Union, cast
 
 from .search.types import DEFAULT_BACKEND_THRESHOLDS as _DEFAULT_BACKEND_THRESHOLDS
-from .search.types import ResolvedSearchBackend, _BackendAvailability, _GpuSearchState, _ResolvedBackend
+from .search.types import BackendAvailability, GpuSearchState, ResolvedBackend, ResolvedSearchBackend
 from .types import DistanceMetric, EmbeddingModel, EmbeddingType, GOAnnotation, Neighbor, SearchBackend
 
 
 Params = Union[Sequence[Any], Mapping[str, Any], None]
 ConfigDict = Dict[str, Any]
+
+# Backward-compatible aliases for older internal/test references.
+_BackendAvailability = BackendAvailability
+_GpuSearchState = GpuSearchState
+_ResolvedBackend = ResolvedBackend
 
 
 class BioDataError(Exception):
@@ -35,23 +40,6 @@ class ConnectionNotOpenError(BioDataError):
 
 class NotFoundError(BioDataError):
     """Raised when an expected BioData record is not found."""
-
-
-from .search.utils import (
-    _as_numpy_matrix,
-    _cuda_device_index,
-    _import_cupy,
-    _import_cuvs,
-    _import_faiss,
-    _import_torch,
-    _normalize_distance,
-    _preferred_cuvs_device,
-    _preferred_faiss_device,
-    _preferred_torch_device,
-    _prepare_index_vectors,
-    _tensor_to_list,
-    _torch_normalize,
-)
 
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.yaml"
@@ -281,7 +269,7 @@ class BioDataClient:
         self._ann_index_presence_cache: Dict[Tuple[int, int, str], bool] = {}
         self._ann_index_warned: Set[Tuple[int, int, str]] = set()
         self._search_backend_warned: Set[Tuple[str, str, str, str, bool]] = set()
-        self._gpu_search_state: Optional[_GpuSearchState] = None
+        self._gpu_search_state: Optional[GpuSearchState] = None
         self._last_search_diagnostics: Dict[str, Any] = {}
         self._search_workload_cache: Dict[Tuple[int, int], Dict[str, int]] = {}
         from .search.service import SearchService
@@ -340,7 +328,7 @@ class BioDataClient:
         self._gpu_search_state = None
 
     @contextmanager
-    def transaction(self) -> Iterator[None]:
+    def transaction(self) -> Generator[None, None, None]:
         """Transactional context manager."""
         conn = self._require_connection()
         try:
@@ -1206,7 +1194,7 @@ class BioDataClient:
 
     def _search_faiss_state(
         self,
-        state: _GpuSearchState,
+        state: GpuSearchState,
         *,
         query_ids: Sequence[str],
         query_vectors: Any,
@@ -1223,7 +1211,7 @@ class BioDataClient:
 
     def _search_cuvs_state(
         self,
-        state: _GpuSearchState,
+        state: GpuSearchState,
         *,
         query_ids: Sequence[str],
         query_vectors: Any,
@@ -1240,7 +1228,7 @@ class BioDataClient:
 
     def _search_torch_state(
         self,
-        state: _GpuSearchState,
+        state: GpuSearchState,
         *,
         query_ids: Sequence[str],
         query_vectors: Any,
@@ -1257,7 +1245,7 @@ class BioDataClient:
 
     def _neighbors_from_candidate_rows(
         self,
-        state: _GpuSearchState,
+        state: GpuSearchState,
         *,
         candidate_indices: Sequence[Any],
         candidate_distances: Sequence[Any],
@@ -1284,7 +1272,7 @@ class BioDataClient:
         batch_size: int,
         ann_requested: bool,
         device: Optional[str],
-    ) -> _ResolvedBackend:
+    ) -> ResolvedBackend:
         return self._search.resolve_search_backend(
             requested_backend=requested_backend,
             embedding_type_id=embedding_type_id,
@@ -1295,7 +1283,7 @@ class BioDataClient:
             device=device,
         )
 
-    def _detect_backend_availability(self, *, device: Optional[str]) -> _BackendAvailability:
+    def _detect_backend_availability(self, *, device: Optional[str]) -> BackendAvailability:
         return self._search.detect_backend_availability(device=device)
 
     def _get_or_load_gpu_search_state(
@@ -1307,7 +1295,7 @@ class BioDataClient:
         metric: DistanceMetric,
         device: Optional[str],
         ann_requested: bool,
-    ) -> _GpuSearchState:
+    ) -> GpuSearchState:
         return self._search.get_or_load_gpu_search_state(
             backend=backend,
             embedding_type_id=embedding_type_id,
@@ -1326,7 +1314,7 @@ class BioDataClient:
         metric: DistanceMetric,
         device: str,
         ann_requested: bool,
-    ) -> _GpuSearchState:
+    ) -> GpuSearchState:
         return self._search.load_gpu_search_state(
             backend=backend,
             embedding_type_id=embedding_type_id,
@@ -1360,7 +1348,7 @@ class BioDataClient:
 
     def _record_search_diagnostics(
         self,
-        resolved: _ResolvedBackend,
+        resolved: ResolvedBackend,
         *,
         requested_backend: SearchBackend,
         embedding_type_id: int,
@@ -1381,7 +1369,7 @@ class BioDataClient:
 
     def _warn_if_search_backend_degraded(
         self,
-        resolved: _ResolvedBackend,
+        resolved: ResolvedBackend,
         *,
         requested_backend: SearchBackend,
         embedding_type_id: int,
@@ -1600,7 +1588,7 @@ def _embedding_dimension(query_embedding: Any) -> int:
     dimensions_attr = getattr(query_embedding, "dimensions", None)
     if callable(dimensions_attr):
         try:
-            dim_from_method = int(dimensions_attr())
+            dim_from_method = int(cast(Any, dimensions_attr)())
             if dim_from_method >= 1:
                 return dim_from_method
         except (TypeError, ValueError):
@@ -1609,7 +1597,7 @@ def _embedding_dimension(query_embedding: Any) -> int:
     to_list_attr = getattr(query_embedding, "to_list", None)
     if callable(to_list_attr):
         try:
-            values = to_list_attr()
+            values = cast(Sequence[Any], cast(Any, to_list_attr)())
             dim_from_list = int(len(values))
             if dim_from_list >= 1:
                 return dim_from_list
@@ -1644,7 +1632,7 @@ def _row_to_dict(row: Any, cursor: Any) -> Dict[str, Any]:
 
 
 @contextmanager
-def _cursor(conn: Any) -> Iterator[Any]:
+def _cursor(conn: Any) -> Generator[Any, None, None]:
     cur = conn.cursor()
     try:
         yield cur
@@ -1652,6 +1640,12 @@ def _cursor(conn: Any) -> Iterator[Any]:
         close = getattr(cur, "close", None)
         if callable(close):
             close()
+
+
+metric_operator = _metric_operator
+metric_opclass = _metric_opclass
+embedding_dimension = _embedding_dimension
+cursor = _cursor
 
 
 __all__ = [

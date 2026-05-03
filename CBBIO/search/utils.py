@@ -24,10 +24,10 @@ def _coerce_vector_row(value: Any) -> Any:
             pass
 
     if isinstance(value, (list, tuple)):
-        return list(value)
+        return list(cast(Iterable[object], value))
 
     try:
-        return list(cast(Iterable[Any], value))
+        return list(cast(Iterable[object], value))
     except TypeError:
         return value
 
@@ -147,7 +147,7 @@ def _preferred_faiss_device(device: Optional[str]) -> Optional[str]:
     get_num_gpus = getattr(faiss, "get_num_gpus", None)
     if callable(get_num_gpus):
         try:
-            if int(get_num_gpus()) > 0:
+            if int(cast(Any, get_num_gpus)()) > 0:
                 return "cuda:0"
         except Exception:
             return None
@@ -195,17 +195,35 @@ def _torch_normalize(tensor: Any, *, torch: Any) -> Any:
 
 
 def _tensor_to_list(value: Any) -> List[Any]:
-    if hasattr(value, "detach") and callable(value.detach):
-        value = value.detach()
-    if hasattr(value, "cpu") and callable(value.cpu):
-        value = value.cpu()
-    if hasattr(value, "tolist") and callable(value.tolist):
-        result = value.tolist()
+    detach = getattr(value, "detach", None)
+    if callable(detach):
+        value = detach()
+    cpu = getattr(value, "cpu", None)
+    if callable(cpu):
+        value = cpu()
+    tolist = getattr(value, "tolist", None)
+    if callable(tolist):
+        result = tolist()
         if isinstance(result, list):
-            return result
+            return list(cast(Iterable[Any], result))
     if isinstance(value, list):
-        return value
-    return list(value)
+        return list(cast(Iterable[Any], value))
+    return list(cast(Iterable[Any], value))
+
+
+as_numpy_matrix = _as_numpy_matrix
+prepare_index_vectors = _prepare_index_vectors
+normalize_distance = _normalize_distance
+import_torch = _import_torch
+import_faiss = _import_faiss
+import_cupy = _import_cupy
+import_cuvs = _import_cuvs
+preferred_torch_device = _preferred_torch_device
+preferred_faiss_device = _preferred_faiss_device
+preferred_cuvs_device = _preferred_cuvs_device
+cuda_device_index = _cuda_device_index
+torch_normalize = _torch_normalize
+tensor_to_list = _tensor_to_list
 
 
 __all__ = [
@@ -223,4 +241,17 @@ __all__ = [
     "_cuda_device_index",
     "_torch_normalize",
     "_tensor_to_list",
+    "as_numpy_matrix",
+    "prepare_index_vectors",
+    "normalize_distance",
+    "import_torch",
+    "import_faiss",
+    "import_cupy",
+    "import_cuvs",
+    "preferred_torch_device",
+    "preferred_faiss_device",
+    "preferred_cuvs_device",
+    "cuda_device_index",
+    "torch_normalize",
+    "tensor_to_list",
 ]

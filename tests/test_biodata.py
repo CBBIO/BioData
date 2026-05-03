@@ -4,11 +4,12 @@ from dataclasses import dataclass
 import sys
 import types
 import warnings
-from typing import Any, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import pytest
 
 import CBBIO.BioData as bd
+from CBBIO.search import utils as search_utils
 
 
 @dataclass
@@ -1265,7 +1266,7 @@ def test_find_nearest_neighbors_for_proteins_auto_chunks_gpu_queries_by_safe_bat
 def test_search_torch_state_returns_exact_neighbors_and_respects_exclusions() -> None:
     torch = pytest.importorskip("torch")
     client = bd.BioDataClient()
-    normalized = bd._prepare_index_vectors(
+    normalized = search_utils.prepare_index_vectors(
         [[1.0, 0.0], [0.8, 0.2], [0.0, 1.0]],
         metric="cosine",
     )
@@ -1284,7 +1285,7 @@ def test_search_torch_state_returns_exact_neighbors_and_respects_exclusions() ->
     grouped = client._search_torch_state(
         state,
         query_ids=["Q1"],
-        query_vectors=bd._as_numpy_matrix([[1.0, 0.0]]),
+        query_vectors=search_utils.as_numpy_matrix([[1.0, 0.0]]),
         k=2,
         per_query_excluded={"Q1": {"A"}},
     )
@@ -1303,7 +1304,7 @@ def test_as_numpy_matrix_accepts_vector_like_rows() -> None:
         def to_list(self) -> List[float]:
             return list(self._values)
 
-    matrix = bd._as_numpy_matrix([_VectorLike([1.0, 2.0]), _VectorLike([3.0, 4.0])])
+    matrix = search_utils.as_numpy_matrix([_VectorLike([1.0, 2.0]), _VectorLike([3.0, 4.0])])
 
     assert matrix.shape == (2, 2)
     assert matrix.dtype == np.float32

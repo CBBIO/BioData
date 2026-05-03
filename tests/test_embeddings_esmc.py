@@ -3,7 +3,7 @@ from __future__ import annotations
 import builtins
 import sys
 import types
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -123,8 +123,8 @@ def test_esmc_generate_returns_per_residue_matrix_without_pooling() -> None:
         from_pretrained_kwargs={},
     )
     # Inject fake SDK classes to avoid importing esm in tests.
-    generator.tokenizer.protein_cls = _FakeESMProtein
-    generator.model.logits_config_cls = _FakeLogitsConfig
+    cast(Any, generator.tokenizer).protein_cls = _FakeESMProtein
+    cast(Any, generator.model).logits_config_cls = _FakeLogitsConfig
 
     result = generator.generate([GenerationInput(id="Q1", sequence="ACDE")], layer_index=[0, 1], fail_fast=True)
     assert result.errors == []

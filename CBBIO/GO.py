@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Any, Callable, Collection, Dict, List, Mapping, Optional, Set, cast
+from typing import Any, Callable, Collection, Dict, List, Mapping, Optional, Sequence, Set, cast
 
 from .types import SimilarityMethod
 
@@ -420,8 +420,9 @@ class GOOntology:
         go_id = str(go_id)
         if go_id not in self._direct_parent_cache:
             term_obj = self._get_term(go_id)
+            parents = cast(Sequence[Any], getattr(term_obj, "parents", ()))
             self._direct_parent_cache[go_id] = {
-                str(parent.id) for parent in getattr(term_obj, "parents", set())
+                str(getattr(parent, "id")) for parent in parents
             }
         return self._direct_parent_cache[go_id]
 
@@ -429,8 +430,9 @@ class GOOntology:
         go_id = str(go_id)
         if go_id not in self._direct_child_cache:
             term_obj = self._get_term(go_id)
+            children = cast(Sequence[Any], getattr(term_obj, "children", ()))
             self._direct_child_cache[go_id] = {
-                str(child.id) for child in getattr(term_obj, "children", set())
+                str(getattr(child, "id")) for child in children
             }
         return self._direct_child_cache[go_id]
 

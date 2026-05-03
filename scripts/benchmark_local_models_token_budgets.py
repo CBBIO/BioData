@@ -143,7 +143,9 @@ def _schedule_batches(
         if batch_size < 1:
             raise SystemExit("--batch-size must be >= 1")
         return [scheduled[index : index + batch_size] for index in range(0, len(scheduled), batch_size)]
-    return [list(chunk) for chunk in _chunked_by_token_budget(scheduled, int(max_tokens_per_batch))]
+    if max_tokens_per_batch is None:
+        raise RuntimeError("max_tokens_per_batch must be provided when batch_size is not set.")
+    return [list(chunk) for chunk in _chunked_by_token_budget(scheduled, max_tokens_per_batch)]
 
 
 def _setting_key(*, batch_size: int | None, max_tokens_per_batch: int | None) -> str:
@@ -151,7 +153,9 @@ def _setting_key(*, batch_size: int | None, max_tokens_per_batch: int | None) ->
         raise RuntimeError("Specify exactly one of batch_size or max_tokens_per_batch.")
     if batch_size is not None:
         return str(batch_size)
-    return f"tokens:{int(max_tokens_per_batch)}"
+    if max_tokens_per_batch is None:
+        raise RuntimeError("max_tokens_per_batch must be provided when batch_size is not set.")
+    return f"tokens:{max_tokens_per_batch}"
 
 
 def _pool_rows(rows: Sequence[Sequence[float]], *, pooling: str) -> List[float]:
@@ -457,10 +461,12 @@ def _batched_esm_forward(
                 del attention_mask
                 del output
             else:
+                if batch_converter is None or padding_idx is None:
+                    raise RuntimeError("ESM batch_converter and padding_idx are required for non-HF batched inference.")
                 labeled = [(str(record.id), sequence) for record, sequence in zip(chunk, prepared)]
                 _, _, tokens = batch_converter(labeled)
                 tokens = tokens.to(generator_device or "cpu")
-                lengths = (tokens != int(padding_idx)).sum(1)
+                lengths = (tokens != padding_idx).sum(1)
                 output = model(tokens, repr_layers=[int(layer_index)], return_contacts=False)
                 representations = output.get("representations")
                 if not isinstance(representations, dict):

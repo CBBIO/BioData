@@ -6,14 +6,16 @@ This module is intentionally independent from database access code.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Iterable, Mapping as MappingABC
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import pickle
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Sequence, Tuple, Type, cast
+from typing import Any, Dict, List, Literal, Sequence, Tuple, Type, TypeAlias, cast
 
 
 _VALID_AA = set("ACDEFGHIKLMNPQRSTVWYBXZJUO")
+EmbeddingPayload: TypeAlias = Sequence[float] | Sequence[Sequence[float]]
 
 
 class EmbeddingGenerationError(Exception):
@@ -43,7 +45,7 @@ class GenerationInput:
 @dataclass(frozen=True)
 class EmbeddingRecord:
     id: str
-    embedding: Sequence[float]
+    embedding: EmbeddingPayload
     layer_index: int
     model_reference: str
     shape: Tuple[int, ...]
@@ -74,11 +76,19 @@ class RunMetadata:
     parameters: Dict[str, Any] | None = None
 
 
+def _embedding_record_list() -> List[EmbeddingRecord]:
+    return []
+
+
+def _error_dict_list() -> List[Dict[str, Any]]:
+    return []
+
+
 @dataclass(frozen=True)
 class GenerationResult:
-    records: List[EmbeddingRecord] = field(default_factory=list)
-    errors: List[Dict[str, Any]] = field(default_factory=list)
-    skipped: List[Dict[str, Any]] = field(default_factory=list)
+    records: List[EmbeddingRecord] = field(default_factory=_embedding_record_list)
+    errors: List[Dict[str, Any]] = field(default_factory=_error_dict_list)
+    skipped: List[Dict[str, Any]] = field(default_factory=_error_dict_list)
     model_metadata: ModelMetadata | None = None
     run_metadata: RunMetadata | None = None
 
@@ -95,7 +105,7 @@ class TokenizerAdapter(ABC):
 
 class ModelAdapter(ABC):
     @abstractmethod
-    def infer(self, tokens: Any, *, layer_index: int = 0) -> Any: ...
+    def infer(self, tokens: Any, *, layer_index: int | Sequence[int] | None = 0) -> Any: ...
 
     def available_layers(self) -> List[int] | None:
         """Return available layer indices when discoverable by this adapter."""
@@ -104,7 +114,7 @@ class ModelAdapter(ABC):
 
 class PostprocessorAdapter(ABC):
     @abstractmethod
-    def postprocess(self, model_output: Any) -> Sequence[float]: ...
+    def postprocess(self, model_output: Any) -> EmbeddingPayload: ...
 
 
 class EmbeddingGenerator:
@@ -147,7 +157,8 @@ class EmbeddingGenerator:
         """Return known model identifiers in this generator's family."""
         values = getattr(self, "FAMILY_MODELS", None)
         if isinstance(values, Sequence) and not isinstance(values, (str, bytes, bytearray)):
-            models = [str(value) for value in values if str(value).strip()]
+            family_values = cast(Sequence[object], values)
+            models = [str(value) for value in family_values if str(value).strip()]
             if models:
                 return models
         return [self.model_reference]
@@ -241,7 +252,8 @@ def Generator(
             raise EmbeddingInputError(
                 f"Generator requires a model name for class {canonical!r}; no DEFAULT_MODEL_NAME is defined."
             )
-    return generator_cls(model_name=resolved_name, device=device, **kwargs)
+    generator_factory = cast(Any, generator_cls)
+    return generator_factory(model_name=resolved_name, device=device, **kwargs)
 
 
 def available_generator_classes() -> List[str]:
@@ -292,7 +304,8 @@ def _family_models_for_class(
 
     values = getattr(generator_cls, "FAMILY_MODELS", None)
     if isinstance(values, Sequence) and not isinstance(values, (str, bytes, bytearray)):
-        models = [str(value) for value in values if str(value).strip()]
+        family_values = cast(Sequence[object], values)
+        models = [str(value) for value in family_values if str(value).strip()]
         if models:
             return models
 
@@ -318,7 +331,7 @@ def _generator_registry() -> Tuple[Dict[str, Type["EmbeddingGenerator"]], Dict[s
         raw_aliases = getattr(generator_cls, "GENERATOR_ALIASES", ())
         alias_values = [canonical]
         if isinstance(raw_aliases, Sequence) and not isinstance(raw_aliases, (str, bytes, bytearray)):
-            alias_values.extend(str(value) for value in raw_aliases)
+            alias_values.extend(str(value) for value in cast(Sequence[object], raw_aliases))
 
         for alias in alias_values:
             key = str(alias).strip().lower()
@@ -367,7 +380,10 @@ def load_fasta_inputs(
 
     inputs: List[GenerationInput] = []
     file_path = Path(path)
-    for index, record in enumerate(SeqIO.parse(str(file_path), "fasta")):
+    seqio_module = cast(Any, SeqIO)
+    parsed_records = cast(Iterable[object], seqio_module.parse(str(file_path), "fasta"))
+    for index, record_obj in enumerate(parsed_records):
+        record = cast(Any, record_obj)
         record_id = str(record.id or "").strip()
         description = str(record.description or "").strip() or None
         selected_id = record_id if id_from == "record_id" else str(description or "").strip()
@@ -530,7 +546,7 @@ def load_embedding_records_npy(
     arr_obj = np.load(file_path, allow_pickle=False)
 
     if hasattr(arr_obj, "files"):
-        npz_obj = cast(Any, arr_obj)
+        npz_obj = arr_obj
         if not npz_obj.files:
             return []
         if len(npz_obj.files) > 1:
@@ -545,7 +561,7 @@ def load_embedding_records_npy(
     return _records_from_numpy(matrix, model_reference=model_reference, layer_index=layer_index, ids=ids)
 
 
-def _validate_generation_input(record: GenerationInput, *, index: int) -> GenerationInput:
+def _validate_generation_input(record: object, *, index: int) -> GenerationInput:
     if not isinstance(record, GenerationInput):
         raise EmbeddingInputError(
             f"Expected GenerationInput at index {index}, got {type(record).__name__}."
@@ -577,20 +593,34 @@ def _validate_sequence(sequence: str, *, context: str) -> None:
         )
 
 
-def _as_float_vector(value: Any) -> List[float]:
-    if hasattr(value, "tolist") and callable(value.tolist):
-        value = value.tolist()
+def _as_float_vector(value: object) -> List[float]:
+    tolist = getattr(value, "tolist", None)
+    if callable(tolist):
+        value = tolist()
 
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
         raise EmbeddingBackendError("Embedding output must be a sequence of numeric values.")
 
+    values = cast(Sequence[object], value)
     vector: List[float] = []
-    for item in value:
+    for item in values:
         try:
             vector.append(float(cast(Any, item)))
         except (TypeError, ValueError) as exc:
             raise EmbeddingBackendError(f"Embedding element is not numeric: {item!r}") from exc
     return vector
+
+
+def _as_float_matrix(value: object) -> List[List[float]]:
+    tolist = getattr(value, "tolist", None)
+    if callable(tolist):
+        value = tolist()
+
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        raise EmbeddingBackendError("Embedding output must be a row-major sequence of numeric vectors.")
+
+    rows = cast(Sequence[object], value)
+    return [_as_float_vector(row) for row in rows]
 
 
 def _normalize_generation_exception(exc: Exception) -> EmbeddingGenerationError:
@@ -604,25 +634,27 @@ def utc_now_iso() -> str:
 
 
 def _records_from_payload(
-    payload: Any,
+    payload: object,
     *,
     model_reference: str,
     layer_index: int,
 ) -> List[EmbeddingRecord]:
-    if isinstance(payload, dict):
-        if "records" in payload:
-            records_raw = payload["records"]
+    if isinstance(payload, MappingABC):
+        payload_map = cast(MappingABC[object, object], payload)
+        if "records" in payload_map:
+            records_raw = payload_map["records"]
             if not isinstance(records_raw, Sequence) or isinstance(records_raw, (str, bytes, bytearray)):
                 raise EmbeddingInputError("Pickle payload 'records' must be a sequence.")
+            record_items = cast(Sequence[object], records_raw)
             return [
                 _record_from_item(item, index=index, model_reference=model_reference, layer_index=layer_index)
-                for index, item in enumerate(records_raw)
+                for index, item in enumerate(record_items)
             ]
 
         # Common compact shape: {id: embedding_vector}
-        if all(isinstance(key, str) for key in payload.keys()):
+        if all(isinstance(key, str) for key in payload_map.keys()):
             records: List[EmbeddingRecord] = []
-            for index, (rec_id, emb_value) in enumerate(payload.items()):
+            for rec_id, emb_value in payload_map.items():
                 vector = _as_float_vector(emb_value)
                 records.append(
                     EmbeddingRecord(
@@ -637,9 +669,10 @@ def _records_from_payload(
             return records
 
     if isinstance(payload, Sequence) and not isinstance(payload, (str, bytes, bytearray)):
+        payload_items = cast(Sequence[object], payload)
         return [
             _record_from_item(item, index=index, model_reference=model_reference, layer_index=layer_index)
-            for index, item in enumerate(payload)
+            for index, item in enumerate(payload_items)
         ]
 
     raise EmbeddingInputError(
@@ -648,7 +681,7 @@ def _records_from_payload(
 
 
 def _record_from_item(
-    item: Any,
+    item: object,
     *,
     index: int,
     model_reference: str,
@@ -657,32 +690,34 @@ def _record_from_item(
     if isinstance(item, EmbeddingRecord):
         return item
 
-    if not isinstance(item, dict):
+    if not isinstance(item, MappingABC):
         raise EmbeddingInputError(f"Record at index {index} must be a dict or EmbeddingRecord.")
 
-    rec_id = str(item.get("id", "")).strip()
+    item_map = cast(MappingABC[object, object], item)
+    rec_id = str(item_map.get("id", "")).strip()
     if not rec_id:
         raise EmbeddingInputError(f"Record at index {index} has empty 'id'.")
 
-    vector = _as_float_vector(item.get("embedding"))
-    rec_layer = int(item.get("layer_index", layer_index))
-    rec_model_ref = str(item.get("model_reference", model_reference)).strip() or model_reference
+    vector = _as_float_vector(item_map.get("embedding"))
+    rec_layer = _int_or_default(item_map.get("layer_index"), default=layer_index)
+    rec_model_ref = str(item_map.get("model_reference", model_reference)).strip() or model_reference
 
-    shape_raw = item.get("shape")
+    shape_raw = item_map.get("shape")
     shape: Tuple[int, ...]
     if shape_raw is None:
         shape = (len(vector),)
     else:
         if not isinstance(shape_raw, Sequence) or isinstance(shape_raw, (str, bytes, bytearray)):
             raise EmbeddingInputError(f"Record at index {index} has invalid 'shape'.")
-        shape = tuple(int(dim) for dim in shape_raw)
+        shape_values = cast(Sequence[object], shape_raw)
+        shape = tuple(int(cast(Any, dim)) for dim in shape_values)
         if shape != (len(vector),):
             raise EmbeddingInputError(
                 f"Record at index {index} has shape {shape} inconsistent with vector length {len(vector)}."
             )
 
-    metadata = item.get("metadata")
-    if metadata is not None and not isinstance(metadata, dict):
+    metadata = item_map.get("metadata")
+    if metadata is not None and not isinstance(metadata, MappingABC):
         raise EmbeddingInputError(f"Record at index {index} has non-dict metadata.")
 
     return EmbeddingRecord(
@@ -691,7 +726,7 @@ def _record_from_item(
         layer_index=rec_layer,
         model_reference=rec_model_ref,
         shape=shape,
-        metadata=cast(Dict[str, Any] | None, metadata),
+        metadata=_metadata_dict_or_none(cast(object, metadata)),
     )
 
 
@@ -711,7 +746,8 @@ def _records_from_numpy(
     if ndim == 1:
         rows = [_as_float_vector(matrix)]
     elif ndim == 2:
-        rows = [_as_float_vector(row) for row in matrix]
+        row_count = int(matrix.shape[0])
+        rows = [_as_float_vector(matrix[idx]) for idx in range(row_count)]
     else:
         raise EmbeddingInputError(f"Expected 1D or 2D array, got ndim={ndim}.")
 
@@ -741,7 +777,7 @@ def _records_from_numpy(
     return records
 
 
-def _normalize_embedding_records(records: Sequence[EmbeddingRecord]) -> List[EmbeddingRecord]:
+def _normalize_embedding_records(records: Sequence[object]) -> List[EmbeddingRecord]:
     if not records:
         return []
     normalized: List[EmbeddingRecord] = []
@@ -774,11 +810,34 @@ def _normalize_embedding_records(records: Sequence[EmbeddingRecord]) -> List[Emb
     return normalized
 
 
+def _metadata_dict_or_none(value: object) -> Dict[str, Any] | None:
+    if value is None:
+        return None
+    if not isinstance(value, MappingABC):
+        raise EmbeddingInputError("metadata must be a mapping when provided.")
+    value_map = cast(MappingABC[object, Any], value)
+    return {str(key): item for key, item in value_map.items()}
+
+
+def _int_or_default(value: object, *, default: int) -> int:
+    if value is None:
+        return int(default)
+    return int(cast(Any, value))
+
+
+validate_generation_input = _validate_generation_input
+validate_sequence = _validate_sequence
+as_float_vector = _as_float_vector
+as_float_matrix = _as_float_matrix
+normalize_generation_exception = _normalize_generation_exception
+
+
 __all__ = [
     "EmbeddingGenerationError",
     "EmbeddingInputError",
     "EmbeddingDependencyError",
     "EmbeddingBackendError",
+    "EmbeddingPayload",
     "GenerationInput",
     "EmbeddingRecord",
     "ModelMetadata",
@@ -799,5 +858,10 @@ __all__ = [
     "load_embedding_records_npy",
     "save_embedding_records_pickle",
     "save_embedding_records_npy",
+    "validate_generation_input",
+    "validate_sequence",
+    "as_float_vector",
+    "as_float_matrix",
+    "normalize_generation_exception",
     "utc_now_iso",
 ]

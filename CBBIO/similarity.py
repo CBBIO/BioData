@@ -6,7 +6,7 @@ This module is intentionally independent from database access code.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal, cast
 
 
 AlignmentMode = Literal["local", "global"]
@@ -142,9 +142,9 @@ def align_sequences(
             "Missing dependency 'parasail'. Install with: pip install parasail"
         ) from exc
 
-    if not isinstance(seq1, str) or not seq1:
+    if not seq1:
         raise InvalidSequenceError("seq1 must be a non-empty string.")
-    if not isinstance(seq2, str) or not seq2:
+    if not seq2:
         raise InvalidSequenceError("seq2 must be a non-empty string.")
 
     subst_matrix = getattr(_parasail, matrix, None)
@@ -154,12 +154,13 @@ def align_sequences(
             "See parasail documentation for valid matrix names (e.g. 'blosum62', 'pam250')."
         )
 
+    parasail_mod = cast(Any, _parasail)
     if mode == "local":
-        trace_fn = _parasail.sw_trace_striped_sat
-        stats_fn = _parasail.sw_stats_striped_sat
+        trace_fn = parasail_mod.sw_trace_striped_sat
+        stats_fn = parasail_mod.sw_stats_striped_sat
     else:
-        trace_fn = _parasail.nw_trace_striped_sat
-        stats_fn = _parasail.nw_stats_striped_sat
+        trace_fn = parasail_mod.nw_trace_striped_sat
+        stats_fn = parasail_mod.nw_stats_striped_sat
 
     try:
         trace_result = trace_fn(seq1, seq2, gap_open, gap_extend, subst_matrix)
@@ -168,14 +169,15 @@ def align_sequences(
         raise SequenceSimilarityError(f"Alignment failed: {exc}") from exc
 
     tb = trace_result.traceback
-    query_aligned: str = tb.query
-    ref_aligned: str = tb.ref
-    midline: str = tb.comp
+    query_aligned = str(tb.query)
+    ref_aligned = str(tb.ref)
+    midline = str(tb.comp)
 
-    score: int = int(stats_result.score)
-    alignment_length: int = int(stats_result.length)
-    matches: int = int(stats_result.matches)
-    positives_count: int = int(stats_result.similar)
+    stats = stats_result
+    score = int(stats.score)
+    alignment_length = int(stats.length)
+    matches = int(stats.matches)
+    positives_count = int(stats.similar)
 
     gaps: int = query_aligned.count("-") + ref_aligned.count("-")
     mismatches: int = max(0, alignment_length - matches - gaps)

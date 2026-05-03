@@ -5,7 +5,7 @@ from pathlib import Path
 import pickle
 import sys
 import types
-from typing import Any, Sequence
+from typing import Any, Dict, List, Self, Sequence, cast
 
 import pytest
 
@@ -176,12 +176,11 @@ def test_factory_catalog_reports_available_classes_and_models() -> None:
     classes = available_generator_classes()
     assert classes == ["protT5", "prostT5", "ankh3", "esmc", "esm2", "esm1b"]
 
-    catalog = available_generator_models()
+    catalog = cast(Dict[str, List[str]], available_generator_models())
     assert set(catalog.keys()) == set(classes)
     assert "esm2_t33_650m_ur50d" in [name.lower() for name in catalog["esm2"]]
 
-    esm1b_models = available_generator_models("esm1b")
-    assert isinstance(esm1b_models, list)
+    esm1b_models = cast(List[str], available_generator_models("esm1b"))
     assert "esm1b_t33_650M_UR50S" in esm1b_models
 
 
@@ -210,7 +209,7 @@ def test_generator_factory_builds_esm2() -> None:
     class _Model:
         num_layers = 33
 
-        def to(self, _device: str) -> "_Model":
+        def to(self, _device: str) -> Self:
             return self
 
         def eval(self) -> None:
@@ -234,7 +233,7 @@ def test_generator_factory_builds_esm2() -> None:
 
 def test_generator_factory_builds_esm1b() -> None:
     class _Model:
-        def to(self, _device: str) -> "_Model":
+        def to(self, _device: str) -> Self:
             return self
 
         def eval(self) -> None:
