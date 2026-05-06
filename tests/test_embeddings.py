@@ -12,6 +12,7 @@ import pytest
 from CBBIO.embeddings import (
     available_generator_classes,
     available_generator_models,
+    batch_generation_inputs,
     EmbeddingBackendError,
     EmbeddingDependencyError,
     EmbeddingRecord,
@@ -25,6 +26,9 @@ from CBBIO.embeddings import (
     PreprocessorAdapter,
     TokenizerAdapter,
     generate_from_fasta,
+    generate_from_fasta_batches,
+    iter_embedding_records_from_fasta,
+    iter_fasta_inputs,
     load_embedding_records,
     load_embedding_records_npy,
     load_embedding_records_pickle,
@@ -255,6 +259,18 @@ def test_generator_factory_builds_esm1b() -> None:
     assert isinstance(obj, Esm1bEmbeddingGenerator)
 
 
+def test_batch_generation_inputs_groups_iterable_without_materializing_all_inputs() -> None:
+    records = (GenerationInput(id=f"P{idx}", sequence="ACDE") for idx in range(5))
+
+    batches = list(batch_generation_inputs(records, batch_size=2))
+
+    assert [[record.id for record in batch] for batch in batches] == [
+        ["P0", "P1"],
+        ["P2", "P3"],
+        ["P4"],
+    ]
+
+
 @pytest.mark.skipif("Bio" not in sys.modules and __import__("importlib").util.find_spec("Bio") is None, reason="Biopython not installed")
 def test_load_fasta_inputs_parses_records(tmp_path: Path) -> None:
     fasta_path = tmp_path / "input.fasta"
@@ -269,6 +285,21 @@ def test_load_fasta_inputs_parses_records(tmp_path: Path) -> None:
 
 
 @pytest.mark.skipif("Bio" not in sys.modules and __import__("importlib").util.find_spec("Bio") is None, reason="Biopython not installed")
+def test_iter_fasta_inputs_yields_records_lazily(tmp_path: Path) -> None:
+    fasta_path = tmp_path / "input.fasta"
+    fasta_path.write_text(">P1 first\nACDE\n>P2 second\nVVVV\n", encoding="utf-8")
+
+    records = iter_fasta_inputs(fasta_path)
+
+    first = next(records)
+    second = next(records)
+
+    assert first.id == "P1"
+    assert first.sequence == "ACDE"
+    assert second.id == "P2"
+
+
+@pytest.mark.skipif("Bio" not in sys.modules and __import__("importlib").util.find_spec("Bio") is None, reason="Biopython not installed")
 def test_generate_from_fasta_uses_generator(tmp_path: Path) -> None:
     fasta_path = tmp_path / "input.fasta"
     fasta_path.write_text(">Q1\nACDE\n", encoding="utf-8")
@@ -279,6 +310,50 @@ def test_generate_from_fasta_uses_generator(tmp_path: Path) -> None:
     assert len(result.records) == 1
     assert result.records[0].id == "Q1"
     assert result.records[0].embedding == [4.0, 2.0]
+
+
+@pytest.mark.skipif("Bio" not in sys.modules and __import__("importlib").util.find_spec("Bio") is None, reason="Biopython not installed")
+def test_generate_from_fasta_batches_yields_one_result_per_batch(tmp_path: Path) -> None:
+    fasta_path = tmp_path / "input.fasta"
+    fasta_path.write_text(">Q1\nACDE\n>Q2\nAAAA\n>Q3\nVVVV\n", encoding="utf-8")
+    generator = _generator()
+
+    results = list(generate_from_fasta_batches(fasta_path, generator, batch_size=2, layer_index=5))
+
+    assert [len(result.records) for result in results] == [2, 1]
+    assert [[record.id for record in result.records] for result in results] == [["Q1", "Q2"], ["Q3"]]
+    assert results[0].records[0].embedding == [4.0, 5.0]
+
+
+@pytest.mark.skipif("Bio" not in sys.modules and __import__("importlib").util.find_spec("Bio") is None, reason="Biopython not installed")
+def test_generate_from_fasta_batch_size_aggregates_results(tmp_path: Path) -> None:
+    fasta_path = tmp_path / "input.fasta"
+    fasta_path.write_text(">Q1\nACDE\n>Q2\nAAAA\n>Q3\nVVVV\n", encoding="utf-8")
+    generator = _generator()
+
+    result = generate_from_fasta(fasta_path, generator, layer_index=6, batch_size=2)
+
+    assert [record.id for record in result.records] == ["Q1", "Q2", "Q3"]
+    assert result.run_metadata is not None
+    assert result.run_metadata.sequence_count == 3
+    assert result.run_metadata.failure_count == 0
+
+
+@pytest.mark.skipif("Bio" not in sys.modules and __import__("importlib").util.find_spec("Bio") is None, reason="Biopython not installed")
+def test_iter_embedding_records_from_fasta_streams_records(tmp_path: Path) -> None:
+    fasta_path = tmp_path / "input.fasta"
+    fasta_path.write_text(">Q1\nACDE\n>Q2\nAAAA\n>Q3\nVVVV\n", encoding="utf-8")
+    generator = _generator()
+
+    records = list(iter_embedding_records_from_fasta(fasta_path, generator, batch_size=2, layer_index=4))
+
+    assert [record.id for record in records] == ["Q1", "Q2", "Q3"]
+    assert records[1].embedding == [4.0, 4.0]
+
+
+def test_batch_generation_inputs_rejects_non_positive_batch_size() -> None:
+    with pytest.raises(EmbeddingInputError):
+        list(batch_generation_inputs([], batch_size=0))
 
 
 def test_load_fasta_inputs_raises_dependency_error_when_biopython_missing(

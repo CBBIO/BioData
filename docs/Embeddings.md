@@ -4,6 +4,7 @@
 `CBBIO.embeddings` provides model-agnostic building blocks for:
 - Defining embedding generation pipelines via adapters.
 - Loading sequence inputs from FASTA.
+- Streaming and batching FASTA-driven embedding workflows.
 - Loading/saving precomputed embeddings (`.pkl/.pickle/.npy/.npz`).
 - Capturing reproducibility metadata (model metadata and run metadata).
 
@@ -86,6 +87,10 @@ Model-agnostic orchestrator that runs:
 Main method:
 - `generate(records, *, layer_index=0, fail_fast=False) -> GenerationResult`
 
+Batch/stream helpers:
+- `generate_batches(records, *, batch_size, layer_index=0, fail_fast=False) -> Iterator[GenerationResult]`
+- `iter_records(records, *, batch_size, layer_index=0, fail_fast=False) -> Iterator[EmbeddingRecord]`
+
 Layer introspection helpers:
 - `available_layers() -> list[int]`
 - `num_layers() -> int`
@@ -121,11 +126,82 @@ Loads FASTA into `list[GenerationInput]`.
 - Uses Biopython `SeqIO`.
 - Raises `EmbeddingDependencyError` when Biopython is not installed.
 - Validates amino-acid sequences.
+- Eager API kept for backward compatibility.
 
-### `generate_from_fasta(path, generator, *, layer_index=0, fail_fast=False, id_from="record_id")`
-Convenience helper:
-- `load_fasta_inputs(...)`
-- then `generator.generate(...)`
+### `iter_fasta_inputs(path, *, id_from="record_id")`
+Yields `GenerationInput` lazily from FASTA.
+- Uses the same normalization and validation rules as `load_fasta_inputs(...)`.
+- Prefer this path for very large FASTA files.
+
+### `batch_generation_inputs(records, *, batch_size)`
+Groups any `Iterable[GenerationInput]` into fixed-size `list[GenerationInput]` batches.
+- Raises `EmbeddingInputError` if `batch_size <= 0`.
+
+### `generate_from_fasta(path, generator, *, layer_index=0, fail_fast=False, id_from="record_id", batch_size=None)`
+Convenience helper with two modes:
+- `batch_size=None`:
+  - `load_fasta_inputs(...)`
+  - then `generator.generate(...)`
+- `batch_size=int`:
+  - `iter_fasta_inputs(...)`
+  - batched `generator.generate(...)`
+  - then `collect_generation_results(...)`
+
+### `generate_from_fasta_batches(path, generator, *, batch_size, layer_index=0, fail_fast=False, id_from="record_id")`
+Yields one `GenerationResult` per FASTA batch.
+- Use this when you want to persist each batch before reading the next one.
+
+### `iter_embedding_records_from_fasta(path, generator, *, batch_size, layer_index=0, fail_fast=False, id_from="record_id")`
+Streams normalized `EmbeddingRecord` objects from FASTA in batch-sized chunks.
+- This is the lowest-memory high-level helper in the module.
+
+### `collect_generation_results(results)`
+Merges multiple batch-level `GenerationResult` objects into a single aggregate result.
+- Aggregates `records`, `errors`, `skipped`, and run metadata totals.
+
+## Large FASTA Usage
+
+For small inputs, the original eager path is still fine:
+
+```python
+from CBBIO.embeddings import generate_from_fasta
+
+result = generate_from_fasta("proteins.fasta", generator, layer_index=0)
+```
+
+For large FASTA files, prefer streaming or batched processing:
+
+```python
+from CBBIO.embeddings import iter_embedding_records_from_fasta
+
+for record in iter_embedding_records_from_fasta(
+    "proteins.fasta",
+    generator,
+    batch_size=128,
+    layer_index=0,
+):
+    write_record(record)
+```
+
+If you want per-batch error handling and persistence:
+
+```python
+from CBBIO.embeddings import generate_from_fasta_batches
+
+for batch_result in generate_from_fasta_batches(
+    "proteins.fasta",
+    generator,
+    batch_size=128,
+    layer_index=0,
+):
+    save_batch(batch_result.records)
+    handle_errors(batch_result.errors)
+```
+
+Operational note:
+- These helpers stop the FASTA reader from materializing all input sequences in memory.
+- If you still collect every generated embedding into one Python list, output memory can still grow without bound.
+- For million-scale datasets, stream records or persist each batch immediately.
 
 ## Embedding I/O Helpers
 

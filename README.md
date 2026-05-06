@@ -239,12 +239,16 @@ Main entrypoints:
 
 - `EmbeddingGenerator`
 - `load_fasta_inputs`
+- `iter_fasta_inputs`
 - `generate_from_fasta`
+- `generate_from_fasta_batches`
+- `iter_embedding_records_from_fasta`
 - `load_embedding_records` / `save_embedding_records_*`
 
 Key capabilities:
 
 - Model-agnostic adapter interfaces (`PreprocessorAdapter`, `TokenizerAdapter`, `ModelAdapter`, `PostprocessorAdapter`)
+- Streaming and batched FASTA processing for large sequence collections
 - Embedding record I/O (`.pkl/.pickle/.npy/.npz`)
 - Reproducibility metadata types (`ModelMetadata`, `RunMetadata`)
 

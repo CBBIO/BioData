@@ -6,7 +6,7 @@ This module is intentionally independent from database access code.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Iterable, Mapping as MappingABC
+from collections.abc import Iterable, Iterator, Mapping as MappingABC
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import pickle
@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Literal, Sequence, Tuple, Type, TypeAlias, c
 
 _VALID_AA = set("ACDEFGHIKLMNPQRSTVWYBXZJUO")
 EmbeddingPayload: TypeAlias = Sequence[float] | Sequence[Sequence[float]]
+LayerSelection: TypeAlias = int | Sequence[int] | None
 
 
 class EmbeddingGenerationError(Exception):
@@ -170,6 +171,8 @@ class EmbeddingGenerator:
         layer_index: int = 0,
         fail_fast: bool = False,
     ) -> GenerationResult:
+        if not isinstance(layer_index, int):
+            raise EmbeddingInputError("Base EmbeddingGenerator.generate requires an integer layer_index.")
         result = GenerationResult()
 
         for index, record in enumerate(records):
@@ -208,6 +211,36 @@ class EmbeddingGenerator:
                 )
 
         return result
+
+    def generate_batches(
+        self,
+        records: Iterable[GenerationInput],
+        *,
+        batch_size: int,
+        layer_index: LayerSelection = 0,
+        fail_fast: bool = False,
+    ) -> Iterator[GenerationResult]:
+        """Yield one ``GenerationResult`` per input batch."""
+        resolved_batch_size = _validate_batch_size(batch_size)
+        for batch in batch_generation_inputs(records, batch_size=resolved_batch_size):
+            yield self.generate(batch, layer_index=cast(Any, layer_index), fail_fast=fail_fast)
+
+    def iter_records(
+        self,
+        records: Iterable[GenerationInput],
+        *,
+        batch_size: int,
+        layer_index: LayerSelection = 0,
+        fail_fast: bool = False,
+    ) -> Iterator[EmbeddingRecord]:
+        """Yield embedding records incrementally from batched generation."""
+        for result in self.generate_batches(
+            records,
+            batch_size=batch_size,
+            layer_index=layer_index,
+            fail_fast=fail_fast,
+        ):
+            yield from result.records
 
 
 def Generator(
@@ -371,6 +404,15 @@ def load_fasta_inputs(
     id_from: Literal["record_id", "description"] = "record_id",
 ) -> List[GenerationInput]:
     """Load FASTA records into ``GenerationInput`` values."""
+    return list(iter_fasta_inputs(path, id_from=id_from))
+
+
+def iter_fasta_inputs(
+    path: str | Path,
+    *,
+    id_from: Literal["record_id", "description"] = "record_id",
+) -> Iterator[GenerationInput]:
+    """Yield ``GenerationInput`` values lazily from a FASTA file."""
     try:
         from Bio import SeqIO  # type: ignore
     except ModuleNotFoundError as exc:
@@ -378,42 +420,148 @@ def load_fasta_inputs(
             "Biopython is required for FASTA loading. Install with: pip install biopython"
         ) from exc
 
-    inputs: List[GenerationInput] = []
     file_path = Path(path)
     seqio_module = cast(Any, SeqIO)
     parsed_records = cast(Iterable[object], seqio_module.parse(str(file_path), "fasta"))
     for index, record_obj in enumerate(parsed_records):
-        record = cast(Any, record_obj)
-        record_id = str(record.id or "").strip()
-        description = str(record.description or "").strip() or None
-        selected_id = record_id if id_from == "record_id" else str(description or "").strip()
-        if not selected_id:
-            raise EmbeddingInputError(f"Empty FASTA identifier at record index {index}.")
+        yield _generation_input_from_fasta_record(record_obj, index=index, id_from=id_from)
 
-        sequence = str(record.seq or "").strip().upper()
-        _validate_sequence(sequence, context=f"FASTA record index={index} id={selected_id!r}")
-        inputs.append(
-            GenerationInput(
-                id=selected_id,
-                sequence=sequence,
-                description=description,
-                metadata={"source": "fasta", "record_id": record_id},
-            )
-        )
-    return inputs
+
+def batch_generation_inputs(
+    records: Iterable[GenerationInput],
+    *,
+    batch_size: int,
+) -> Iterator[List[GenerationInput]]:
+    """Group generation inputs into fixed-size lists."""
+    resolved_batch_size = _validate_batch_size(batch_size)
+    batch: List[GenerationInput] = []
+    for record in records:
+        batch.append(record)
+        if len(batch) >= resolved_batch_size:
+            yield batch
+            batch = []
+    if batch:
+        yield batch
 
 
 def generate_from_fasta(
     path: str | Path,
     generator: EmbeddingGenerator,
     *,
-    layer_index: int = 0,
+    layer_index: LayerSelection = 0,
     fail_fast: bool = False,
     id_from: Literal["record_id", "description"] = "record_id",
+    batch_size: int | None = None,
 ) -> GenerationResult:
     """Load FASTA records and generate embeddings through ``generator``."""
-    records = load_fasta_inputs(path, id_from=id_from)
-    return generator.generate(records, layer_index=layer_index, fail_fast=fail_fast)
+    if batch_size is None:
+        records = load_fasta_inputs(path, id_from=id_from)
+        return generator.generate(records, layer_index=layer_index, fail_fast=fail_fast)
+
+    results = generate_from_fasta_batches(
+        path,
+        generator,
+        batch_size=batch_size,
+        layer_index=layer_index,
+        fail_fast=fail_fast,
+        id_from=id_from,
+    )
+    return collect_generation_results(results)
+
+
+def generate_from_fasta_batches(
+    path: str | Path,
+    generator: EmbeddingGenerator,
+    *,
+    batch_size: int,
+    layer_index: LayerSelection = 0,
+    fail_fast: bool = False,
+    id_from: Literal["record_id", "description"] = "record_id",
+) -> Iterator[GenerationResult]:
+    """Yield one ``GenerationResult`` per FASTA batch."""
+    yield from generator.generate_batches(
+        iter_fasta_inputs(path, id_from=id_from),
+        batch_size=batch_size,
+        layer_index=layer_index,
+        fail_fast=fail_fast,
+    )
+
+
+def iter_embedding_records_from_fasta(
+    path: str | Path,
+    generator: EmbeddingGenerator,
+    *,
+    batch_size: int,
+    layer_index: LayerSelection = 0,
+    fail_fast: bool = False,
+    id_from: Literal["record_id", "description"] = "record_id",
+) -> Iterator[EmbeddingRecord]:
+    """Yield embedding records incrementally from a FASTA file."""
+    yield from generator.iter_records(
+        iter_fasta_inputs(path, id_from=id_from),
+        batch_size=batch_size,
+        layer_index=layer_index,
+        fail_fast=fail_fast,
+    )
+
+
+def collect_generation_results(results: Iterable[GenerationResult]) -> GenerationResult:
+    """Merge batch results into one aggregate ``GenerationResult``."""
+    merged_records: List[EmbeddingRecord] = []
+    merged_errors: List[Dict[str, Any]] = []
+    merged_skipped: List[Dict[str, Any]] = []
+    model_metadata: ModelMetadata | None = None
+    requested_layers: List[int] | None = None
+    resolved_layers: set[int] = set()
+    failure_count = 0
+    sequence_count = 0
+    parameter_values: List[Dict[str, Any] | None] = []
+
+    for result in results:
+        merged_records.extend(result.records)
+        merged_errors.extend(result.errors)
+        merged_skipped.extend(result.skipped)
+        if model_metadata is None and result.model_metadata is not None:
+            model_metadata = result.model_metadata
+
+        run_metadata = result.run_metadata
+        if run_metadata is not None:
+            sequence_count += int(run_metadata.sequence_count)
+            failure_count += int(run_metadata.failure_count)
+            if run_metadata.requested_layers is not None:
+                if requested_layers is None:
+                    requested_layers = list(run_metadata.requested_layers)
+                elif list(run_metadata.requested_layers) != requested_layers:
+                    requested_layers = None
+            if run_metadata.resolved_layers is not None:
+                resolved_layers.update(int(value) for value in run_metadata.resolved_layers)
+            parameter_values.append(run_metadata.parameters)
+        else:
+            sequence_count += _result_sequence_count(result)
+            failure_count += len(result.errors)
+
+        if run_metadata is None and result.records:
+            resolved_layers.update(int(record.layer_index) for record in result.records)
+
+    aggregate_run_metadata: RunMetadata | None = None
+    if sequence_count or merged_records or merged_errors or merged_skipped:
+        aggregate_run_metadata = RunMetadata(
+            run_id=_uuid4(),
+            created_at_utc=utc_now_iso(),
+            sequence_count=sequence_count,
+            requested_layers=requested_layers,
+            resolved_layers=sorted(resolved_layers) or None,
+            failure_count=failure_count,
+            parameters=_shared_parameters(parameter_values),
+        )
+
+    return GenerationResult(
+        records=merged_records,
+        errors=merged_errors,
+        skipped=merged_skipped,
+        model_metadata=model_metadata,
+        run_metadata=aggregate_run_metadata,
+    )
 
 
 def load_embedding_records(
@@ -633,6 +781,56 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _generation_input_from_fasta_record(
+    record_obj: object,
+    *,
+    index: int,
+    id_from: Literal["record_id", "description"],
+) -> GenerationInput:
+    record = cast(Any, record_obj)
+    record_id = str(record.id or "").strip()
+    description = str(record.description or "").strip() or None
+    selected_id = record_id if id_from == "record_id" else str(description or "").strip()
+    if not selected_id:
+        raise EmbeddingInputError(f"Empty FASTA identifier at record index {index}.")
+
+    sequence = str(record.seq or "").strip().upper()
+    _validate_sequence(sequence, context=f"FASTA record index={index} id={selected_id!r}")
+    return GenerationInput(
+        id=selected_id,
+        sequence=sequence,
+        description=description,
+        metadata={"source": "fasta", "record_id": record_id},
+    )
+
+
+def _validate_batch_size(batch_size: int) -> int:
+    resolved = int(batch_size)
+    if resolved <= 0:
+        raise EmbeddingInputError("batch_size must be a positive integer.")
+    return resolved
+
+
+def _result_sequence_count(result: GenerationResult) -> int:
+    return len(result.records) + len(result.errors) + len(result.skipped)
+
+
+def _shared_parameters(values: Sequence[Dict[str, Any] | None]) -> Dict[str, Any] | None:
+    filtered = [value for value in values if value is not None]
+    if not filtered:
+        return None
+    first = filtered[0]
+    if all(value == first for value in filtered[1:]):
+        return dict(first)
+    return None
+
+
+def _uuid4() -> str:
+    import uuid
+
+    return str(uuid.uuid4())
+
+
 def _records_from_payload(
     payload: object,
     *,
@@ -838,6 +1036,7 @@ __all__ = [
     "EmbeddingDependencyError",
     "EmbeddingBackendError",
     "EmbeddingPayload",
+    "LayerSelection",
     "GenerationInput",
     "EmbeddingRecord",
     "ModelMetadata",
@@ -851,8 +1050,13 @@ __all__ = [
     "Generator",
     "available_generator_classes",
     "available_generator_models",
+    "iter_fasta_inputs",
+    "batch_generation_inputs",
     "load_fasta_inputs",
     "generate_from_fasta",
+    "generate_from_fasta_batches",
+    "iter_embedding_records_from_fasta",
+    "collect_generation_results",
     "load_embedding_records",
     "load_embedding_records_pickle",
     "load_embedding_records_npy",
