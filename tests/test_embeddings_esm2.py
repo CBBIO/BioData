@@ -67,7 +67,13 @@ class _FakeAlphabet:
 class _FakeModel:
     num_layers = 3
 
-    def to(self, _device: str) -> "_FakeModel":
+    def __init__(self) -> None:
+        self.to_args: tuple[Any, ...] | None = None
+        self.to_kwargs: dict[str, Any] | None = None
+
+    def to(self, *args: Any, **kwargs: Any) -> "_FakeModel":
+        self.to_args = args
+        self.to_kwargs = kwargs
         return self
 
     def eval(self) -> None:
@@ -117,6 +123,29 @@ def test_esm2_generate_returns_per_residue_matrices_without_pooling() -> None:
     # residues are 4 after removing BOS/EOS
     assert result.records[0].shape == (4, 2)
     assert isinstance(result.records[0].embedding[0], list)
+
+
+def test_esm2_generator_records_requested_dtype(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_torch = types.SimpleNamespace(
+        float32="float32",
+        float16="float16",
+        bfloat16="bfloat16",
+    )
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+
+    model = _FakeModel()
+    generator = Esm2EmbeddingGenerator(
+        model=model,
+        alphabet=_FakeAlphabet(),
+        device="cuda:0",
+        dtype="float16",
+    )
+
+    assert generator.model_metadata.parameters is not None
+    assert generator.model_metadata.parameters["torch_dtype"] == "float16"
+    assert model.to_kwargs == {"device": "cuda:0", "dtype": "float16"}
 
 
 def test_esm2_available_layers_and_count() -> None:

@@ -62,11 +62,15 @@ class _FakeTokenizer:
         assert add_special_tokens is True
         assert padding == "longest"
         assert return_tensors == "pt"
-        spaced = sequences[0].split()
-        assert spaced[0] == "<AA2fold>"
+        split_sequences = [sequence.split() for sequence in sequences]
+        assert all(spaced[0] == "<AA2fold>" for spaced in split_sequences)
         # prefix + residues + end token
-        length = len(spaced) + 1
-        return {"input_ids": _FakeTensor([[1] * length]), "attention_mask": _FakeTensor([[1] * length])}
+        lengths = [len(spaced) + 1 for spaced in split_sequences]
+        max_len = max(lengths)
+        return {
+            "input_ids": _FakeTensor([[1] * length + [0] * (max_len - length) for length in lengths]),
+            "attention_mask": _FakeTensor([[1] * length + [0] * (max_len - length) for length in lengths]),
+        }
 
 
 class _FakeModelOutput:
@@ -101,10 +105,15 @@ class _FakeModel:
     def __call__(self, *, input_ids: Any, attention_mask: Any, output_hidden_states: bool, return_dict: bool) -> Any:
         assert output_hidden_states is True
         assert return_dict is True
-        length = len(input_ids.tolist()[0])  # includes prefix + residues + end
+        rows = input_ids.tolist()
+        batch_size = len(rows)
+        length = len(rows[0])  # includes prefix + residues + end
         hidden_states = []
         for layer in range(3):
-            layer_values = [[[float(layer), float(pos)] for pos in range(length)]]
+            layer_values = [
+                [[float(layer), float(row_index), float(pos)] for pos in range(length)]
+                for row_index in range(batch_size)
+            ]
             hidden_states.append(_FakeTensor(layer_values))
         return _FakeModelOutput(tuple(hidden_states))
 
@@ -151,11 +160,35 @@ def test_prostt5_generate_returns_per_residue_matrix_without_pooling(
 
     assert result.errors == []
     assert [record.layer_index for record in result.records] == [0, 2]
-    # residues only: 4 rows, hidden dimension 2 in fake model
-    assert all(record.shape == (4, 2) for record in result.records)
+    # residues only: 4 rows, hidden dimension 3 in fake model
+    assert all(record.shape == (4, 3) for record in result.records)
     assert isinstance(result.records[0].embedding[0], list)
     assert model.did_float is True
     assert model.did_half is False
+
+
+def test_prostt5_generator_records_requested_dtype(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_torch = types.SimpleNamespace(
+        float32="float32",
+        float16="float16",
+        bfloat16="bfloat16",
+    )
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+
+    model = _FakeModel()
+    generator = ProstT5EmbeddingGenerator(
+        tokenizer=_FakeTokenizer(),
+        model=model,
+        device="cuda:0",
+        dtype="float16",
+    )
+
+    assert generator.model_metadata.parameters is not None
+    assert generator.model_metadata.parameters["torch_dtype"] == "float16"
+    assert generator.model_metadata.parameters["precision_policy"] == "explicit_torch_dtype"
+    assert model.did_half is True
 
 
 def test_prostt5_generator_available_layers_and_count(

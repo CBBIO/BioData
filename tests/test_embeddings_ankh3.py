@@ -52,14 +52,27 @@ class _FakeNoGrad:
 
 
 class _FakeTokenizer:
-    def __call__(self, sequence: str, add_special_tokens: bool, return_tensors: str, is_split_into_words: bool) -> dict[str, Any]:
+    def __call__(
+        self,
+        sequence: str | list[str],
+        add_special_tokens: bool,
+        padding: str,
+        return_tensors: str,
+        is_split_into_words: bool,
+    ) -> dict[str, Any]:
         assert add_special_tokens is True
+        assert padding == "longest"
         assert return_tensors == "pt"
         assert is_split_into_words is False
-        assert sequence.startswith("[NLU]") or sequence.startswith("[S2S]")
+        sequences = sequence if isinstance(sequence, list) else [sequence]
+        assert all(item.startswith("[NLU]") or item.startswith("[S2S]") for item in sequences)
         # sequence + start/end specials.
-        length = len(sequence) + 2
-        return {"input_ids": _FakeTensor([[1] * length]), "attention_mask": _FakeTensor([[1] * length])}
+        lengths = [len(item) + 2 for item in sequences]
+        max_len = max(lengths)
+        return {
+            "input_ids": _FakeTensor([[1] * length + [0] * (max_len - length) for length in lengths]),
+            "attention_mask": _FakeTensor([[1] * length + [0] * (max_len - length) for length in lengths]),
+        }
 
 
 class _FakeModelOutput:
@@ -73,7 +86,13 @@ class _FakeModel:
 
     config = _Config()
 
-    def to(self, _device: str) -> "_FakeModel":
+    def __init__(self) -> None:
+        self.to_args: tuple[Any, ...] | None = None
+        self.to_kwargs: dict[str, Any] | None = None
+
+    def to(self, *args: Any, **kwargs: Any) -> "_FakeModel":
+        self.to_args = args
+        self.to_kwargs = kwargs
         return self
 
     def eval(self) -> None:
@@ -82,10 +101,15 @@ class _FakeModel:
     def __call__(self, *, input_ids: Any, attention_mask: Any, output_hidden_states: bool, return_dict: bool) -> Any:
         assert output_hidden_states is True
         assert return_dict is True
-        length = len(input_ids.tolist()[0])
+        rows = input_ids.tolist()
+        batch_size = len(rows)
+        length = len(rows[0])
         hidden_states = []
         for layer in range(3):
-            layer_values = [[[float(layer), float(pos)] for pos in range(length)]]
+            layer_values = [
+                [[float(layer), float(row_index), float(pos)] for pos in range(length)]
+                for row_index in range(batch_size)
+            ]
             hidden_states.append(_FakeTensor(layer_values))
         return _FakeModelOutput(tuple(hidden_states))
 
@@ -137,12 +161,35 @@ def test_ankh3_generate_returns_per_residue_matrix_without_pooling(
 
     assert result.errors == []
     assert [record.layer_index for record in result.records] == [0, 2]
-    assert all(record.shape[1] == 2 for record in result.records)
+    assert all(record.shape[1] == 3 for record in result.records)
     assert all(record.shape[0] >= 1 for record in result.records)
     assert isinstance(result.records[0].embedding[0], list)
     assert result.model_metadata is not None
     assert result.model_metadata.parameters is not None
     assert result.model_metadata.parameters.get("prefix") == "[NLU]"
+
+
+def test_ankh3_generator_records_requested_dtype(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_torch = types.SimpleNamespace(
+        float32="float32",
+        float16="float16",
+        bfloat16="bfloat16",
+    )
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+
+    model = _FakeModel()
+    generator = Ankh3EmbeddingGenerator(
+        tokenizer=_FakeTokenizer(),
+        model=model,
+        device="cuda:0",
+        dtype="float16",
+    )
+
+    assert generator.model_metadata.parameters is not None
+    assert generator.model_metadata.parameters["torch_dtype"] == "float16"
+    assert model.to_kwargs == {"device": "cuda:0", "dtype": "float16"}
 
 
 def test_ankh3_available_layers_and_count() -> None:

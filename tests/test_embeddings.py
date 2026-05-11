@@ -10,15 +10,12 @@ from typing import Any, Dict, List, Self, Sequence, cast
 import pytest
 
 from CBBIO.embeddings import (
-    available_generator_classes,
-    available_generator_models,
     batch_generation_inputs,
     EmbeddingBackendError,
     EmbeddingDependencyError,
     EmbeddingRecord,
     EmbeddingGenerator,
     EmbeddingInputError,
-    Generator,
     GenerationInput,
     ModelMetadata,
     ModelAdapter,
@@ -29,13 +26,30 @@ from CBBIO.embeddings import (
     generate_from_fasta_batches,
     iter_embedding_records_from_fasta,
     iter_fasta_inputs,
+    load_fasta_inputs,
+    RunMetadata,
+)
+from CBBIO import (
+    available_generator_classes,
+    available_generator_models,
+    EmbeddingWriter,
+    FastaBatcher,
+    Generator,
+    IterableBatcher,
+    generate_fasta_h5,
+    generate_fasta_npy_shards,
+    generate_fasta_pickle_shards,
     load_embedding_records,
     load_embedding_records_npy,
     load_embedding_records_pickle,
-    load_fasta_inputs,
+    mean_pool_embedding_record,
+    save_embedding_records_h5,
     save_embedding_records_npy,
+    save_embedding_records_npy_shards,
     save_embedding_records_pickle,
-    RunMetadata,
+    save_embedding_records_pickle_shards,
+    pooler_factory,
+    run_embedding_generation,
 )
 from CBBIO.embeddings_prott5 import ProtT5EmbeddingGenerator, ProtT5Preprocessor
 from CBBIO.embeddings_prostt5 import ProstT5EmbeddingGenerator
@@ -78,6 +92,13 @@ class _ToListVector:
 class _ToListModel(ModelAdapter):
     def infer(self, tokens: Any, *, layer_index: int = 0) -> Any:
         return _ToListVector([1, 2.5, float(layer_index)])
+
+
+class _ScalePooler:
+    name = "scale"
+
+    def __call__(self, residue_tensor: Any) -> list[float]:
+        return [2.0 * float(cast(Any, value)) for value in cast(Sequence[Any], residue_tensor)]
 
 
 def _generator(*, model: ModelAdapter | None = None) -> EmbeddingGenerator:
@@ -146,6 +167,34 @@ def test_generate_normalizes_tolist_vectors_to_float_list() -> None:
     assert result.records[0].shape == (3,)
 
 
+def test_generate_applies_custom_callable_pooler() -> None:
+    generator = _generator(model=_ToListModel())
+
+    result = generator.generate(
+        [GenerationInput(id="p1", sequence="ACDE")],
+        layer_index=3,
+        pooler=_ScalePooler(),
+    )
+
+    assert len(result.records) == 1
+    assert result.records[0].embedding == [2.0, 5.0, 6.0]
+    assert result.records[0].shape == (3,)
+
+
+def test_generate_with_mean_pooler_keeps_vector_outputs() -> None:
+    generator = _generator(model=_ToListModel())
+
+    result = generator.generate(
+        [GenerationInput(id="p1", sequence="ACDE")],
+        layer_index=3,
+        pooler="mean",
+    )
+
+    assert len(result.records) == 1
+    assert result.records[0].embedding == [1.0, 2.5, 3.0]
+    assert result.records[0].shape == (3,)
+
+
 def test_base_generator_available_layers_raises_when_model_adapter_does_not_expose_it() -> None:
     generator = _generator()
     with pytest.raises(EmbeddingBackendError):
@@ -164,6 +213,21 @@ def test_generator_factory_uses_default_model_name_when_omitted() -> None:
     obj = Generator(model_class="protT5", tokenizer=object(), model=object())
     assert isinstance(obj, ProtT5EmbeddingGenerator)
     assert obj.model_reference == ProtT5EmbeddingGenerator.DEFAULT_MODEL_NAME
+
+
+def test_prott5_generator_records_requested_dtype(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_torch = types.SimpleNamespace(float32="float32", float16="float16", bfloat16="bfloat16")
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+
+    obj = ProtT5EmbeddingGenerator(tokenizer=object(), model=object(), dtype="float16")
+
+    assert obj.model_metadata.parameters is not None
+    assert obj.model_metadata.parameters["torch_dtype"] == "float16"
+
+
+def test_prott5_generator_rejects_unknown_dtype() -> None:
+    with pytest.raises(EmbeddingInputError):
+        ProtT5EmbeddingGenerator(tokenizer=object(), model=object(), dtype="int8")
 
 
 def test_generator_factory_builds_prostt5_from_class_kwarg() -> None:
@@ -271,6 +335,19 @@ def test_batch_generation_inputs_groups_iterable_without_materializing_all_input
     ]
 
 
+def test_batch_generation_inputs_respects_padded_token_budget() -> None:
+    records = [
+        GenerationInput(id="P0", sequence="A" * 9),
+        GenerationInput(id="P1", sequence="A" * 8),
+        GenerationInput(id="P2", sequence="A" * 3),
+        GenerationInput(id="P3", sequence="A" * 2),
+    ]
+
+    batches = list(batch_generation_inputs(records, batch_size=10, max_batch_tokens=20))
+
+    assert [[record.id for record in batch] for batch in batches] == [["P0", "P1"], ["P2", "P3"]]
+
+
 @pytest.mark.skipif("Bio" not in sys.modules and __import__("importlib").util.find_spec("Bio") is None, reason="Biopython not installed")
 def test_load_fasta_inputs_parses_records(tmp_path: Path) -> None:
     fasta_path = tmp_path / "input.fasta"
@@ -305,7 +382,8 @@ def test_generate_from_fasta_uses_generator(tmp_path: Path) -> None:
     fasta_path.write_text(">Q1\nACDE\n", encoding="utf-8")
     generator = _generator()
 
-    result = generate_from_fasta(fasta_path, generator, layer_index=2)
+    with pytest.warns(DeprecationWarning):
+        result = generate_from_fasta(fasta_path, generator, layer_index=2)
 
     assert len(result.records) == 1
     assert result.records[0].id == "Q1"
@@ -318,7 +396,8 @@ def test_generate_from_fasta_batches_yields_one_result_per_batch(tmp_path: Path)
     fasta_path.write_text(">Q1\nACDE\n>Q2\nAAAA\n>Q3\nVVVV\n", encoding="utf-8")
     generator = _generator()
 
-    results = list(generate_from_fasta_batches(fasta_path, generator, batch_size=2, layer_index=5))
+    with pytest.warns(DeprecationWarning):
+        results = list(generate_from_fasta_batches(fasta_path, generator, batch_size=2, layer_index=5))
 
     assert [len(result.records) for result in results] == [2, 1]
     assert [[record.id for record in result.records] for result in results] == [["Q1", "Q2"], ["Q3"]]
@@ -331,7 +410,8 @@ def test_generate_from_fasta_batch_size_aggregates_results(tmp_path: Path) -> No
     fasta_path.write_text(">Q1\nACDE\n>Q2\nAAAA\n>Q3\nVVVV\n", encoding="utf-8")
     generator = _generator()
 
-    result = generate_from_fasta(fasta_path, generator, layer_index=6, batch_size=2)
+    with pytest.warns(DeprecationWarning):
+        result = generate_from_fasta(fasta_path, generator, layer_index=6, batch_size=2)
 
     assert [record.id for record in result.records] == ["Q1", "Q2", "Q3"]
     assert result.run_metadata is not None
@@ -345,7 +425,8 @@ def test_iter_embedding_records_from_fasta_streams_records(tmp_path: Path) -> No
     fasta_path.write_text(">Q1\nACDE\n>Q2\nAAAA\n>Q3\nVVVV\n", encoding="utf-8")
     generator = _generator()
 
-    records = list(iter_embedding_records_from_fasta(fasta_path, generator, batch_size=2, layer_index=4))
+    with pytest.warns(DeprecationWarning):
+        records = list(iter_embedding_records_from_fasta(fasta_path, generator, batch_size=2, layer_index=4))
 
     assert [record.id for record in records] == ["Q1", "Q2", "Q3"]
     assert records[1].embedding == [4.0, 4.0]
@@ -354,6 +435,259 @@ def test_iter_embedding_records_from_fasta_streams_records(tmp_path: Path) -> No
 def test_batch_generation_inputs_rejects_non_positive_batch_size() -> None:
     with pytest.raises(EmbeddingInputError):
         list(batch_generation_inputs([], batch_size=0))
+
+
+def test_iterable_batcher_defaults_to_singletons() -> None:
+    records = [GenerationInput(id=f"P{idx}", sequence="A" * (idx + 1)) for idx in range(3)]
+
+    batches = list(IterableBatcher(records))
+
+    assert [[record.id for record in batch] for batch in batches] == [["P0"], ["P1"], ["P2"]]
+
+
+def test_iterable_batcher_batch_size_only() -> None:
+    records = [GenerationInput(id=f"P{idx}", sequence="ACDE") for idx in range(5)]
+
+    batches = list(IterableBatcher(records, batch_size=2))
+
+    assert [[record.id for record in batch] for batch in batches] == [["P0", "P1"], ["P2", "P3"], ["P4"]]
+
+
+def test_iterable_batcher_token_budget_only() -> None:
+    records = [
+        GenerationInput(id="P0", sequence="A" * 9),
+        GenerationInput(id="P1", sequence="A" * 8),
+        GenerationInput(id="P2", sequence="A" * 3),
+    ]
+
+    batches = list(IterableBatcher(records, max_batch_tokens=20))
+
+    assert [[record.id for record in batch] for batch in batches] == [["P0", "P1"], ["P2"]]
+
+
+def test_iterable_batcher_supports_size_and_token_caps() -> None:
+    records = [
+        GenerationInput(id="P0", sequence="A" * 9),
+        GenerationInput(id="P1", sequence="A" * 8),
+        GenerationInput(id="P2", sequence="A" * 3),
+        GenerationInput(id="P3", sequence="A" * 2),
+    ]
+
+    batches = list(IterableBatcher(records, batch_size=3, max_batch_tokens=20))
+
+    assert [[record.id for record in batch] for batch in batches] == [["P0", "P1"], ["P2", "P3"]]
+
+
+def test_iterable_batcher_limit_applies_first_accepted_records() -> None:
+    records = [GenerationInput(id=f"P{idx}", sequence="ACDE") for idx in range(5)]
+
+    batches = list(IterableBatcher(records, batch_size=10, limit=3))
+
+    assert [[record.id for record in batch] for batch in batches] == [["P0", "P1", "P2"]]
+
+
+@pytest.mark.skipif("Bio" not in sys.modules and __import__("importlib").util.find_spec("Bio") is None, reason="Biopython not installed")
+def test_fasta_batcher_defaults_to_singletons(tmp_path: Path) -> None:
+    fasta_path = tmp_path / "input.fasta"
+    fasta_path.write_text(">Q1\nA\n>Q2\nAA\n", encoding="utf-8")
+
+    batches = list(FastaBatcher(fasta_path))
+
+    assert [[record.id for record in batch] for batch in batches] == [["Q1"], ["Q2"]]
+
+
+@pytest.mark.skipif("Bio" not in sys.modules and __import__("importlib").util.find_spec("Bio") is None, reason="Biopython not installed")
+def test_fasta_batcher_batch_size_only(tmp_path: Path) -> None:
+    fasta_path = tmp_path / "input.fasta"
+    fasta_path.write_text(">Q1\nA\n>Q2\nAA\n>Q3\nAAA\n", encoding="utf-8")
+
+    batches = list(FastaBatcher(fasta_path, batch_size=2))
+
+    assert [[record.id for record in batch] for batch in batches] == [["Q1", "Q2"], ["Q3"]]
+
+
+@pytest.mark.skipif("Bio" not in sys.modules and __import__("importlib").util.find_spec("Bio") is None, reason="Biopython not installed")
+def test_fasta_batcher_token_budget_only(tmp_path: Path) -> None:
+    fasta_path = tmp_path / "input.fasta"
+    fasta_path.write_text(">Q1\nAAAAAAAAA\n>Q2\nAAAAAAAA\n>Q3\nAAA\n", encoding="utf-8")
+
+    batches = list(FastaBatcher(fasta_path, max_batch_tokens=20))
+
+    assert [[record.id for record in batch] for batch in batches] == [["Q1", "Q2"], ["Q3"]]
+
+
+@pytest.mark.skipif("Bio" not in sys.modules and __import__("importlib").util.find_spec("Bio") is None, reason="Biopython not installed")
+def test_fasta_batcher_semantics_and_skipped_tsv(tmp_path: Path) -> None:
+    fasta_path = tmp_path / "input.fasta"
+    skipped_path = tmp_path / "skipped.tsv"
+    fasta_path.write_text(">Q1\nA\n>Q2\nAAAAA\n>Q3\nAAA\n>Q4\nAA\n", encoding="utf-8")
+
+    batcher = FastaBatcher(
+        fasta_path,
+        batch_size=2,
+        max_batch_tokens=12,
+        limit=3,
+        length_sort_window=3,
+        max_sequence_length=4,
+        skipped_path=skipped_path,
+    )
+    batches = list(batcher)
+
+    assert [[record.id for record in batch] for batch in batches] == [["Q3", "Q4"], ["Q1"]]
+    assert batcher.skipped_count == 1
+    assert batcher.skipped == [{"id": "Q2", "length": 5, "reason": "length>4"}]
+    assert skipped_path.read_text(encoding="utf-8").splitlines() == [
+        "id\tlength\treason",
+        "Q2\t5\tlength>4",
+    ]
+
+
+def test_embedding_writer_memory_keeps_records() -> None:
+    writer = EmbeddingWriter(format="memory")
+    writer.write([EmbeddingRecord(id="P1", embedding=[1.0, 2.0], layer_index=0, model_reference="m", shape=(2,))])
+    writer.close()
+
+    assert writer.record_count == 1
+    assert writer.records[0].id == "P1"
+
+
+def test_embedding_writer_rejects_invalid_parameter_combinations(tmp_path: Path) -> None:
+    with pytest.raises(EmbeddingInputError):
+        EmbeddingWriter(format="memory", path=tmp_path / "x.pkl")
+    with pytest.raises(EmbeddingInputError):
+        EmbeddingWriter(format="pkl")
+    with pytest.raises(EmbeddingInputError):
+        EmbeddingWriter(format="bad")
+
+
+def test_embedding_writer_pkl_and_npy_shards(tmp_path: Path) -> None:
+    np = pytest.importorskip("numpy")
+    records = [
+        EmbeddingRecord(id=f"P{idx}", embedding=[float(idx), 1.0], layer_index=0, model_reference="m", shape=(2,))
+        for idx in range(3)
+    ]
+
+    pkl_writer = EmbeddingWriter(format="pkl", path=tmp_path / "out.pkl", records_per_shard=2)
+    pkl_writer.write(records)
+    pkl_writer.close()
+    assert [path.name for path in pkl_writer.paths] == ["out.shard_000001.pkl", "out.shard_000002.pkl"]
+    assert load_embedding_records_pickle(pkl_writer.paths[0])[0].id == "P0"
+
+    npy_writer = EmbeddingWriter(format="npy", path=tmp_path / "out.npy", records_per_shard=2)
+    npy_writer.write(records)
+    npy_writer.close()
+    assert [path.name for path in npy_writer.paths] == ["out.shard_000001.npy", "out.shard_000002.npy"]
+    assert np.load(npy_writer.paths[0]).shape == (2, 2)
+    assert npy_writer.id_paths[0].read_text(encoding="utf-8").splitlines() == ["P0", "P1"]
+
+
+def test_embedding_writer_h5(tmp_path: Path) -> None:
+    h5py = pytest.importorskip("h5py")
+    writer = EmbeddingWriter(format="h5", path=tmp_path / "out.h5", write_batch_size=1)
+    writer.write(
+        [
+            EmbeddingRecord(id="P1", embedding=[1.0, 2.0], layer_index=0, model_reference="m", shape=(2,)),
+            EmbeddingRecord(id="P2", embedding=[3.0, 4.0], layer_index=0, model_reference="m", shape=(2,)),
+        ]
+    )
+    writer.close()
+
+    assert writer.record_count == 2
+    with h5py.File(tmp_path / "out.h5", "r") as handle:
+        assert handle["embeddings"].shape == (2, 2)
+        assert handle["ids"].asstr()[:].tolist() == ["P1", "P2"]
+
+
+class _BatchSensitiveGenerator:
+    model_reference = "fake/model"
+
+    def __init__(self, *, fail_ids: set[str] | None = None, oom_ids: set[str] | None = None) -> None:
+        self.fail_ids = fail_ids or set()
+        self.oom_ids = oom_ids or set()
+        self.calls: List[List[str]] = []
+
+    def generate(
+        self,
+        records: Sequence[GenerationInput],
+        *,
+        layer_index: int | Sequence[int] | None = 0,
+        pooler: Any = None,
+        fail_fast: bool = False,
+    ) -> Any:
+        self.calls.append([record.id for record in records])
+        if any(record.id in self.oom_ids for record in records):
+            raise RuntimeError("CUDA out of memory")
+        if any(record.id in self.fail_ids for record in records):
+            raise RuntimeError("bad protein")
+        return types.SimpleNamespace(
+            records=[
+                EmbeddingRecord(
+                    id=record.id,
+                    embedding=[float(len(record.sequence))],
+                    layer_index=0,
+                    model_reference=self.model_reference,
+                    shape=(1,),
+                )
+                for record in records
+            ],
+            errors=[],
+        )
+
+
+def test_run_embedding_generation_success_and_progress() -> None:
+    events: List[Dict[str, Any]] = []
+    writer = EmbeddingWriter(format="memory")
+    batcher = IterableBatcher([GenerationInput(id="P1", sequence="ACDE")], batch_size=1, max_batch_tokens=10)
+
+    with pytest.warns(RuntimeWarning):
+        result = run_embedding_generation(
+            cast(Any, _BatchSensitiveGenerator()),
+            batcher,
+            writer,
+            pooler=pooler_factory("mean"),
+            progress_callback=events.append,
+        )
+
+    assert result.record_count == 1
+    assert writer.records[0].embedding == [4.0]
+    assert any(event["event"] == "batch_completed" for event in events)
+
+
+def test_run_embedding_generation_collects_errors_and_bisects_oom() -> None:
+    records = [
+        GenerationInput(id="ok1", sequence="AA"),
+        GenerationInput(id="oom", sequence="AA"),
+        GenerationInput(id="ok2", sequence="AA"),
+    ]
+    generator = _BatchSensitiveGenerator(oom_ids={"oom"})
+    writer = EmbeddingWriter(format="memory")
+
+    with pytest.warns(RuntimeWarning):
+        result = run_embedding_generation(
+            cast(Any, generator),
+            IterableBatcher(records, batch_size=3, max_batch_tokens=20),
+            writer,
+            fail_fast=False,
+        )
+
+    assert [record.id for record in writer.records] == ["ok1", "ok2"]
+    assert result.error_count == 1
+    assert result.errors[0]["id"] == "oom"
+    assert result.errors[0]["reason"] == "cuda_oom"
+    assert ["ok1", "oom", "ok2"] in generator.calls
+    assert ["oom"] in generator.calls
+
+
+def test_run_embedding_generation_fail_fast_raises_singleton_oom() -> None:
+    writer = EmbeddingWriter(format="memory")
+    with pytest.warns(RuntimeWarning):
+        with pytest.raises(RuntimeError):
+            run_embedding_generation(
+                cast(Any, _BatchSensitiveGenerator(oom_ids={"oom"})),
+                IterableBatcher([GenerationInput(id="oom", sequence="AA")], batch_size=1),
+                writer,
+                fail_fast=True,
+            )
 
 
 def test_load_fasta_inputs_raises_dependency_error_when_biopython_missing(
@@ -489,6 +823,25 @@ def test_save_embedding_records_pickle_roundtrip_mapping_format(tmp_path: Path) 
     assert loaded[0].embedding == [1.0, 2.0]
 
 
+def test_save_embedding_records_pickle_creates_parent_directories(tmp_path: Path) -> None:
+    records = [
+        EmbeddingRecord(
+            id="A",
+            embedding=[1.0, 2.0],
+            layer_index=1,
+            model_reference="m",
+            shape=(2,),
+        )
+    ]
+    path = tmp_path / "nested" / "pickle" / "saved_mapping.pkl"
+
+    save_embedding_records_pickle(path, records, payload_format="mapping")
+
+    assert path.exists()
+    loaded = load_embedding_records(path, model_reference="m", layer_index=1)
+    assert [record.id for record in loaded] == ["A"]
+
+
 def test_save_embedding_records_npy_roundtrip(tmp_path: Path) -> None:
     np = pytest.importorskip("numpy")
     records = [
@@ -506,6 +859,21 @@ def test_save_embedding_records_npy_roundtrip(tmp_path: Path) -> None:
     assert [record.id for record in loaded] == ["R1", "R2"]
 
 
+def test_save_embedding_records_npy_creates_parent_directories(tmp_path: Path) -> None:
+    np = pytest.importorskip("numpy")
+    records = [
+        EmbeddingRecord(id="R1", embedding=[0.1, 0.2], layer_index=0, model_reference="m", shape=(2,)),
+        EmbeddingRecord(id="R2", embedding=[0.3, 0.4], layer_index=0, model_reference="m", shape=(2,)),
+    ]
+    path = tmp_path / "nested" / "npy" / "saved.npy"
+
+    save_embedding_records_npy(path, records)
+
+    assert path.exists()
+    matrix = np.load(path)
+    assert matrix.shape == (2, 2)
+
+
 def test_save_embedding_records_npy_rejects_mixed_dimensions(tmp_path: Path) -> None:
     records = [
         EmbeddingRecord(id="R1", embedding=[0.1, 0.2], layer_index=0, model_reference="m", shape=(2,)),
@@ -513,6 +881,224 @@ def test_save_embedding_records_npy_rejects_mixed_dimensions(tmp_path: Path) -> 
     ]
     with pytest.raises(EmbeddingInputError):
         save_embedding_records_npy(tmp_path / "bad.npy", records)
+
+
+def test_mean_pool_embedding_record_pools_matrix() -> None:
+    record = EmbeddingRecord(
+        id="M1",
+        embedding=[[1.0, 3.0], [5.0, 7.0]],
+        layer_index=0,
+        model_reference="m",
+        shape=(2, 2),
+    )
+
+    pooled = mean_pool_embedding_record(record)
+
+    assert pooled.id == "M1"
+    assert pooled.embedding == [3.0, 5.0]
+    assert pooled.shape == (2,)
+
+
+def test_save_embedding_records_pickle_shards_streams_records(tmp_path: Path) -> None:
+    records = [
+        EmbeddingRecord(id=f"R{idx}", embedding=[float(idx)], layer_index=0, model_reference="m", shape=(1,))
+        for idx in range(5)
+    ]
+
+    result = save_embedding_records_pickle_shards(
+        tmp_path / "embeddings.pkl",
+        records,
+        records_per_shard=2,
+    )
+
+    assert result.record_count == 5
+    assert [path.name for path in result.paths] == [
+        "embeddings.shard_000001.pkl",
+        "embeddings.shard_000002.pkl",
+        "embeddings.shard_000003.pkl",
+    ]
+    loaded = load_embedding_records_pickle(result.paths[1])
+    assert [record.id for record in loaded] == ["R2", "R3"]
+
+
+def test_save_embedding_records_npy_shards_streams_records(tmp_path: Path) -> None:
+    np = pytest.importorskip("numpy")
+    records = [
+        EmbeddingRecord(id=f"R{idx}", embedding=[float(idx), float(idx + 1)], layer_index=0, model_reference="m", shape=(2,))
+        for idx in range(5)
+    ]
+
+    result = save_embedding_records_npy_shards(
+        tmp_path / "embeddings.npy",
+        records,
+        records_per_shard=2,
+    )
+
+    assert result.record_count == 5
+    assert [path.name for path in result.paths] == [
+        "embeddings.shard_000001.npy",
+        "embeddings.shard_000002.npy",
+        "embeddings.shard_000003.npy",
+    ]
+    assert [path.name for path in result.id_paths] == [
+        "embeddings.shard_000001.ids.txt",
+        "embeddings.shard_000002.ids.txt",
+        "embeddings.shard_000003.ids.txt",
+    ]
+    matrix = np.load(result.paths[1])
+    assert matrix.shape == (2, 2)
+    assert matrix[0].tolist() == pytest.approx([2.0, 3.0])
+    assert matrix[1].tolist() == pytest.approx([3.0, 4.0])
+    assert result.id_paths[1].read_text(encoding="utf-8").splitlines() == ["R2", "R3"]
+
+
+def test_save_embedding_records_h5_appends_records(tmp_path: Path) -> None:
+    h5py = pytest.importorskip("h5py")
+    records_1 = [
+        EmbeddingRecord(id="R1", embedding=[1.0, 2.0], layer_index=0, model_reference="m", shape=(2,)),
+    ]
+    records_2 = [
+        EmbeddingRecord(id="R2", embedding=[3.0, 4.0], layer_index=0, model_reference="m", shape=(2,)),
+    ]
+    path = tmp_path / "embeddings.h5"
+
+    first = save_embedding_records_h5(path, records_1)
+    second = save_embedding_records_h5(path, records_2, append=True)
+
+    assert first.record_count == 1
+    assert second.record_count == 2
+    with h5py.File(path, "r") as handle:
+        assert handle["embeddings"].shape == (2, 2)
+        assert handle["embeddings"][1].tolist() == pytest.approx([3.0, 4.0])
+        assert handle["ids"].asstr()[:].tolist() == ["R1", "R2"]
+
+
+@pytest.mark.skipif("Bio" not in sys.modules and __import__("importlib").util.find_spec("Bio") is None, reason="Biopython not installed")
+def test_generate_fasta_pickle_shards_streams_generation_results(tmp_path: Path) -> None:
+    fasta_path = tmp_path / "input.fasta"
+    fasta_path.write_text(">Q1\nACDE\n>Q2\nAAAA\n>Q3\nVVVV\n", encoding="utf-8")
+    events: List[Dict[str, Any]] = []
+
+    with pytest.warns(DeprecationWarning):
+        result = generate_fasta_pickle_shards(
+            fasta_path,
+            _generator(),
+            tmp_path / "out.pkl",
+            batch_size=2,
+            records_per_shard=2,
+            layer_index=4,
+            progress_callback=events.append,
+        )
+
+    assert result.record_count == 3
+    assert result.error_count == 0
+    assert [path.name for path in result.paths] == ["out.shard_000001.pkl", "out.shard_000002.pkl"]
+    assert any(event["event"] == "batch_completed" for event in events)
+    loaded = load_embedding_records_pickle(result.paths[0])
+    assert [record.id for record in loaded] == ["Q1", "Q2"]
+    assert loaded[0].embedding == [4.0, 4.0]
+
+
+@pytest.mark.skipif("Bio" not in sys.modules and __import__("importlib").util.find_spec("Bio") is None, reason="Biopython not installed")
+def test_generate_fasta_pickle_shards_can_sort_by_length_window(tmp_path: Path) -> None:
+    fasta_path = tmp_path / "input.fasta"
+    fasta_path.write_text(">Q1\nA\n>Q2\nAAAAA\n>Q3\nAAA\n>Q4\nAA\n", encoding="utf-8")
+
+    with pytest.warns(DeprecationWarning):
+        result = generate_fasta_pickle_shards(
+            fasta_path,
+            _generator(),
+            tmp_path / "out.pkl",
+            batch_size=2,
+            records_per_shard=10,
+            length_sort_window=3,
+        )
+
+    assert result.record_count == 4
+    loaded = load_embedding_records_pickle(result.paths[0])
+    assert [record.id for record in loaded] == ["Q2", "Q3", "Q1", "Q4"]
+
+
+@pytest.mark.skipif("Bio" not in sys.modules and __import__("importlib").util.find_spec("Bio") is None, reason="Biopython not installed")
+def test_generate_fasta_pickle_shards_writes_all_length_skips(tmp_path: Path) -> None:
+    fasta_path = tmp_path / "input.fasta"
+    skipped_path = tmp_path / "skipped.tsv"
+    fasta_path.write_text(">Q1\nAAAAA\n>Q2\nAA\n>Q3\nAAAAAA\n", encoding="utf-8")
+
+    with pytest.warns(DeprecationWarning):
+        result = generate_fasta_pickle_shards(
+            fasta_path,
+            _generator(),
+            tmp_path / "out.pkl",
+            batch_size=2,
+            records_per_shard=10,
+            max_sequence_length=3,
+            skipped_path=skipped_path,
+        )
+
+    assert result.record_count == 1
+    assert result.skipped_count == 2
+    assert skipped_path.read_text(encoding="utf-8").splitlines() == [
+        "id\tlength\treason",
+        "Q1\t5\tlength>3",
+        "Q3\t6\tlength>3",
+    ]
+
+
+@pytest.mark.skipif("Bio" not in sys.modules and __import__("importlib").util.find_spec("Bio") is None, reason="Biopython not installed")
+def test_generate_fasta_npy_shards_streams_generation_results(tmp_path: Path) -> None:
+    np = pytest.importorskip("numpy")
+    fasta_path = tmp_path / "input.fasta"
+    fasta_path.write_text(">Q1\nACDE\n>Q2\nAAAA\n>Q3\nVVVV\n", encoding="utf-8")
+    events: List[Dict[str, Any]] = []
+
+    with pytest.warns(DeprecationWarning):
+        result = generate_fasta_npy_shards(
+            fasta_path,
+            _generator(),
+            tmp_path / "out.npy",
+            batch_size=2,
+            records_per_shard=2,
+            layer_index=4,
+            progress_callback=events.append,
+        )
+
+    assert result.record_count == 3
+    assert result.error_count == 0
+    assert [path.name for path in result.paths] == ["out.shard_000001.npy", "out.shard_000002.npy"]
+    assert [path.name for path in result.id_paths] == ["out.shard_000001.ids.txt", "out.shard_000002.ids.txt"]
+    assert any(event["event"] == "batch_completed" for event in events)
+    matrix = np.load(result.paths[0])
+    assert matrix.shape == (2, 2)
+    assert matrix[0].tolist() == pytest.approx([4.0, 4.0])
+    assert matrix[1].tolist() == pytest.approx([4.0, 4.0])
+    assert result.id_paths[0].read_text(encoding="utf-8").splitlines() == ["Q1", "Q2"]
+
+
+@pytest.mark.skipif("Bio" not in sys.modules and __import__("importlib").util.find_spec("Bio") is None, reason="Biopython not installed")
+def test_generate_fasta_h5_streams_generation_results(tmp_path: Path) -> None:
+    h5py = pytest.importorskip("h5py")
+    fasta_path = tmp_path / "input.fasta"
+    fasta_path.write_text(">Q1\nACDE\n>Q2\nAAAA\n>Q3\nVVVV\n", encoding="utf-8")
+    events: List[Dict[str, Any]] = []
+
+    with pytest.warns(DeprecationWarning):
+        result = generate_fasta_h5(
+            fasta_path,
+            _generator(),
+            tmp_path / "out.h5",
+            batch_size=2,
+            layer_index=4,
+            progress_callback=events.append,
+        )
+
+    assert result.record_count == 3
+    assert result.error_count == 0
+    assert any(event["event"] == "batch_completed" for event in events)
+    with h5py.File(result.path, "r") as handle:
+        assert handle["embeddings"].shape == (3, 2)
+        assert handle["embeddings"][0].tolist() == pytest.approx([4.0, 4.0])
+        assert handle["ids"].asstr()[:].tolist() == ["Q1", "Q2", "Q3"]
 
 
 def test_prott5_preprocessor_applies_expected_transform() -> None:
@@ -606,7 +1192,25 @@ class _FakeTensor:
     def __init__(self, data: Any) -> None:
         self.data = data
 
+    @property
+    def shape(self) -> tuple[int, ...]:
+        values = self.data
+        dims: list[int] = []
+        while isinstance(values, list):
+            dims.append(len(values))
+            values = values[0] if values else None
+        return tuple(dims)
+
     def to(self, _device: str) -> "_FakeTensor":
+        return self
+
+    def float(self) -> "_FakeTensor":
+        return self
+
+    def detach(self) -> "_FakeTensor":
+        return self
+
+    def cpu(self) -> "_FakeTensor":
         return self
 
     def __getitem__(self, item: Any) -> "_FakeTensor":
@@ -621,6 +1225,15 @@ class _FakeTensor:
         if isinstance(self.data, list):
             return _FakeScalar(float(sum(self.data)))
         return _FakeScalar(float(self.data))
+
+    def mean(self, *, dim: int) -> "_FakeTensor":
+        if dim != 0:
+            raise ValueError("fake tensor supports dim=0 only")
+        rows = self.data
+        if not rows:
+            return _FakeTensor([])
+        width = len(rows[0])
+        return _FakeTensor([sum(float(row[index]) for row in rows) / float(len(rows)) for index in range(width)])
 
     def tolist(self) -> Any:
         return self.data
@@ -638,9 +1251,12 @@ class _FakeTokenizer:
     def batch_encode_plus(self, sequences: list[str], add_special_tokens: bool, padding: str) -> dict[str, Any]:
         assert add_special_tokens is True
         assert padding == "longest"
-        tokens = sequences[0].split()
-        length = len(tokens) + 1  # include end token
-        return {"input_ids": [[1] * length], "attention_mask": [[1] * length]}
+        lengths = [len(sequence.split()) + 1 for sequence in sequences]  # include end token
+        max_len = max(lengths)
+        return {
+            "input_ids": [[1] * length + [0] * (max_len - length) for length in lengths],
+            "attention_mask": [[1] * length + [0] * (max_len - length) for length in lengths],
+        }
 
 
 class _FakeModelOutput:
@@ -663,10 +1279,15 @@ class _FakeModel:
     def __call__(self, *, input_ids: Any, attention_mask: Any, output_hidden_states: bool, return_dict: bool) -> Any:
         assert output_hidden_states is True
         assert return_dict is True
-        length = len(input_ids.tolist()[0])  # includes end token
+        input_rows = input_ids.tolist()
+        batch_size = len(input_rows)
+        length = len(input_rows[0])  # includes end token and padding
         hidden_states = []
         for layer in range(3):
-            layer_values = [[[float(layer), float(pos)] for pos in range(length)]]
+            layer_values = [
+                [[float(layer), float(row_index), float(pos)] for pos in range(length)]
+                for row_index in range(batch_size)
+            ]
             hidden_states.append(_FakeTensor(layer_values))
         return _FakeModelOutput(tuple(hidden_states))
 
@@ -686,8 +1307,8 @@ def test_prott5_generate_returns_all_layers_when_omitted(monkeypatch: pytest.Mon
 
     assert result.errors == []
     assert [record.layer_index for record in result.records] == [0, 1, 2]
-    assert all(record.shape == (4, 2) for record in result.records)
-    assert result.records[1].embedding[0] == [1.0, 0.0]
+    assert all(record.shape == (4, 3) for record in result.records)
+    assert result.records[1].embedding[0] == [1.0, 0.0, 0.0]
 
 
 def test_prott5_generate_returns_requested_layers(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -705,6 +1326,53 @@ def test_prott5_generate_returns_requested_layers(monkeypatch: pytest.MonkeyPatc
 
     assert result.errors == []
     assert [record.layer_index for record in result.records] == [0, 2]
+
+
+def test_prott5_generate_batches_records_in_one_model_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_torch = types.SimpleNamespace(
+        tensor=lambda values: _FakeTensor(values),
+        no_grad=lambda: _FakeNoGrad(),
+    )
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+
+    model = _FakeModel()
+    generator = ProtT5EmbeddingGenerator(
+        tokenizer=_FakeTokenizer(),
+        model=model,
+    )
+    result = generator.generate(
+        [GenerationInput(id="P1", sequence="ACDE"), GenerationInput(id="P2", sequence="AA")],
+        layer_index=0,
+    )
+
+    assert result.errors == []
+    assert [record.id for record in result.records] == ["P1", "P2"]
+    assert result.records[0].shape == (4, 3)
+    assert result.records[1].shape == (2, 3)
+    assert result.records[1].embedding[0] == [2.0, 1.0, 0.0]
+
+
+def test_prott5_generate_with_mean_pooler_returns_vectors(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_torch = types.SimpleNamespace(
+        tensor=lambda values: _FakeTensor(values),
+        no_grad=lambda: _FakeNoGrad(),
+    )
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+
+    generator = ProtT5EmbeddingGenerator(
+        tokenizer=_FakeTokenizer(),
+        model=_FakeModel(),
+    )
+    result = generator.generate(
+        [GenerationInput(id="P1", sequence="ACDE"), GenerationInput(id="P2", sequence="AA")],
+        layer_index=0,
+        pooler="mean",
+    )
+
+    assert result.errors == []
+    assert [record.shape for record in result.records] == [(3,), (3,)]
+    assert result.records[0].embedding == [2.0, 0.0, 1.5]
+    assert result.records[1].embedding == [2.0, 1.0, 0.5]
 
 
 def test_prott5_generator_available_layers_and_count(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -750,3 +1418,29 @@ def test_prott5_generation_populates_model_and_run_metadata(monkeypatch: pytest.
     assert result.run_metadata.sequence_count == 1
     assert result.run_metadata.requested_layers == [1]
     assert result.run_metadata.resolved_layers == [1]
+
+
+def test_prott5_private_generate_matches_public_generate(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_torch = types.SimpleNamespace(
+        tensor=lambda values: _FakeTensor(values),
+        no_grad=lambda: _FakeNoGrad(),
+    )
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+
+    generator = ProtT5EmbeddingGenerator(
+        tokenizer=_FakeTokenizer(),
+        model=_FakeModel(),
+    )
+    records = [GenerationInput(id="P1", sequence="ACDE"), GenerationInput(id="P2", sequence="AA")]
+
+    public = generator.generate(records, layer_index=0, pooler="mean", fail_fast=False)
+    private = generator._generate(records, layer_index=0, pooler="mean", fail_fast=False)
+
+    assert [record.id for record in private.records] == [record.id for record in public.records]
+    assert [record.embedding for record in private.records] == [record.embedding for record in public.records]
+    assert [record.shape for record in private.records] == [record.shape for record in public.records]
+    assert private.errors == public.errors
+    assert private.run_metadata is not None
+    assert public.run_metadata is not None
+    assert private.run_metadata.requested_layers == public.run_metadata.requested_layers
+    assert private.run_metadata.resolved_layers == public.run_metadata.resolved_layers

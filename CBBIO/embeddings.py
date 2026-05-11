@@ -6,17 +6,26 @@ This module is intentionally independent from database access code.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Iterable, Iterator, Mapping as MappingABC
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-import pickle
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Sequence, Tuple, Type, TypeAlias, cast
+from typing import Any, Dict, List, Literal, Sequence, Tuple, TypeAlias, cast
+import warnings
 
 
 _VALID_AA = set("ACDEFGHIKLMNPQRSTVWYBXZJUO")
 EmbeddingPayload: TypeAlias = Sequence[float] | Sequence[Sequence[float]]
 LayerSelection: TypeAlias = int | Sequence[int] | None
+PicklePayloadFormat: TypeAlias = Literal["records", "mapping"]
+
+
+def _warn_deprecated(name: str, replacement: str) -> None:
+    warnings.warn(
+        f"{name} is deprecated and will be removed soon. Use {replacement} instead.",
+        DeprecationWarning,
+        stacklevel=3,
+    )
 
 
 class EmbeddingGenerationError(Exception):
@@ -94,6 +103,56 @@ class GenerationResult:
     run_metadata: RunMetadata | None = None
 
 
+@dataclass(frozen=True)
+class PickleShardWriteResult:
+    paths: List[Path]
+    record_count: int
+
+
+@dataclass(frozen=True)
+class NpyShardWriteResult:
+    paths: List[Path]
+    id_paths: List[Path]
+    record_count: int
+
+
+@dataclass(frozen=True)
+class H5WriteResult:
+    path: Path
+    record_count: int
+
+
+@dataclass(frozen=True)
+class FastaEmbeddingPickleShardResult:
+    paths: List[Path]
+    record_count: int
+    error_count: int = 0
+    skipped_count: int = 0
+    errors: List[Dict[str, Any]] = field(default_factory=_error_dict_list)
+    skipped: List[Dict[str, Any]] = field(default_factory=_error_dict_list)
+
+
+@dataclass(frozen=True)
+class FastaEmbeddingNpyShardResult:
+    paths: List[Path]
+    id_paths: List[Path]
+    record_count: int
+    error_count: int = 0
+    skipped_count: int = 0
+    errors: List[Dict[str, Any]] = field(default_factory=_error_dict_list)
+    skipped: List[Dict[str, Any]] = field(default_factory=_error_dict_list)
+
+
+@dataclass(frozen=True)
+class FastaEmbeddingH5Result:
+    path: Path
+    record_count: int
+    error_count: int = 0
+    skipped_count: int = 0
+    errors: List[Dict[str, Any]] = field(default_factory=_error_dict_list)
+    skipped: List[Dict[str, Any]] = field(default_factory=_error_dict_list)
+
+
 class PreprocessorAdapter(ABC):
     @abstractmethod
     def preprocess(self, raw_sequence: str) -> str: ...
@@ -102,6 +161,14 @@ class PreprocessorAdapter(ABC):
 class TokenizerAdapter(ABC):
     @abstractmethod
     def tokenize(self, sequence: str) -> Any: ...
+
+    def tokenize_many(self, sequences: Sequence[str]) -> Any:
+        """Tokenize a batch of preprocessed sequences.
+
+        True batched generators override this method so one generated batch
+        becomes one padded token payload and one model forward pass.
+        """
+        return [self.tokenize(sequence) for sequence in sequences]
 
 
 class ModelAdapter(ABC):
@@ -168,12 +235,21 @@ class EmbeddingGenerator:
         self,
         records: Sequence[GenerationInput],
         *,
-        layer_index: int = 0,
+        layer_index: LayerSelection = 0,
+        pooler: Any | None = None,
         fail_fast: bool = False,
     ) -> GenerationResult:
         if not isinstance(layer_index, int):
             raise EmbeddingInputError("Base EmbeddingGenerator.generate requires an integer layer_index.")
+        resolved_layer_index = int(layer_index)
         result = GenerationResult()
+        resolved_pooler: Any | None = None
+        mean_pooler_type: type[Any] | None = None
+        if pooler is not None:
+            from .embeddings_pooler import MeanPooler, resolve_pooler
+
+            resolved_pooler = resolve_pooler(pooler)
+            mean_pooler_type = MeanPooler
 
         for index, record in enumerate(records):
             try:
@@ -181,21 +257,38 @@ class EmbeddingGenerator:
                 prepared = self.preprocessor.preprocess(normalized.sequence)
                 _validate_sequence(prepared, context=f"record index={index} id={normalized.id!r}")
                 tokens = self.tokenizer.tokenize(prepared)
-                model_output = self.model.infer(tokens, layer_index=layer_index)
+                model_output = self.model.infer(tokens, layer_index=resolved_layer_index)
                 vector_out = self.postprocessor.postprocess(model_output)
-                vector = _as_float_vector(vector_out)
+                vector_candidate: object = _as_float_vector(vector_out)
+                if resolved_pooler is not None:
+                    try:
+                        vector_candidate = resolved_pooler(vector_candidate)
+                    except EmbeddingGenerationError:
+                        if mean_pooler_type is None or not isinstance(resolved_pooler, mean_pooler_type):
+                            raise
+
+                try:
+                    vector = _as_float_vector(vector_candidate)
+                except EmbeddingBackendError:
+                    if mean_pooler_type is not None and isinstance(resolved_pooler, mean_pooler_type):
+                        # Backward compatibility: mean pooler is a no-op for already vector outputs.
+                        vector = _as_float_vector(vector_out)
+                    else:
+                        raise
                 if not vector:
                     raise EmbeddingBackendError("postprocessor returned an empty embedding vector.")
 
+                record_out = EmbeddingRecord(
+                    id=normalized.id,
+                    embedding=vector,
+                    layer_index=resolved_layer_index,
+                    model_reference=self.model_reference,
+                    shape=(len(vector),),
+                    metadata=normalized.metadata,
+                )
+
                 result.records.append(
-                    EmbeddingRecord(
-                        id=normalized.id,
-                        embedding=vector,
-                        layer_index=int(layer_index),
-                        model_reference=self.model_reference,
-                        shape=(len(vector),),
-                        metadata=normalized.metadata,
-                    )
+                    record_out
                 )
             except Exception as exc:
                 normalized_exc = _normalize_generation_exception(exc)
@@ -212,190 +305,252 @@ class EmbeddingGenerator:
 
         return result
 
+    def _generate_from_layer_output_map(
+        self,
+        records: Sequence[GenerationInput],
+        *,
+        layer_index: LayerSelection,
+        pooler: Any | None,
+        fail_fast: bool,
+        missing_layers_error: str,
+        requested_layers: List[int] | None,
+        run_parameters: Dict[str, Any] | None,
+    ) -> GenerationResult:
+        from .embeddings_pooler import materialize_embedding_payload, resolve_pooler
+
+        result = GenerationResult()
+        resolved_pooler = resolve_pooler(pooler)
+
+        for index, record in enumerate(records):
+            try:
+                normalized = _validate_generation_input(record, index=index)
+                prepared = self.preprocessor.preprocess(normalized.sequence)
+                tokenized = self.tokenizer.tokenize(prepared)
+                model_output = self.model.infer(tokenized, layer_index=layer_index)
+
+                model_output_map = cast(Dict[str, Any], model_output) if isinstance(model_output, dict) else None
+                layers_obj_raw = model_output_map.get("layers") if model_output_map is not None else None
+                if not isinstance(layers_obj_raw, dict):
+                    raise EmbeddingBackendError(missing_layers_error)
+                layers_obj = cast(Dict[int, Any], layers_obj_raw)
+
+                for layer_id, layer_tensor in sorted(layers_obj.items(), key=lambda item: int(item[0])):
+                    payload = resolved_pooler(layer_tensor) if resolved_pooler is not None else layer_tensor
+                    embedding, shape = materialize_embedding_payload(payload)
+                    result.records.append(
+                        EmbeddingRecord(
+                            id=normalized.id,
+                            embedding=embedding,
+                            layer_index=int(layer_id),
+                            model_reference=self.model_reference,
+                            shape=shape,
+                            metadata=normalized.metadata,
+                        )
+                    )
+            except Exception as exc:
+                normalized_exc: EmbeddingGenerationError = _normalize_generation_exception(exc)
+                if fail_fast:
+                    raise normalized_exc
+                result.errors.append(
+                    {
+                        "index": index,
+                        "id": getattr(record, "id", None),
+                        "error_type": normalized_exc.__class__.__name__,
+                        "message": str(normalized_exc),
+                    }
+                )
+
+        resolved_layers = sorted({int(record.layer_index) for record in result.records}) or None
+        model_metadata_obj = getattr(self, "model_metadata", None)
+        model_metadata = model_metadata_obj if isinstance(model_metadata_obj, ModelMetadata) else None
+        run_metadata = RunMetadata(
+            run_id=_uuid4(),
+            created_at_utc=utc_now_iso(),
+            sequence_count=len(records),
+            requested_layers=requested_layers,
+            resolved_layers=resolved_layers,
+            failure_count=len(result.errors),
+            parameters=run_parameters,
+        )
+        return GenerationResult(
+            records=result.records,
+            errors=result.errors,
+            skipped=result.skipped,
+            model_metadata=model_metadata,
+            run_metadata=run_metadata,
+        )
+
+    def _generate_from_batched_layer_output_map(
+        self,
+        records: Sequence[GenerationInput],
+        *,
+        layer_index: LayerSelection,
+        pooler: Any | None,
+        fail_fast: bool,
+        missing_layers_error: str,
+        requested_layers: List[int] | None,
+        run_parameters: Dict[str, Any] | None,
+    ) -> GenerationResult:
+        """Generate per-residue records with one tokenization/inference batch.
+
+        Model adapters return ``{"layers": {layer: tensor}, ...}`` where each
+        layer tensor is shaped as ``[batch, tokens_or_residues, hidden]``. They
+        must also include either ``sample_spans=[(start, end), ...]`` for
+        token tensors or ``residue_lens=[length, ...]`` for residue-aligned
+        tensors.
+        """
+        result = GenerationResult()
+        prepared_records: List[Tuple[int, GenerationInput, str]] = []
+
+        for index, record in enumerate(records):
+            try:
+                normalized = _validate_generation_input(record, index=index)
+                prepared = self.preprocessor.preprocess(normalized.sequence)
+                prepared_records.append((index, normalized, prepared))
+            except Exception as exc:
+                normalized_exc = _normalize_generation_exception(exc)
+                if fail_fast:
+                    raise normalized_exc
+                result.errors.append(
+                    {
+                        "index": index,
+                        "id": getattr(record, "id", None),
+                        "error_type": normalized_exc.__class__.__name__,
+                        "message": str(normalized_exc),
+                    }
+                )
+
+        if prepared_records:
+            try:
+                prepared_sequences = [prepared for _, _, prepared in prepared_records]
+                tokenized = self.tokenizer.tokenize_many(prepared_sequences)
+                model_output = self.model.infer(tokenized, layer_index=layer_index)
+                self._append_batched_layer_output_records(
+                    result,
+                    model_output=model_output,
+                    prepared_records=prepared_records,
+                    pooler=pooler,
+                    missing_layers_error=missing_layers_error,
+                )
+            except Exception as exc:
+                normalized_exc = _normalize_generation_exception(exc)
+                if fail_fast:
+                    raise normalized_exc
+                for index, normalized, _prepared in prepared_records:
+                    result.errors.append(
+                        {
+                            "index": index,
+                            "id": normalized.id,
+                            "error_type": normalized_exc.__class__.__name__,
+                            "message": str(normalized_exc),
+                        }
+                    )
+
+        resolved_layers = sorted({int(record.layer_index) for record in result.records}) or None
+        model_metadata_obj = getattr(self, "model_metadata", None)
+        model_metadata = model_metadata_obj if isinstance(model_metadata_obj, ModelMetadata) else None
+        run_metadata = RunMetadata(
+            run_id=_uuid4(),
+            created_at_utc=utc_now_iso(),
+            sequence_count=len(records),
+            requested_layers=requested_layers,
+            resolved_layers=resolved_layers,
+            failure_count=len(result.errors),
+            parameters=run_parameters,
+        )
+        return GenerationResult(
+            records=result.records,
+            errors=result.errors,
+            skipped=result.skipped,
+            model_metadata=model_metadata,
+            run_metadata=run_metadata,
+        )
+
+    def _append_batched_layer_output_records(
+        self,
+        result: GenerationResult,
+        *,
+        model_output: Any,
+        prepared_records: Sequence[Tuple[int, GenerationInput, str]],
+        pooler: Any | None,
+        missing_layers_error: str,
+    ) -> None:
+        from .embeddings_pooler import materialize_embedding_payload, resolve_pooler
+
+        resolved_pooler = resolve_pooler(pooler)
+        model_output_map = cast(Dict[str, Any], model_output) if isinstance(model_output, dict) else None
+        layers_obj_raw = model_output_map.get("layers") if model_output_map is not None else None
+        if not isinstance(layers_obj_raw, dict):
+            raise EmbeddingBackendError(missing_layers_error)
+        layers_obj = cast(Dict[int, Any], layers_obj_raw)
+        spans, explicit_spans = _sample_spans_from_model_output(
+            model_output_map,
+            sample_count=len(prepared_records),
+        )
+
+        for row_index, (_source_index, normalized, _prepared) in enumerate(prepared_records):
+            start, end = spans[row_index]
+            for layer_id, layer_tensor in sorted(layers_obj.items(), key=lambda item: int(item[0])):
+                sample_tensor = _slice_batched_layer_tensor(
+                    layer_tensor,
+                    row_index=row_index,
+                    start=start,
+                    end=end,
+                    singleton_count=len(prepared_records),
+                    explicit_spans=explicit_spans,
+                )
+                payload = resolved_pooler(sample_tensor) if resolved_pooler is not None else sample_tensor
+                embedding, shape = materialize_embedding_payload(payload)
+                result.records.append(
+                    EmbeddingRecord(
+                        id=normalized.id,
+                        embedding=embedding,
+                        layer_index=int(layer_id),
+                        model_reference=self.model_reference,
+                        shape=shape,
+                        metadata=normalized.metadata,
+                    )
+                )
+
     def generate_batches(
         self,
         records: Iterable[GenerationInput],
         *,
         batch_size: int,
+        max_batch_tokens: int | None = None,
         layer_index: LayerSelection = 0,
+        pooler: Any | None = None,
         fail_fast: bool = False,
     ) -> Iterator[GenerationResult]:
         """Yield one ``GenerationResult`` per input batch."""
         resolved_batch_size = _validate_batch_size(batch_size)
-        for batch in batch_generation_inputs(records, batch_size=resolved_batch_size):
-            yield self.generate(batch, layer_index=cast(Any, layer_index), fail_fast=fail_fast)
+        for batch in batch_generation_inputs(
+            records,
+            batch_size=resolved_batch_size,
+            max_batch_tokens=max_batch_tokens,
+        ):
+            yield self.generate(batch, layer_index=cast(Any, layer_index), pooler=pooler, fail_fast=fail_fast)
 
     def iter_records(
         self,
         records: Iterable[GenerationInput],
         *,
         batch_size: int,
+        max_batch_tokens: int | None = None,
         layer_index: LayerSelection = 0,
+        pooler: Any | None = None,
         fail_fast: bool = False,
     ) -> Iterator[EmbeddingRecord]:
-        """Yield embedding records incrementally from batched generation."""
+        """Iterate over records from ``generate_batches(...)`` results."""
         for result in self.generate_batches(
             records,
             batch_size=batch_size,
+            max_batch_tokens=max_batch_tokens,
             layer_index=layer_index,
+            pooler=pooler,
             fail_fast=fail_fast,
         ):
             yield from result.records
-
-
-def Generator(
-    *,
-    name: str | None = None,
-    model_class: str | None = None,
-    class_: str | None = None,
-    device: str = "cpu",
-    **kwargs: Any,
-) -> EmbeddingGenerator:
-    """Convenience factory for model-specific embedding generators.
-
-    Examples:
-    - ``Generator(model_class="protT5")``  # uses family default model
-    - ``Generator(model_class="protT5", name="Rostlab/prot_t5_xl_uniref50")``
-    - ``Generator(class_="prostT5", name="Rostlab/ProstT5")``
-    - ``Generator(model_class="ankh3", name="ElnaggarLab/ankh3-large", prefix="[S2S]")``
-    - ``Generator(model_class="esmc", name="esmc_300m", use_flash_attention=True)``
-    - ``Generator(model_class="esm2", name="esm2_t33_650M_UR50D")``
-    - ``Generator(model_class="esm1b", name="esm1b_t33_650M_UR50S")``
-    - ``Generator(**{"class": "protT5", "name": "Rostlab/prot_t5_xl_uniref50"})``
-    """
-    resolved_class = model_class or class_ or cast(str | None, kwargs.pop("class", None))
-    if resolved_class is None or not str(resolved_class).strip():
-        raise EmbeddingInputError("Generator requires model_class/class_/class (e.g. 'protT5').")
-
-    registry, aliases = _generator_registry()
-    canonical = _normalize_model_class(resolved_class, aliases)
-    if canonical is None or canonical not in registry:
-        supported = ", ".join(registry.keys())
-        raise EmbeddingInputError(
-            f"Unknown model class: {resolved_class!r}. Supported values: {supported}."
-        )
-
-    generator_cls = registry[canonical]
-    resolved_name = str(name).strip() if name is not None else ""
-    if not resolved_name:
-        default_name = getattr(generator_cls, "DEFAULT_MODEL_NAME", None)
-        if isinstance(default_name, str) and default_name.strip():
-            resolved_name = default_name.strip()
-        else:
-            raise EmbeddingInputError(
-                f"Generator requires a model name for class {canonical!r}; no DEFAULT_MODEL_NAME is defined."
-            )
-    generator_factory = cast(Any, generator_cls)
-    return generator_factory(model_name=resolved_name, device=device, **kwargs)
-
-
-def available_generator_classes() -> List[str]:
-    """Return canonical generator class names supported by ``Generator``."""
-    registry, _ = _generator_registry()
-    return list(registry.keys())
-
-
-def available_generator_models(model_class: str | None = None) -> Dict[str, List[str]] | List[str]:
-    """Return available model identifiers by family.
-
-    - When ``model_class`` is ``None``: returns ``{class_name: [models...]}``.
-    - When ``model_class`` is provided: returns ``[models...]`` for that family.
-    """
-    registry, aliases = _generator_registry()
-    if model_class is None:
-        return {name: _family_models_for_class(name, registry=registry) for name in registry.keys()}
-
-    canonical = _normalize_model_class(model_class, aliases)
-    if canonical is None or canonical not in registry:
-        supported = ", ".join(registry.keys())
-        raise EmbeddingInputError(
-            f"Unknown model class: {model_class!r}. Supported values: {supported}."
-        )
-    return _family_models_for_class(canonical, registry=registry)
-
-
-def _normalize_model_class(value: str | None, aliases: Dict[str, str]) -> str | None:
-    if value is None:
-        return None
-    key = str(value).strip().lower()
-    if not key:
-        return None
-    return aliases.get(key)
-
-
-def _family_models_for_class(
-    canonical_class: str,
-    *,
-    registry: Dict[str, Type["EmbeddingGenerator"]],
-) -> List[str]:
-    generator_cls = registry.get(canonical_class)
-    if generator_cls is None:
-        supported = ", ".join(registry.keys())
-        raise EmbeddingInputError(
-            f"Unknown model class: {canonical_class!r}. Supported values: {supported}."
-        )
-
-    values = getattr(generator_cls, "FAMILY_MODELS", None)
-    if isinstance(values, Sequence) and not isinstance(values, (str, bytes, bytearray)):
-        family_values = cast(Sequence[object], values)
-        models = [str(value) for value in family_values if str(value).strip()]
-        if models:
-            return models
-
-    default_name = getattr(generator_cls, "DEFAULT_MODEL_NAME", None)
-    if isinstance(default_name, str) and default_name.strip():
-        return [default_name]
-    return []
-
-
-def _generator_registry() -> Tuple[Dict[str, Type["EmbeddingGenerator"]], Dict[str, str]]:
-    classes = _load_generator_classes()
-    registry: Dict[str, Type["EmbeddingGenerator"]] = {}
-    aliases: Dict[str, str] = {}
-
-    for generator_cls in classes:
-        canonical = str(getattr(generator_cls, "GENERATOR_CLASS", "")).strip()
-        if not canonical:
-            continue
-        if canonical in registry:
-            raise EmbeddingBackendError(f"Duplicate generator class registration for {canonical!r}.")
-        registry[canonical] = generator_cls
-
-        raw_aliases = getattr(generator_cls, "GENERATOR_ALIASES", ())
-        alias_values = [canonical]
-        if isinstance(raw_aliases, Sequence) and not isinstance(raw_aliases, (str, bytes, bytearray)):
-            alias_values.extend(str(value) for value in cast(Sequence[object], raw_aliases))
-
-        for alias in alias_values:
-            key = str(alias).strip().lower()
-            if not key:
-                continue
-            existing = aliases.get(key)
-            if existing is not None and existing != canonical:
-                raise EmbeddingBackendError(
-                    f"Alias {alias!r} is defined by multiple generator classes: {existing!r}, {canonical!r}."
-                )
-            aliases[key] = canonical
-
-    return registry, aliases
-
-
-def _load_generator_classes() -> Tuple[Type["EmbeddingGenerator"], ...]:
-    from .embeddings_prott5 import ProtT5EmbeddingGenerator
-    from .embeddings_prostt5 import ProstT5EmbeddingGenerator
-    from .embeddings_ankh3 import Ankh3EmbeddingGenerator
-    from .embeddings_esmc import EsmcEmbeddingGenerator
-    from .embeddings_esm2 import Esm2EmbeddingGenerator
-    from .embeddings_esm1b import Esm1bEmbeddingGenerator
-
-    return (
-        ProtT5EmbeddingGenerator,
-        ProstT5EmbeddingGenerator,
-        Ankh3EmbeddingGenerator,
-        EsmcEmbeddingGenerator,
-        Esm2EmbeddingGenerator,
-        Esm1bEmbeddingGenerator,
-    )
 
 
 def load_fasta_inputs(
@@ -431,15 +586,34 @@ def batch_generation_inputs(
     records: Iterable[GenerationInput],
     *,
     batch_size: int,
+    max_batch_tokens: int | None = None,
 ) -> Iterator[List[GenerationInput]]:
-    """Group generation inputs into fixed-size lists."""
+    """Group generation inputs into size-capped lists.
+
+    ``max_batch_tokens`` caps the padded token budget estimated as
+    ``batch_size * max(sequence_length + 1)``. A single over-budget record is
+    still yielded as a singleton because a record cannot be split here.
+    """
     resolved_batch_size = _validate_batch_size(batch_size)
+    resolved_max_batch_tokens = _validate_optional_positive_int("max_batch_tokens", max_batch_tokens)
     batch: List[GenerationInput] = []
+    batch_max_tokens = 0
     for record in records:
-        batch.append(record)
-        if len(batch) >= resolved_batch_size:
+        record_tokens = len(str(record.sequence)) + 1
+        candidate_max_tokens = max(batch_max_tokens, record_tokens)
+        if batch and (
+            len(batch) >= resolved_batch_size
+            or (
+                resolved_max_batch_tokens is not None
+                and (len(batch) + 1) * candidate_max_tokens > resolved_max_batch_tokens
+            )
+        ):
             yield batch
             batch = []
+            batch_max_tokens = 0
+
+        batch.append(record)
+        batch_max_tokens = max(batch_max_tokens, record_tokens)
     if batch:
         yield batch
 
@@ -449,22 +623,28 @@ def generate_from_fasta(
     generator: EmbeddingGenerator,
     *,
     layer_index: LayerSelection = 0,
+    pooler: Any | None = None,
     fail_fast: bool = False,
     id_from: Literal["record_id", "description"] = "record_id",
     batch_size: int | None = None,
+    max_batch_tokens: int | None = None,
 ) -> GenerationResult:
-    """Load FASTA records and generate embeddings through ``generator``."""
+    """Deprecated wrapper around ``load_fasta_inputs`` and generator methods."""
+    _warn_deprecated(
+        "generate_from_fasta",
+        "load_fasta_inputs(...) with generator.generate(...) or generator.generate_batches(...)",
+    )
     if batch_size is None:
         records = load_fasta_inputs(path, id_from=id_from)
-        return generator.generate(records, layer_index=layer_index, fail_fast=fail_fast)
+        return generator.generate(records, layer_index=layer_index, pooler=pooler, fail_fast=fail_fast)
 
-    results = generate_from_fasta_batches(
-        path,
-        generator,
-        batch_size=batch_size,
+    results = generator.generate_batches(
+        iter_fasta_inputs(path, id_from=id_from),
+        batch_size=int(batch_size),
+        max_batch_tokens=max_batch_tokens,
         layer_index=layer_index,
+        pooler=pooler,
         fail_fast=fail_fast,
-        id_from=id_from,
     )
     return collect_generation_results(results)
 
@@ -474,15 +654,23 @@ def generate_from_fasta_batches(
     generator: EmbeddingGenerator,
     *,
     batch_size: int,
+    max_batch_tokens: int | None = None,
     layer_index: LayerSelection = 0,
+    pooler: Any | None = None,
     fail_fast: bool = False,
     id_from: Literal["record_id", "description"] = "record_id",
 ) -> Iterator[GenerationResult]:
-    """Yield one ``GenerationResult`` per FASTA batch."""
+    """Deprecated wrapper around ``iter_fasta_inputs`` and ``generate_batches``."""
+    _warn_deprecated(
+        "generate_from_fasta_batches",
+        "generator.generate_batches(iter_fasta_inputs(...), ...)",
+    )
     yield from generator.generate_batches(
         iter_fasta_inputs(path, id_from=id_from),
         batch_size=batch_size,
+        max_batch_tokens=max_batch_tokens,
         layer_index=layer_index,
+        pooler=pooler,
         fail_fast=fail_fast,
     )
 
@@ -492,17 +680,26 @@ def iter_embedding_records_from_fasta(
     generator: EmbeddingGenerator,
     *,
     batch_size: int,
+    max_batch_tokens: int | None = None,
     layer_index: LayerSelection = 0,
+    pooler: Any | None = None,
     fail_fast: bool = False,
     id_from: Literal["record_id", "description"] = "record_id",
 ) -> Iterator[EmbeddingRecord]:
-    """Yield embedding records incrementally from a FASTA file."""
-    yield from generator.iter_records(
+    """Deprecated wrapper around ``iter_fasta_inputs`` and ``generate_batches``."""
+    _warn_deprecated(
+        "iter_embedding_records_from_fasta",
+        "generator.generate_batches(iter_fasta_inputs(...), ...)",
+    )
+    for result in generator.generate_batches(
         iter_fasta_inputs(path, id_from=id_from),
         batch_size=batch_size,
+        max_batch_tokens=max_batch_tokens,
         layer_index=layer_index,
+        pooler=pooler,
         fail_fast=fail_fast,
-    )
+    ):
+        yield from result.records
 
 
 def collect_generation_results(results: Iterable[GenerationResult]) -> GenerationResult:
@@ -562,151 +759,6 @@ def collect_generation_results(results: Iterable[GenerationResult]) -> Generatio
         model_metadata=model_metadata,
         run_metadata=aggregate_run_metadata,
     )
-
-
-def load_embedding_records(
-    path: str | Path,
-    *,
-    model_reference: str = "unknown",
-    layer_index: int = 0,
-    ids: Sequence[str] | None = None,
-) -> List[EmbeddingRecord]:
-    """Load embedding records from supported file formats.
-
-    Supported extensions:
-    - ``.pkl`` / ``.pickle``: pickled Python objects
-    - ``.npy`` / ``.npz``: NumPy arrays (optional dependency)
-    """
-    file_path = Path(path)
-    suffix = file_path.suffix.lower()
-    if suffix in {".pkl", ".pickle"}:
-        return load_embedding_records_pickle(
-            file_path,
-            model_reference=model_reference,
-            layer_index=layer_index,
-        )
-    if suffix in {".npy", ".npz"}:
-        return load_embedding_records_npy(
-            file_path,
-            model_reference=model_reference,
-            layer_index=layer_index,
-            ids=ids,
-        )
-    raise EmbeddingInputError(f"Unsupported embedding file extension: {suffix!r}")
-
-
-def save_embedding_records_pickle(
-    path: str | Path,
-    records: Sequence[EmbeddingRecord],
-    *,
-    payload_format: Literal["records", "mapping"] = "records",
-) -> Path:
-    """Save embedding records to a pickle file.
-
-    ``payload_format='records'`` stores:
-    ``{"records": [{"id": ..., "embedding": ..., ...}, ...]}``
-
-    ``payload_format='mapping'`` stores:
-    ``{id: embedding_vector}``
-    """
-    file_path = Path(path)
-    normalized = _normalize_embedding_records(records)
-
-    if payload_format == "records":
-        payload = {
-            "records": [
-                {
-                    "id": record.id,
-                    "embedding": list(record.embedding),
-                    "layer_index": int(record.layer_index),
-                    "model_reference": record.model_reference,
-                    "shape": tuple(record.shape),
-                    "metadata": record.metadata,
-                }
-                for record in normalized
-            ]
-        }
-    elif payload_format == "mapping":
-        payload = {record.id: list(record.embedding) for record in normalized}
-    else:
-        raise EmbeddingInputError("payload_format must be one of: 'records', 'mapping'.")
-
-    with file_path.open("wb") as handle:
-        pickle.dump(payload, handle)
-    return file_path
-
-
-def save_embedding_records_npy(
-    path: str | Path,
-    records: Sequence[EmbeddingRecord],
-) -> Path:
-    """Save embedding records to a numeric ``.npy`` matrix."""
-    try:
-        import numpy as np
-    except ModuleNotFoundError as exc:
-        raise EmbeddingDependencyError(
-            "NumPy is required for .npy saving. Install with: pip install numpy"
-        ) from exc
-
-    normalized = _normalize_embedding_records(records)
-    if not normalized:
-        raise EmbeddingInputError("Cannot save empty embedding record list to .npy.")
-
-    dims = {len(record.embedding) for record in normalized}
-    if len(dims) != 1:
-        raise EmbeddingInputError("All embeddings must have the same length for .npy output.")
-
-    matrix = np.array([list(record.embedding) for record in normalized], dtype=np.float32)
-    file_path = Path(path)
-    np.save(file_path, matrix)
-    return file_path
-
-
-def load_embedding_records_pickle(
-    path: str | Path,
-    *,
-    model_reference: str = "unknown",
-    layer_index: int = 0,
-) -> List[EmbeddingRecord]:
-    """Load embeddings from pickle and normalize to ``EmbeddingRecord`` values."""
-    file_path = Path(path)
-    with file_path.open("rb") as handle:
-        payload = pickle.load(handle)
-    return _records_from_payload(payload, model_reference=model_reference, layer_index=layer_index)
-
-
-def load_embedding_records_npy(
-    path: str | Path,
-    *,
-    model_reference: str = "unknown",
-    layer_index: int = 0,
-    ids: Sequence[str] | None = None,
-) -> List[EmbeddingRecord]:
-    """Load embeddings from ``.npy`` or ``.npz`` and normalize records."""
-    try:
-        import numpy as np
-    except ModuleNotFoundError as exc:
-        raise EmbeddingDependencyError(
-            "NumPy is required for .npy/.npz loading. Install with: pip install numpy"
-        ) from exc
-
-    file_path = Path(path)
-    arr_obj = np.load(file_path, allow_pickle=False)
-
-    if hasattr(arr_obj, "files"):
-        npz_obj = arr_obj
-        if not npz_obj.files:
-            return []
-        if len(npz_obj.files) > 1:
-            raise EmbeddingInputError(
-                "NPZ loading currently expects one array. "
-                "Provide a single-array .npz or use .npy."
-            )
-        matrix = npz_obj[npz_obj.files[0]]
-    else:
-        matrix = arr_obj
-
-    return _records_from_numpy(matrix, model_reference=model_reference, layer_index=layer_index, ids=ids)
 
 
 def _validate_generation_input(record: object, *, index: int) -> GenerationInput:
@@ -811,6 +863,83 @@ def _validate_batch_size(batch_size: int) -> int:
     return resolved
 
 
+def _validate_optional_positive_int(name: str, value: int | None) -> int | None:
+    if value is None:
+        return None
+    resolved = int(value)
+    if resolved <= 0:
+        raise EmbeddingInputError(f"{name} must be a positive integer when provided.")
+    return resolved
+
+
+def _sample_spans_from_model_output(
+    model_output_map: Dict[str, Any] | None,
+    *,
+    sample_count: int,
+) -> Tuple[List[Tuple[int, int]], bool]:
+    if model_output_map is None:
+        raise EmbeddingBackendError("Batched model output must be a dictionary.")
+
+    sample_spans_raw = model_output_map.get("sample_spans")
+    if sample_spans_raw is not None:
+        if not isinstance(sample_spans_raw, Sequence) or isinstance(sample_spans_raw, (str, bytes, bytearray)):
+            raise EmbeddingBackendError("Batched model output 'sample_spans' must be a sequence.")
+        spans: List[Tuple[int, int]] = []
+        for item in cast(Sequence[object], sample_spans_raw):
+            if not isinstance(item, Sequence) or isinstance(item, (str, bytes, bytearray)):
+                raise EmbeddingBackendError("Each sample span must be a (start, end) pair.")
+            pair = cast(Sequence[object], item)
+            if len(pair) != 2:
+                raise EmbeddingBackendError("Each sample span must be a (start, end) pair.")
+            start = int(cast(Any, pair[0]))
+            end = int(cast(Any, pair[1]))
+            if start < 0 or end < start:
+                raise EmbeddingBackendError(f"Invalid sample span: {(start, end)!r}.")
+            spans.append((start, end))
+        if len(spans) != sample_count:
+            raise EmbeddingBackendError(
+                f"Batched model output sample span count {len(spans)} does not match batch size {sample_count}."
+            )
+        return spans, True
+
+    residue_lens_raw = model_output_map.get("residue_lens")
+    if residue_lens_raw is None and sample_count == 1:
+        residue_len_raw = model_output_map.get("residue_len")
+        if residue_len_raw is not None:
+            residue_lens_raw = [residue_len_raw]
+
+    if residue_lens_raw is None:
+        raise EmbeddingBackendError("Batched model output must include sample_spans or residue_lens.")
+    if not isinstance(residue_lens_raw, Sequence) or isinstance(residue_lens_raw, (str, bytes, bytearray)):
+        raise EmbeddingBackendError("Batched model output 'residue_lens' must be a sequence.")
+
+    lengths = [int(cast(Any, value)) for value in cast(Sequence[object], residue_lens_raw)]
+    if len(lengths) != sample_count:
+        raise EmbeddingBackendError(
+            f"Batched model output residue length count {len(lengths)} does not match batch size {sample_count}."
+        )
+    spans = []
+    for length in lengths:
+        if length < 0:
+            raise EmbeddingBackendError(f"Invalid residue length: {length}.")
+        spans.append((0, length))
+    return spans, False
+
+
+def _slice_batched_layer_tensor(
+    layer_tensor: Any,
+    *,
+    row_index: int,
+    start: int,
+    end: int,
+    singleton_count: int,
+    explicit_spans: bool,
+) -> Any:
+    if singleton_count == 1 and not explicit_spans:
+        return layer_tensor[start:end]
+    return layer_tensor[row_index, start:end]
+
+
 def _result_sequence_count(result: GenerationResult) -> int:
     return len(result.records) + len(result.errors) + len(result.skipped)
 
@@ -831,198 +960,6 @@ def _uuid4() -> str:
     return str(uuid.uuid4())
 
 
-def _records_from_payload(
-    payload: object,
-    *,
-    model_reference: str,
-    layer_index: int,
-) -> List[EmbeddingRecord]:
-    if isinstance(payload, MappingABC):
-        payload_map = cast(MappingABC[object, object], payload)
-        if "records" in payload_map:
-            records_raw = payload_map["records"]
-            if not isinstance(records_raw, Sequence) or isinstance(records_raw, (str, bytes, bytearray)):
-                raise EmbeddingInputError("Pickle payload 'records' must be a sequence.")
-            record_items = cast(Sequence[object], records_raw)
-            return [
-                _record_from_item(item, index=index, model_reference=model_reference, layer_index=layer_index)
-                for index, item in enumerate(record_items)
-            ]
-
-        # Common compact shape: {id: embedding_vector}
-        if all(isinstance(key, str) for key in payload_map.keys()):
-            records: List[EmbeddingRecord] = []
-            for rec_id, emb_value in payload_map.items():
-                vector = _as_float_vector(emb_value)
-                records.append(
-                    EmbeddingRecord(
-                        id=str(rec_id),
-                        embedding=vector,
-                        layer_index=int(layer_index),
-                        model_reference=model_reference,
-                        shape=(len(vector),),
-                        metadata=None,
-                    )
-                )
-            return records
-
-    if isinstance(payload, Sequence) and not isinstance(payload, (str, bytes, bytearray)):
-        payload_items = cast(Sequence[object], payload)
-        return [
-            _record_from_item(item, index=index, model_reference=model_reference, layer_index=layer_index)
-            for index, item in enumerate(payload_items)
-        ]
-
-    raise EmbeddingInputError(
-        "Unsupported pickle payload format. Expected list-like records, {'records': [...]}, or {id: embedding}."
-    )
-
-
-def _record_from_item(
-    item: object,
-    *,
-    index: int,
-    model_reference: str,
-    layer_index: int,
-) -> EmbeddingRecord:
-    if isinstance(item, EmbeddingRecord):
-        return item
-
-    if not isinstance(item, MappingABC):
-        raise EmbeddingInputError(f"Record at index {index} must be a dict or EmbeddingRecord.")
-
-    item_map = cast(MappingABC[object, object], item)
-    rec_id = str(item_map.get("id", "")).strip()
-    if not rec_id:
-        raise EmbeddingInputError(f"Record at index {index} has empty 'id'.")
-
-    vector = _as_float_vector(item_map.get("embedding"))
-    rec_layer = _int_or_default(item_map.get("layer_index"), default=layer_index)
-    rec_model_ref = str(item_map.get("model_reference", model_reference)).strip() or model_reference
-
-    shape_raw = item_map.get("shape")
-    shape: Tuple[int, ...]
-    if shape_raw is None:
-        shape = (len(vector),)
-    else:
-        if not isinstance(shape_raw, Sequence) or isinstance(shape_raw, (str, bytes, bytearray)):
-            raise EmbeddingInputError(f"Record at index {index} has invalid 'shape'.")
-        shape_values = cast(Sequence[object], shape_raw)
-        shape = tuple(int(cast(Any, dim)) for dim in shape_values)
-        if shape != (len(vector),):
-            raise EmbeddingInputError(
-                f"Record at index {index} has shape {shape} inconsistent with vector length {len(vector)}."
-            )
-
-    metadata = item_map.get("metadata")
-    if metadata is not None and not isinstance(metadata, MappingABC):
-        raise EmbeddingInputError(f"Record at index {index} has non-dict metadata.")
-
-    return EmbeddingRecord(
-        id=rec_id,
-        embedding=vector,
-        layer_index=rec_layer,
-        model_reference=rec_model_ref,
-        shape=shape,
-        metadata=_metadata_dict_or_none(cast(object, metadata)),
-    )
-
-
-def _records_from_numpy(
-    matrix: Any,
-    *,
-    model_reference: str,
-    layer_index: int,
-    ids: Sequence[str] | None,
-) -> List[EmbeddingRecord]:
-    try:
-        ndim = int(matrix.ndim)
-    except Exception as exc:
-        raise EmbeddingInputError("Could not determine NumPy array dimensions.") from exc
-
-    rows: List[List[float]] = []
-    if ndim == 1:
-        rows = [_as_float_vector(matrix)]
-    elif ndim == 2:
-        row_count = int(matrix.shape[0])
-        rows = [_as_float_vector(matrix[idx]) for idx in range(row_count)]
-    else:
-        raise EmbeddingInputError(f"Expected 1D or 2D array, got ndim={ndim}.")
-
-    total = len(rows)
-    resolved_ids: List[str]
-    if ids is None:
-        resolved_ids = [f"row_{idx}" for idx in range(total)]
-    else:
-        resolved_ids = [str(value) for value in ids]
-        if len(resolved_ids) != total:
-            raise EmbeddingInputError(
-                f"ids length ({len(resolved_ids)}) does not match number of rows ({total})."
-            )
-
-    records: List[EmbeddingRecord] = []
-    for idx, vector in enumerate(rows):
-        records.append(
-            EmbeddingRecord(
-                id=resolved_ids[idx],
-                embedding=vector,
-                layer_index=int(layer_index),
-                model_reference=model_reference,
-                shape=(len(vector),),
-                metadata={"source": "npy"},
-            )
-        )
-    return records
-
-
-def _normalize_embedding_records(records: Sequence[object]) -> List[EmbeddingRecord]:
-    if not records:
-        return []
-    normalized: List[EmbeddingRecord] = []
-    for index, record in enumerate(records):
-        if not isinstance(record, EmbeddingRecord):
-            raise EmbeddingInputError(
-                f"Expected EmbeddingRecord at index {index}, got {type(record).__name__}."
-            )
-        rec_id = str(record.id).strip()
-        if not rec_id:
-            raise EmbeddingInputError(f"EmbeddingRecord at index {index} has empty id.")
-        vector = _as_float_vector(record.embedding)
-        if not vector:
-            raise EmbeddingInputError(f"EmbeddingRecord at index {index} has empty embedding.")
-        expected_shape = (len(vector),)
-        if tuple(record.shape) != expected_shape:
-            raise EmbeddingInputError(
-                f"EmbeddingRecord at index {index} has shape {record.shape} inconsistent with embedding length {len(vector)}."
-            )
-        normalized.append(
-            EmbeddingRecord(
-                id=rec_id,
-                embedding=vector,
-                layer_index=int(record.layer_index),
-                model_reference=str(record.model_reference),
-                shape=expected_shape,
-                metadata=record.metadata,
-            )
-        )
-    return normalized
-
-
-def _metadata_dict_or_none(value: object) -> Dict[str, Any] | None:
-    if value is None:
-        return None
-    if not isinstance(value, MappingABC):
-        raise EmbeddingInputError("metadata must be a mapping when provided.")
-    value_map = cast(MappingABC[object, Any], value)
-    return {str(key): item for key, item in value_map.items()}
-
-
-def _int_or_default(value: object, *, default: int) -> int:
-    if value is None:
-        return int(default)
-    return int(cast(Any, value))
-
-
 validate_generation_input = _validate_generation_input
 validate_sequence = _validate_sequence
 as_float_vector = _as_float_vector
@@ -1037,19 +974,23 @@ __all__ = [
     "EmbeddingBackendError",
     "EmbeddingPayload",
     "LayerSelection",
+    "PicklePayloadFormat",
     "GenerationInput",
     "EmbeddingRecord",
     "ModelMetadata",
     "RunMetadata",
     "GenerationResult",
+    "PickleShardWriteResult",
+    "NpyShardWriteResult",
+    "H5WriteResult",
+    "FastaEmbeddingPickleShardResult",
+    "FastaEmbeddingNpyShardResult",
+    "FastaEmbeddingH5Result",
     "PreprocessorAdapter",
     "TokenizerAdapter",
     "ModelAdapter",
     "PostprocessorAdapter",
     "EmbeddingGenerator",
-    "Generator",
-    "available_generator_classes",
-    "available_generator_models",
     "iter_fasta_inputs",
     "batch_generation_inputs",
     "load_fasta_inputs",
@@ -1057,11 +998,6 @@ __all__ = [
     "generate_from_fasta_batches",
     "iter_embedding_records_from_fasta",
     "collect_generation_results",
-    "load_embedding_records",
-    "load_embedding_records_pickle",
-    "load_embedding_records_npy",
-    "save_embedding_records_pickle",
-    "save_embedding_records_npy",
     "validate_generation_input",
     "validate_sequence",
     "as_float_vector",

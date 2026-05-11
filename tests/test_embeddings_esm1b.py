@@ -56,7 +56,13 @@ class _FakeAlphabet:
 
 
 class _FakeModel:
-    def to(self, _device: str) -> "_FakeModel":
+    def __init__(self) -> None:
+        self.to_args: tuple[Any, ...] | None = None
+        self.to_kwargs: dict[str, Any] | None = None
+
+    def to(self, *args: Any, **kwargs: Any) -> "_FakeModel":
+        self.to_args = args
+        self.to_kwargs = kwargs
         return self
 
     def eval(self) -> None:
@@ -106,6 +112,29 @@ def test_esm1b_generate_returns_per_residue_matrices_without_pooling() -> None:
     assert isinstance(result.records[0].embedding[0], list)
 
 
+def test_esm1b_generator_records_requested_dtype(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_torch = types.SimpleNamespace(
+        float32="float32",
+        float16="float16",
+        bfloat16="bfloat16",
+    )
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+
+    model = _FakeModel()
+    generator = Esm1bEmbeddingGenerator(
+        model=model,
+        alphabet=_FakeAlphabet(),
+        device="cuda:0",
+        dtype="float16",
+    )
+
+    assert generator.model_metadata.parameters is not None
+    assert generator.model_metadata.parameters["torch_dtype"] == "float16"
+    assert model.to_kwargs == {"device": "cuda:0", "dtype": "float16"}
+
+
 def test_esm1b_available_layers_and_count() -> None:
     generator = Esm1bEmbeddingGenerator(
         model=_FakeModel(),
@@ -126,17 +155,17 @@ def test_esm1b_generator_falls_back_to_transformers_when_pretrained_loader_missi
             _FakeAutoModel.observed_name = name
             return _FakeModel()
 
-    class _FakeEsmTokenizer:
+    class _FakeAutoTokenizer:
         observed_name: str | None = None
 
         @staticmethod
         def from_pretrained(name: str) -> _FakeAlphabet:
-            _FakeEsmTokenizer.observed_name = name
+            _FakeAutoTokenizer.observed_name = name
             return _FakeAlphabet()
 
     fake_transformers = types.SimpleNamespace(
         AutoModel=_FakeAutoModel,
-        EsmTokenizer=_FakeEsmTokenizer,
+        AutoTokenizer=_FakeAutoTokenizer,
     )
     fake_esm = types.SimpleNamespace()
 
@@ -148,4 +177,4 @@ def test_esm1b_generator_falls_back_to_transformers_when_pretrained_loader_missi
 
     assert generator.model_metadata.model_name == "esm1b_t33_650M_UR50S"
     assert _FakeAutoModel.observed_name == "facebook/esm-1b"
-    assert _FakeEsmTokenizer.observed_name == "facebook/esm-1b"
+    assert _FakeAutoTokenizer.observed_name == "facebook/esm-1b"

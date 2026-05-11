@@ -2,47 +2,43 @@
 
 from __future__ import annotations
 
-from importlib import metadata as importlib_metadata
-import re
-import uuid
 from typing import Any, Dict, List, Sequence, cast
 
 from .embeddings import (
     EmbeddingBackendError,
     EmbeddingDependencyError,
-    EmbeddingPayload,
-    EmbeddingRecord,
     EmbeddingGenerator,
-    EmbeddingGenerationError,
     EmbeddingInputError,
     GenerationInput,
     GenerationResult,
     ModelMetadata,
     ModelAdapter,
-    PostprocessorAdapter,
-    PreprocessorAdapter,
-    RunMetadata,
     TokenizerAdapter,
-    as_float_matrix,
-    normalize_generation_exception,
-    utc_now_iso,
-    validate_generation_input,
-    validate_sequence,
+)
+from .embeddings_pooler import PoolerInput
+from .embeddings_torch import (
+    BasePreprocessor,
+    DefaultPostprocessor,
+    extract_name_or_path,
+    extract_revision,
+    framework_versions,
+    infer_total_layers_from_model,
+    move_model_to_device,
+    normalize_requested_layers,
+    normalize_torch_dtype_name,
+    resolve_torch_dtype,
 )
 
 
-class ProtT5Preprocessor(PreprocessorAdapter):
+class ProtT5Preprocessor(BasePreprocessor):
     """Preprocessing used by ProtT5 models.
 
-    It uppercases the sequence, replaces uncommon amino acids (U, Z, O, B)
+    Uppercases the sequence, replaces uncommon amino acids (U, Z, O, B)
     with ``X``, and inserts whitespace between residues.
     """
 
-    def preprocess(self, raw_sequence: str) -> str:
-        sequence = str(raw_sequence).strip().upper()
-        validate_sequence(sequence, context="ProtT5 preprocessing")
-        replaced = re.sub(r"[UZOB]", "X", sequence)
-        return " ".join(list(replaced))
+    def __init__(self) -> None:
+        super().__init__(context="ProtT5 preprocessing", spacing=True)
 
 
 class ProtT5TokenizerAdapter(TokenizerAdapter):
@@ -53,18 +49,23 @@ class ProtT5TokenizerAdapter(TokenizerAdapter):
         self.device = str(device)
 
     def tokenize(self, sequence: str) -> Any:
+        return self.tokenize_many([sequence])
+
+    def tokenize_many(self, sequences: Sequence[str]) -> Any:
         try:
             import torch  # type: ignore
         except ModuleNotFoundError as exc:
             raise EmbeddingDependencyError(
                 "PyTorch is required for ProtT5 tokenization. Install with: pip install torch"
             ) from exc
+        if not sequences:
+            raise EmbeddingInputError("ProtT5 tokenization requires at least one sequence.")
 
         # transformers>=5 tokenizers commonly use __call__(..., return_tensors="pt")
         # while older versions expose batch_encode_plus.
         if callable(self.tokenizer):
             encoded = self.tokenizer(
-                [sequence],
+                list(sequences),
                 add_special_tokens=True,
                 padding="longest",
                 return_tensors="pt",
@@ -77,7 +78,7 @@ class ProtT5TokenizerAdapter(TokenizerAdapter):
         batch_encode_plus = getattr(self.tokenizer, "batch_encode_plus", None)
         if callable(batch_encode_plus):
             ids = batch_encode_plus(
-                [sequence],
+                list(sequences),
                 add_special_tokens=True,
                 padding="longest",
             )
@@ -95,12 +96,19 @@ class ProtT5TokenizerAdapter(TokenizerAdapter):
 class ProtT5ModelAdapter(ModelAdapter):
     """Model adapter for ProtT5 encoder models."""
 
-    def __init__(self, model: Any, *, device: str = "cpu") -> None:
+    def __init__(
+        self,
+        model: Any,
+        *,
+        device: str = "cpu",
+        dtype: Any | None = None,
+        dtype_name: str | None = None,
+    ) -> None:
         self.model = model
         self.device = str(device)
-        to_fn = getattr(self.model, "to", None)
-        if callable(to_fn):
-            to_fn(self.device)
+        self.dtype = dtype
+        self.dtype_name = dtype_name
+        move_model_to_device(self.model, device=self.device, dtype=self.dtype, dtype_name=self.dtype_name)
         eval_fn = getattr(self.model, "eval", None)
         if callable(eval_fn):
             eval_fn()
@@ -119,7 +127,10 @@ class ProtT5ModelAdapter(ModelAdapter):
                 "PyTorch is required for ProtT5 inference. Install with: pip install torch"
             ) from exc
 
-        with torch.no_grad():
+        context_factory = getattr(torch, "inference_mode", None)
+        if not callable(context_factory):
+            context_factory = getattr(torch, "no_grad")
+        with cast(Any, context_factory)():
             model_output = self.model(
                 input_ids=token_map["input_ids"],
                 attention_mask=token_map["attention_mask"],
@@ -132,41 +143,32 @@ class ProtT5ModelAdapter(ModelAdapter):
 
         total_layers = len(hidden_states)
         layer_indices = _resolve_layer_indices(layer_index, total_layers=total_layers)
-        residue_len = _residue_length_from_mask(token_map["attention_mask"])
+        residue_lens = _residue_lengths_from_mask(token_map["attention_mask"])
 
         selected_layers: Dict[int, Any] = {}
         # Important convention:
         # BioData stores Prot-T5 layers in reverse order where layer 0 is the
         # final hidden layer. This adapter follows that external convention:
         # user-facing layer index 0 -> HF hidden_states[-1].
+        if len(residue_lens) == 1:
+            residue_len = residue_lens[0]
+            for user_idx, hf_idx in layer_indices:
+                selected_layers[user_idx] = hidden_states[hf_idx][0, :residue_len]
+            return {"layers": selected_layers, "residue_len": residue_len}
+
         for user_idx, hf_idx in layer_indices:
-            selected_layers[user_idx] = hidden_states[hf_idx][0, :residue_len]
-        return {"layers": selected_layers, "residue_len": residue_len}
+            selected_layers[user_idx] = hidden_states[hf_idx]
+        return {"layers": selected_layers, "residue_lens": residue_lens}
 
     def available_layers(self) -> List[int] | None:
-        total_layers = _infer_total_layers_from_model(self.model)
+        total_layers = infer_total_layers_from_model(self.model)
         if total_layers is None:
             return None
         return list(range(total_layers))
 
 
-class ProtT5Postprocessor(PostprocessorAdapter):
+class ProtT5Postprocessor(DefaultPostprocessor):
     """Postprocessing for ProtT5 outputs without pooling."""
-
-    def postprocess(self, model_output: Any) -> EmbeddingPayload:
-        if not isinstance(model_output, dict):
-            raise EmbeddingBackendError("ProtT5Postprocessor expects a dict payload from model adapter.")
-        model_output_map = cast(Dict[str, Any], model_output)
-        layers_obj_raw = model_output_map.get("layers")
-        if not isinstance(layers_obj_raw, dict):
-            raise EmbeddingBackendError("ProtT5Postprocessor expects a 'layers' dict in model output.")
-        layers_obj = cast(Dict[int, Any], layers_obj_raw)
-        if not layers_obj:
-            raise EmbeddingBackendError("ProtT5Postprocessor received no layers.")
-
-        first_key = sorted(layers_obj.keys())[0]
-        layer_tensor = layers_obj[first_key]
-        return as_float_matrix(layer_tensor)
 
 
 class ProtT5EmbeddingGenerator(EmbeddingGenerator):
@@ -182,11 +184,14 @@ class ProtT5EmbeddingGenerator(EmbeddingGenerator):
         *,
         model_name: str = DEFAULT_MODEL_NAME,
         device: str = "cpu",
+        dtype: str | None = None,
         tokenizer: Any | None = None,
         model: Any | None = None,
     ) -> None:
         resolved_tokenizer: Any | None = tokenizer
         resolved_model: Any | None = model
+        resolved_dtype_name = normalize_torch_dtype_name(dtype)
+        resolved_torch_dtype = resolve_torch_dtype(resolved_dtype_name) if resolved_dtype_name is not None else None
 
         if resolved_tokenizer is None or resolved_model is None:
             try:
@@ -203,29 +208,41 @@ class ProtT5EmbeddingGenerator(EmbeddingGenerator):
                 config = cast(Any, AutoConfig).from_pretrained(model_name)
                 # Silence tied-weights warning for ProtT5 checkpoints with both shared and encoder embeds present.
                 setattr(config, "tie_word_embeddings", False)
-                resolved_model = cast(Any, T5EncoderModel).from_pretrained(model_name, config=config)
+                model_kwargs: Dict[str, Any] = {"config": config}
+                if resolved_torch_dtype is not None:
+                    model_kwargs["torch_dtype"] = resolved_torch_dtype
+                resolved_model = cast(Any, T5EncoderModel).from_pretrained(model_name, **model_kwargs)
 
         super().__init__(
             model_reference=model_name,
             preprocessor=ProtT5Preprocessor(),
             tokenizer=ProtT5TokenizerAdapter(resolved_tokenizer, device=device),
-            model=ProtT5ModelAdapter(resolved_model, device=device),
+            model=ProtT5ModelAdapter(
+                resolved_model,
+                device=device,
+                dtype=resolved_torch_dtype,
+                dtype_name=resolved_dtype_name,
+            ),
             postprocessor=ProtT5Postprocessor(),
         )
+        parameters: Dict[str, Any] = {
+            "representation": "per-residue",
+            "pooling": "none",
+            "layer_indexing": "biodata_reversed_0_is_last_hidden",
+        }
+        if resolved_dtype_name is not None:
+            parameters["torch_dtype"] = resolved_dtype_name
+
         self.model_metadata = ModelMetadata(
             provider="huggingface-transformers",
             model_name=model_name,
             model_reference=model_name,
-            model_revision=_extract_revision(resolved_model),
-            tokenizer_name=_extract_name_or_path(resolved_tokenizer),
-            tokenizer_revision=_extract_revision(resolved_tokenizer),
+            model_revision=extract_revision(resolved_model),
+            tokenizer_name=extract_name_or_path(resolved_tokenizer),
+            tokenizer_revision=extract_revision(resolved_tokenizer),
             device=str(device),
-            framework_versions=_framework_versions(),
-            parameters={
-                "representation": "per-residue",
-                "pooling": "none",
-                "layer_indexing": "biodata_reversed_0_is_last_hidden",
-            },
+            framework_versions=framework_versions("transformers", "torch"),
+            parameters=parameters,
         )
 
     def generate(
@@ -233,6 +250,7 @@ class ProtT5EmbeddingGenerator(EmbeddingGenerator):
         records: Sequence[GenerationInput],
         *,
         layer_index: int | Sequence[int] | None = None,
+        pooler: PoolerInput = None,
         fail_fast: bool = False,
     ) -> GenerationResult:
         """Generate per-residue embeddings for selected layers.
@@ -241,71 +259,34 @@ class ProtT5EmbeddingGenerator(EmbeddingGenerator):
         - ``layer_index=int`` returns that layer.
         - ``layer_index=Sequence[int]`` returns those layers.
         """
-        result = GenerationResult()
-
-        for index, record in enumerate(records):
-            try:
-                normalized = validate_generation_input(record, index=index)
-                prepared = self.preprocessor.preprocess(normalized.sequence)
-                tokenized = self.tokenizer.tokenize(prepared)
-                model_output = self.model.infer(tokenized, layer_index=layer_index)
-
-                model_output_map = cast(Dict[str, Any], model_output) if isinstance(model_output, dict) else None
-                layers_obj_raw = model_output_map.get("layers") if model_output_map is not None else None
-                if not isinstance(layers_obj_raw, dict):
-                    raise EmbeddingBackendError("ProtT5 model output missing layers dictionary.")
-                layers_obj = cast(Dict[int, Any], layers_obj_raw)
-
-                for layer_id, layer_tensor in sorted(layers_obj.items(), key=lambda item: int(item[0])):
-                    matrix = _as_matrix(layer_tensor)
-                    if not matrix:
-                        raise EmbeddingBackendError(f"ProtT5 returned empty matrix for layer {layer_id}.")
-                    hidden_dim = len(matrix[0]) if matrix else 0
-                    for row in matrix:
-                        if len(row) != hidden_dim:
-                            raise EmbeddingBackendError(
-                                f"Inconsistent row length in layer {layer_id}: expected {hidden_dim}."
-                            )
-
-                    result.records.append(
-                        EmbeddingRecord(
-                            id=normalized.id,
-                            embedding=matrix,
-                            layer_index=int(layer_id),
-                            model_reference=self.model_reference,
-                            shape=(len(matrix), hidden_dim),
-                            metadata=normalized.metadata,
-                        )
-                    )
-            except Exception as exc:
-                normalized_exc: EmbeddingGenerationError = normalize_generation_exception(exc)
-                if fail_fast:
-                    raise normalized_exc
-                result.errors.append(
-                    {
-                        "index": index,
-                        "id": getattr(record, "id", None),
-                        "error_type": normalized_exc.__class__.__name__,
-                        "message": str(normalized_exc),
-                    }
-                )
-
-        resolved_layers = sorted({int(record.layer_index) for record in result.records}) or None
-        run_metadata = RunMetadata(
-            run_id=str(uuid.uuid4()),
-            created_at_utc=utc_now_iso(),
-            sequence_count=len(records),
-            requested_layers=_normalize_requested_layers(layer_index),
-            resolved_layers=resolved_layers,
-            failure_count=len(result.errors),
-            parameters={"model_reference": self.model_reference},
+        requested_layers: int | list[int] | None
+        if layer_index is None or isinstance(layer_index, int):
+            requested_layers = layer_index
+        else:
+            requested_layers = [int(value) for value in layer_index]
+        return self._generate_from_batched_layer_output_map(
+            records,
+            layer_index=layer_index,
+            pooler=pooler,
+            fail_fast=fail_fast,
+            missing_layers_error="ProtT5 model output missing layers dictionary.",
+            requested_layers=normalize_requested_layers(requested_layers),
+            run_parameters={"model_reference": self.model_reference},
         )
-        return GenerationResult(
-            records=result.records,
-            errors=result.errors,
-            skipped=result.skipped,
-            model_metadata=self.model_metadata,
-            run_metadata=run_metadata,
+
+    def _generate(
+        self,
+        records: Sequence[GenerationInput],
+        *,
+        layer_index: int | Sequence[int] | None,
+        fail_fast: bool,
+        pooler: PoolerInput,
+    ) -> GenerationResult:
+        return self.generate(
+            records,
+            layer_index=layer_index,
+            pooler=pooler,
+            fail_fast=fail_fast,
         )
 
 
@@ -350,73 +331,28 @@ def _to_hf_layer_index(user_layer_index: int, *, total_layers: int) -> int:
     return (total_layers - 1) - int(user_layer_index)
 
 
-def _residue_length_from_mask(attention_mask: Any) -> int:
+def _residue_lengths_from_mask(attention_mask: Any) -> List[int]:
     try:
-        valid_len = int(attention_mask[0].sum().item())
-    except Exception as exc:
-        raise EmbeddingBackendError("Could not infer valid token length from attention_mask.") from exc
-    if valid_len < 1:
-        raise EmbeddingBackendError("No valid tokens produced by ProtT5 model.")
-    # T5 tokenization adds an end token. Keep residues only.
-    return max(valid_len - 1, 1)
-
-
-def _as_matrix(layer_tensor: Any) -> List[List[float]]:
-    return as_float_matrix(layer_tensor)
-
-
-def _normalize_requested_layers(layer_index: int | Sequence[int] | None) -> List[int] | None:
-    if layer_index is None:
-        return None
-    if isinstance(layer_index, int):
-        return [int(layer_index)]
-    return [int(value) for value in layer_index]
-
-
-def _framework_versions() -> Dict[str, str]:
-    versions: Dict[str, str] = {}
-    for package_name in ("transformers", "torch"):
+        rows = attention_mask.tolist()
+    except Exception:
         try:
-            versions[package_name] = importlib_metadata.version(package_name)
-        except importlib_metadata.PackageNotFoundError:
-            continue
-    return versions
+            rows = [attention_mask[0].tolist()]
+        except Exception as nested_exc:
+            raise EmbeddingBackendError("Could not infer valid token lengths from attention_mask.") from nested_exc
 
+    if rows and isinstance(rows[0], (int, float)):
+        rows = [rows]
 
-def _extract_name_or_path(obj: Any) -> str | None:
-    value = getattr(obj, "name_or_path", None)
-    if value is None:
-        return None
-    text = str(value).strip()
-    return text or None
-
-
-def _extract_revision(obj: Any) -> str | None:
-    config = getattr(obj, "config", None)
-    if config is None:
-        return None
-    revision = getattr(config, "_commit_hash", None)
-    if revision is None:
-        return None
-    text = str(revision).strip()
-    return text or None
-
-
-def _infer_total_layers_from_model(model: Any) -> int | None:
-    config = getattr(model, "config", None)
-    if config is None:
-        return None
-
-    # T5 family commonly exposes encoder block count as num_layers.
-    num_layers = getattr(config, "num_layers", None)
-    if isinstance(num_layers, int) and num_layers >= 1:
-        # hidden_states includes token embeddings + encoder block outputs.
-        return int(num_layers) + 1
-
-    num_hidden = getattr(config, "num_hidden_layers", None)
-    if isinstance(num_hidden, int) and num_hidden >= 1:
-        return int(num_hidden) + 1
-    return None
+    lengths: List[int] = []
+    for row in cast(Sequence[Sequence[object]], rows):
+        valid_len = int(sum(int(cast(Any, value)) for value in row))
+        if valid_len < 1:
+            raise EmbeddingBackendError("No valid tokens produced by ProtT5 model.")
+        # T5 tokenization adds an end token. Keep residues only.
+        lengths.append(max(valid_len - 1, 1))
+    if not lengths:
+        raise EmbeddingBackendError("No token rows produced by ProtT5 tokenizer.")
+    return lengths
 
 
 __all__ = [
