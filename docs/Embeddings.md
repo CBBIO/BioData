@@ -1,266 +1,254 @@
-# CBBIO Embedding Generation Documentation
+# CBBIO Embeddings
 
-## General Description
-`CBBIO.embeddings` provides model-agnostic building blocks for:
-- Defining embedding generation pipelines via adapters.
-- Loading sequence inputs from FASTA.
-- Streaming and batching FASTA-driven embedding workflows.
-- Loading/saving precomputed embeddings (`.pkl/.pickle/.npy/.npz`).
-- Capturing reproducibility metadata (model metadata and run metadata).
+`CBBIO.embeddings` provides model-agnostic protein embedding generation. Model-specific generators still expose the low-level `generate(...)` and `generate_batches(...)` methods, but new file and production workflows should use the job API:
 
-Model-specific behavior is implemented in separate modules (for example `CBBIO.embeddings_prott5`).
+```python
+from CBBIO.embeddings import (
+    FastaBatcher,
+    Generator,
+    EmbeddingWriter,
+    pooler_factory,
+    run_embedding_generation,
+)
 
-## Exceptions
-- `EmbeddingGenerationError`: base embedding exception.
-- `EmbeddingInputError`: invalid input records, sequences, or file payloads.
-- `EmbeddingDependencyError`: missing optional runtime dependencies for specific paths.
-- `EmbeddingBackendError`: backend/model inference failures.
+generator = Generator(model_class="protT5", device="cuda:0", dtype="float16")
+batcher = FastaBatcher(
+    "proteins.fasta",
+    batch_size=None,
+    max_batch_tokens=32768,
+    limit=1000,
+    length_sort_window=1000,
+    max_sequence_length=4000,
+    skipped_path="skipped.tsv",
+)
+writer = EmbeddingWriter(
+    format="npy",
+    path="embeddings.npy",
+    records_per_shard=10000,
+)
 
-## Core Data Classes
+result = run_embedding_generation(
+    generator,
+    batcher,
+    writer,
+    layer_index=0,
+    pooler=pooler_factory("mean"),
+    fail_fast=False,
+)
+```
+
+## Job API
+
+### `Generator(...)`
+
+Factory for model-specific generators:
+
+```python
+Generator(model_class="protT5", device="cuda:0", dtype="float16")
+Generator(model_class="esm2", name="esm2_t6_8M_UR50D", device="cuda:0")
+Generator(model_class="ankh3", name="ElnaggarLab/ankh3-large", prefix="[S2S]")
+```
+
+Catalog helpers:
+
+- `available_generator_classes()`
+- `available_generator_models(model_class=None)`
+
+### `FastaBatcher(...)`
+
+Streams FASTA records and yields batches:
+
+```python
+FastaBatcher(
+    path,
+    batch_size=None,
+    max_batch_tokens=None,
+    limit=None,
+    length_sort_window=None,
+    max_sequence_length=None,
+    skipped_path=None,
+    id_from="record_id",
+)
+```
+
+Batching rules:
+
+- `batch_size=None` and `max_batch_tokens=None`: one sequence per batch.
+- `batch_size=N`: fixed-size batching.
+- `max_batch_tokens=N`: token-budget batching.
+- both caps set: both constraints are enforced.
+- `length_sort_window=None`: no sorting.
+- `max_sequence_length=None`: no length filter.
+- `skipped_path=None`: skipped records are counted in memory only.
+- `limit` means the first N accepted records after filtering and optional window sorting.
+
+When no `max_sequence_length` is set, the job runner emits an OOM-risk warning. The warning is stronger when `max_batch_tokens` is also unset.
+
+ESM-C batching depends on the installed ESM SDK accepting multiple encoded proteins in one logits call. If your SDK version does not support that path, set `batch_size=1` for `model_class="esmc"`.
+
+### `IterableBatcher(...)`
+
+Use this for in-memory records:
+
+```python
+from CBBIO.embeddings import GenerationInput, IterableBatcher
+
+batcher = IterableBatcher(
+    [GenerationInput(id="P1", sequence="MTEYKLVVVG")],
+    batch_size=None,
+    max_batch_tokens=None,
+    limit=None,
+)
+```
+
+### `EmbeddingWriter(...)`
+
+One writer class handles all output formats:
+
+```python
+EmbeddingWriter(format="memory")
+EmbeddingWriter(format="pkl", path="embeddings.pkl", records_per_shard=10000, payload_format="records")
+EmbeddingWriter(format="npy", path="embeddings.npy", records_per_shard=10000)
+EmbeddingWriter(format="h5", path="embeddings.h5", compression="gzip", write_batch_size=128)
+```
+
+Formats:
+
+- `memory`: stores materialized `EmbeddingRecord` objects on `writer.records`.
+- `pkl`: writes numbered pickle shards.
+- `npy`: writes numbered `.npy` shards plus `.ids.txt` sidecars.
+- `h5`: writes one HDF5 file.
+
+### `run_embedding_generation(...)`
+
+```python
+run_embedding_generation(
+    generator,
+    batcher,
+    writer,
+    *,
+    layer_index=0,
+    pooler=None,
+    fail_fast=False,
+    progress_callback=None,
+)
+```
+
+The runner requires a non-null batcher and writer. It recursively bisects a batch on CUDA OOM. A protein is recorded as OOM-causing only when it fails as a singleton.
+
+## Poolers
+
+Poolers are run-level configuration:
+
+```python
+from CBBIO.embeddings import pooler_factory
+
+pooler_factory("mean")
+pooler_factory("none")
+```
+
+- `pooler=None`: keep the original model payload shape.
+- `pooler_factory("mean")`: mean-pool `n_residues x embedding_dim` into `embedding_dim`.
+- `pooler_factory("none")`: identity/no pooling.
+
+The pooler receives the tensor-like residue payload before conversion to Python lists when the model backend exposes tensors.
+
+## Low-Level API
+
+These methods remain supported:
+
+```python
+generator.generate(records, layer_index=0, pooler=None, fail_fast=False)
+
+generator.generate_batches(
+    records,
+    batch_size=512,
+    max_batch_tokens=32768,
+    layer_index=0,
+    pooler=None,
+    fail_fast=False,
+)
+
+generator.iter_records(records, batch_size=512, layer_index=0)
+```
+
+FASTA and persistence helpers also remain:
+
+- `iter_fasta_inputs(path, id_from="record_id")`
+- `load_fasta_inputs(path, id_from="record_id")`
+- `batch_generation_inputs(records, batch_size=..., max_batch_tokens=None)`
+- `load_embedding_records(...)`
+- `load_embedding_records_pickle(...)`
+- `load_embedding_records_npy(...)`
+- `save_embedding_records_pickle(...)`
+- `save_embedding_records_npy(...)`
+- `save_embedding_records_npy_shards(...)`
+- `save_embedding_records_h5(...)`
+
+## Core Types
 
 ### `GenerationInput`
-Normalized generation input record:
+
 - `id: str`
 - `sequence: str`
 - `description: str | None`
 - `metadata: dict[str, Any] | None`
 
 ### `EmbeddingRecord`
-Normalized generated/loaded embedding record:
+
 - `id: str`
-- `embedding: Sequence[float]` (model-specific modules may store structured numeric payloads)
+- `embedding: Sequence[float] | Sequence[Sequence[float]]`
 - `layer_index: int`
 - `model_reference: str`
 - `shape: tuple[int, ...]`
 - `metadata: dict[str, Any] | None`
 
-### `ModelMetadata`
-Reproducibility metadata tied to a model setup:
-- provider/model identifiers
-- optional revisions
-- tokenizer identifiers
-- device/framework versions
-- static model parameters
-
-### `RunMetadata`
-Reproducibility metadata tied to one generation run:
-- run ID
-- UTC timestamp
-- sequence count
-- requested/resolved layers
-- failure count
-- run parameters
-
 ### `GenerationResult`
-Generation return object:
+
 - `records: list[EmbeddingRecord]`
 - `errors: list[dict[str, Any]]`
 - `skipped: list[dict[str, Any]]`
 - `model_metadata: ModelMetadata | None`
 - `run_metadata: RunMetadata | None`
 
-## Adapter Interfaces
+### `EmbeddingJobResult`
 
-### `PreprocessorAdapter`
-`preprocess(raw_sequence: str) -> str`
+- `record_count`
+- `error_count`
+- `skipped_count`
+- `paths`
+- `id_paths`
+- `errors`
+- `skipped`
+- `elapsed_seconds`
 
-### `TokenizerAdapter`
-`tokenize(sequence: str) -> Any`
+## Model Families
 
-### `ModelAdapter`
-`infer(tokens: Any, *, layer_index: int = 0) -> Any`
+- `protT5`: Hugging Face ProtT5; BioData layer convention where `layer_index=0` is the last hidden layer.
+- `prostT5`: ProstT5 protein-to-embedding path; BioData layer convention.
+- `ankh3`: ANKH3 via `T5Tokenizer` and `T5EncoderModel`.
+- `esm2`: ESM2 via `esm.pretrained` or Transformers fallback; native ESM2 layer indexing.
+- `esm1b`: ESM-1b via `esm.pretrained` or Transformers fallback; native ESM1b layer indexing.
+- `esmc`: ESM-C SDK path. Multi-sequence batches require SDK support for batched logits; use `batch_size=1` if the installed SDK rejects batched inputs.
 
-### `PostprocessorAdapter`
-`postprocess(model_output: Any) -> Sequence[float]`
+## Deprecated
 
-## Orchestrator
+These wrappers remain compatible but emit `DeprecationWarning` and will be removed soon.
 
-### `EmbeddingGenerator`
-Model-agnostic orchestrator that runs:
-1. Input validation
-2. preprocessing
-3. tokenization
-4. model inference
-5. postprocessing
-6. output normalization into `EmbeddingRecord`
+| Deprecated | Replacement |
+| --- | --- |
+| `generate_from_fasta(...)` | `FastaBatcher(...)` + `EmbeddingWriter(format="memory")` + `run_embedding_generation(...)` |
+| `generate_from_fasta_batches(...)` | `FastaBatcher(...)` + `run_embedding_generation(...)`, or low-level `generator.generate_batches(iter_fasta_inputs(...))` |
+| `iter_embedding_records_from_fasta(...)` | `FastaBatcher(...)` + `EmbeddingWriter(format="memory")` + `run_embedding_generation(...)` |
+| `generate_fasta_pickle_shards(...)` | `FastaBatcher(...)` + `EmbeddingWriter(format="pkl")` + `run_embedding_generation(...)` |
+| `generate_fasta_npy_shards(...)` | `FastaBatcher(...)` + `EmbeddingWriter(format="npy")` + `run_embedding_generation(...)` |
+| `generate_fasta_h5(...)` | `FastaBatcher(...)` + `EmbeddingWriter(format="h5")` + `run_embedding_generation(...)` |
 
-Main method:
-- `generate(records, *, layer_index=0, fail_fast=False) -> GenerationResult`
+`generate_pooled(...)` and `generate_batches_pooled(...)` were experimental and are removed. Use `generate(..., pooler=...)` and `generate_batches(..., pooler=...)`.
 
-Batch/stream helpers:
-- `generate_batches(records, *, batch_size, layer_index=0, fail_fast=False) -> Iterator[GenerationResult]`
-- `iter_records(records, *, batch_size, layer_index=0, fail_fast=False) -> Iterator[EmbeddingRecord]`
+## Exceptions
 
-Layer introspection helpers:
-- `available_layers() -> list[int]`
-- `num_layers() -> int`
-- `family_models() -> list[str]`
-
-Notes:
-- These methods depend on model-adapter support.
-- For T5-family adapters in this repo (`ProtT5`, `ProstT5`), layer indices follow BioData convention:
-  `0 = last hidden layer`.
-
-### `Generator(...)`
-Convenience factory for model-specific generators.
-
-Examples:
-- `Generator(model_class="protT5", name="Rostlab/prot_t5_xl_uniref50")`
-- `Generator(class_="prostT5", name="Rostlab/ProstT5")`
-- `Generator(model_class="ankh3", name="ElnaggarLab/ankh3-large", prefix="[S2S]")`
-- `Generator(**{"class": "protT5", "name": "Rostlab/prot_t5_xl_uniref50"})`
-
-Factory catalog helpers:
-- `available_generator_classes() -> list[str]`
-- `available_generator_models(model_class=None) -> dict[str, list[str]] | list[str]`
-
-Factory resolution is metadata-driven:
-- each model-specific generator publishes `GENERATOR_CLASS` (canonical name),
-  `GENERATOR_ALIASES` (accepted aliases), and `FAMILY_MODELS` (known model names).
-- `Generator(...)` and catalog helpers consume those published fields.
-
-## Input Loading Helpers
-
-### `load_fasta_inputs(path, *, id_from="record_id")`
-Loads FASTA into `list[GenerationInput]`.
-- Uses Biopython `SeqIO`.
-- Raises `EmbeddingDependencyError` when Biopython is not installed.
-- Validates amino-acid sequences.
-- Eager API kept for backward compatibility.
-
-### `iter_fasta_inputs(path, *, id_from="record_id")`
-Yields `GenerationInput` lazily from FASTA.
-- Uses the same normalization and validation rules as `load_fasta_inputs(...)`.
-- Prefer this path for very large FASTA files.
-
-### `batch_generation_inputs(records, *, batch_size)`
-Groups any `Iterable[GenerationInput]` into fixed-size `list[GenerationInput]` batches.
-- Raises `EmbeddingInputError` if `batch_size <= 0`.
-
-### `generate_from_fasta(path, generator, *, layer_index=0, fail_fast=False, id_from="record_id", batch_size=None)`
-Convenience helper with two modes:
-- `batch_size=None`:
-  - `load_fasta_inputs(...)`
-  - then `generator.generate(...)`
-- `batch_size=int`:
-  - `iter_fasta_inputs(...)`
-  - batched `generator.generate(...)`
-  - then `collect_generation_results(...)`
-
-### `generate_from_fasta_batches(path, generator, *, batch_size, layer_index=0, fail_fast=False, id_from="record_id")`
-Yields one `GenerationResult` per FASTA batch.
-- Use this when you want to persist each batch before reading the next one.
-
-### `iter_embedding_records_from_fasta(path, generator, *, batch_size, layer_index=0, fail_fast=False, id_from="record_id")`
-Streams normalized `EmbeddingRecord` objects from FASTA in batch-sized chunks.
-- This is the lowest-memory high-level helper in the module.
-
-### `collect_generation_results(results)`
-Merges multiple batch-level `GenerationResult` objects into a single aggregate result.
-- Aggregates `records`, `errors`, `skipped`, and run metadata totals.
-
-## Large FASTA Usage
-
-For small inputs, the original eager path is still fine:
-
-```python
-from CBBIO.embeddings import generate_from_fasta
-
-result = generate_from_fasta("proteins.fasta", generator, layer_index=0)
-```
-
-For large FASTA files, prefer streaming or batched processing:
-
-```python
-from CBBIO.embeddings import iter_embedding_records_from_fasta
-
-for record in iter_embedding_records_from_fasta(
-    "proteins.fasta",
-    generator,
-    batch_size=128,
-    layer_index=0,
-):
-    write_record(record)
-```
-
-If you want per-batch error handling and persistence:
-
-```python
-from CBBIO.embeddings import generate_from_fasta_batches
-
-for batch_result in generate_from_fasta_batches(
-    "proteins.fasta",
-    generator,
-    batch_size=128,
-    layer_index=0,
-):
-    save_batch(batch_result.records)
-    handle_errors(batch_result.errors)
-```
-
-Operational note:
-- These helpers stop the FASTA reader from materializing all input sequences in memory.
-- If you still collect every generated embedding into one Python list, output memory can still grow without bound.
-- For million-scale datasets, stream records or persist each batch immediately.
-
-## Embedding I/O Helpers
-
-### `load_embedding_records(path, *, model_reference="unknown", layer_index=0, ids=None)`
-Dispatch loader by extension:
-- pickle: `.pkl`, `.pickle`
-- NumPy: `.npy`, `.npz`
-
-### `load_embedding_records_pickle(...)`
-Supported payloads:
-- `{"records": [...]}`
-- `{id: embedding_vector}`
-- `list[dict | EmbeddingRecord]`
-
-### `load_embedding_records_npy(...)`
-Loads `.npy` or single-array `.npz` into normalized records.
-
-### `save_embedding_records_pickle(path, records, *, payload_format="records")`
-Saves as:
-- `payload_format="records"` -> rich records payload
-- `payload_format="mapping"` -> `{id: embedding}`
-
-### `save_embedding_records_npy(path, records)`
-Saves numeric matrix to `.npy`.
-- requires consistent vector lengths.
-
-## Utility
-
-### `utc_now_iso()`
-Returns current UTC timestamp in ISO-8601 format.
-
-## Model-Specific Modules
-Current model-specific modules:
-- `CBBIO.embeddings_prott5`: ProtT5 adapters/generator with separated model/run metadata population.
-  - Layer-indexing convention is aligned to BioData: `layer 0 = last hidden layer`.
-  - The reversal from Hugging Face hidden-state indices is handled inside the adapter.
-- `CBBIO.embeddings_prostt5`: ProstT5 adapters/generator (protein -> embedding only).
-  - Uses `<AA2fold>` prefix in preprocessing.
-  - Returns per-residue matrices and does not apply pooling.
-  - Layer-indexing convention is aligned to BioData: `layer 0 = last hidden layer`.
-- `CBBIO.embeddings_ankh3`: ANKH3 adapters/generator (protein -> embedding only).
-  - Uses `T5Tokenizer` + `T5EncoderModel`.
-  - Supports configurable prefix via generator parameter:
-    - `prefix="[NLU]"` (default)
-    - `prefix="[S2S]"` (optional)
-  - Returns per-residue matrices and does not apply pooling.
-- `CBBIO.embeddings_esmc`: ESM-C adapters/generator (protein -> embedding only, non-transformers path).
-  - Uses `esm.models.esmc.ESMC` SDK.
-  - Supports model family variants (`esmc_300m`, `esmc_600m`, `esmc_6b` and release tags).
-  - Supports optional `use_flash_attention` parameter at generator construction.
-  - Returns per-residue matrices and does not apply pooling.
-- `CBBIO.embeddings_esm2`: ESM2 adapters/generator (protein -> embedding, `esm` pretrained API path).
-  - Uses `esm.pretrained.esm2_*` model loaders and alphabet batch converter.
-  - Uses ESM2 native layer indexing (top layer is `num_layers`; layer `0` is embedding layer).
-  - Returns per-residue matrices and does not apply pooling.
-- `CBBIO.embeddings_esm1b`: ESM-1b adapters/generator (protein -> embedding, `esm` pretrained API path).
-  - Uses `esm.pretrained.esm1b_t33_650M_UR50S`.
-  - Uses ESM-1b native layer indexing (`0..33` for ESM-1b).
-  - Returns per-residue matrices and does not apply pooling.
-
-Contributor guide:
-- `docs/ModelSpecificEmbeddingModules.md`
+- `EmbeddingGenerationError`: base embedding exception.
+- `EmbeddingInputError`: invalid input records, sequences, or file payloads.
+- `EmbeddingDependencyError`: missing optional runtime dependency.
+- `EmbeddingBackendError`: backend/model inference failure.

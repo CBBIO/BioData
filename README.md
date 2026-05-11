@@ -240,16 +240,18 @@ Main entrypoints:
 - `EmbeddingGenerator`
 - `load_fasta_inputs`
 - `iter_fasta_inputs`
-- `generate_from_fasta`
-- `generate_from_fasta_batches`
-- `iter_embedding_records_from_fasta`
+- `FastaBatcher` / `IterableBatcher`
+- `EmbeddingWriter(format="memory" | "pkl" | "npy" | "h5")`
+- `run_embedding_generation(...)`
+- `Generator(...).generate(...)` / `Generator(...).generate_batches(...)`
 - `load_embedding_records` / `save_embedding_records_*`
 
 Key capabilities:
 
 - Model-agnostic adapter interfaces (`PreprocessorAdapter`, `TokenizerAdapter`, `ModelAdapter`, `PostprocessorAdapter`)
-- Streaming and batched FASTA processing for large sequence collections
-- Embedding record I/O (`.pkl/.pickle/.npy/.npz`)
+- Streaming FASTA and iterable batching for large sequence collections
+- Pooler-based output shaping (`pooler=None`, `pooler_factory("mean")`)
+- Memory, pickle shard, NumPy shard, and HDF5 job outputs
 - Reproducibility metadata types (`ModelMetadata`, `RunMetadata`)
 
 Detailed API reference: `docs/Embeddings.md`

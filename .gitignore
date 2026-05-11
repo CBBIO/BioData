@@ -7,3 +7,9 @@ config_test.yaml
 .coverage
 taxdump/
 taxdump.tar.gz
+*.fasta
+*.pkl
+uniref50_gcrp_reps.fasta.split/*
+go_embedding/*
+*.npy
+uniref*
