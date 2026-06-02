@@ -2021,6 +2021,55 @@ files = [
 rapids-logger = "==0.2.*"
 
 [[package]]
+name = "lmdb"
+version = "2.2.0"
+description = "Universal Python binding for the LMDB 'Lightning' Database"
+optional = false
+python-versions = ">=3.9"
+groups = ["main"]
+markers = "(sys_platform == \"linux\" or sys_platform == \"win32\") and (platform_machine == \"aarch64\" or platform_machine == \"x86_64\") or sys_platform != \"linux\" or platform_machine != \"x86_64\""
+files = [
+    {file = "lmdb-2.2.0-cp310-cp310-macosx_10_9_x86_64.whl", hash = "sha256:41e6a5747d7b8777cc5b1226b57c2dea94023fb55bca5f798f46e50f31c8fd69"},
+    {file = "lmdb-2.2.0-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:97c26c296a907a3990bf26fb7e13a332f58d91048b7c835feab43f9e9a5e9cd2"},
+    {file = "lmdb-2.2.0-cp310-cp310-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:e86d3403a74d2b6f57459fa6bae07c5be97ad41be4baa102153f355125f058a0"},
+    {file = "lmdb-2.2.0-cp310-cp310-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:dab9b1b0376067ce42c9705065fd4197ddeaf63cda06e2a3988b16ab5a0e5991"},
+    {file = "lmdb-2.2.0-cp310-cp310-win_amd64.whl", hash = "sha256:a07e1d58a2e1b4fceff7741adc1a41ed636ec6368a3201c465fa5709a212907a"},
+    {file = "lmdb-2.2.0-cp310-cp310-win_arm64.whl", hash = "sha256:85ccaba7a254b1570395960037cc9a414249fca35674a582b92eac00fc879653"},
+    {file = "lmdb-2.2.0-cp311-cp311-macosx_10_9_x86_64.whl", hash = "sha256:a72dba2c63f6d497f1dd1a1e46e30f14dfb8c1fddc5a51ed913993f5ac03736c"},
+    {file = "lmdb-2.2.0-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:5c807ce9c514354c4f2e76f97e69002048b7f4a3c97a3eaf82415bf7c5daed77"},
+    {file = "lmdb-2.2.0-cp311-cp311-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:a073fada46565c373c8683c67c7c07cc0d3511fef7e122da7052bb5720d2af09"},
+    {file = "lmdb-2.2.0-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:856b322399dcc1992675b8cf5f56cd54e89d05ea86a89dc5f6fa6d671c7b48f2"},
+    {file = "lmdb-2.2.0-cp311-cp311-win_amd64.whl", hash = "sha256:beacb2aed281cc806cb9a91663ed1a772fecd7a125d16b694cfc7af94a9864be"},
+    {file = "lmdb-2.2.0-cp311-cp311-win_arm64.whl", hash = "sha256:e36455ace4c50b5185e4660e19d63533fe5c07840598eeefaad783415a380bab"},
+    {file = "lmdb-2.2.0-cp312-cp312-macosx_10_13_x86_64.whl", hash = "sha256:8cc73de748070321986a3a26f51f3693bdd196c20e797d8d2ad0e860b5d2e26c"},
+    {file = "lmdb-2.2.0-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:9b6fecb1e32c55f0a1f3585d637f221e20146bb3ea9997c50fdfa3a58c0c2e41"},
+    {file = "lmdb-2.2.0-cp312-cp312-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:547e083457b6a0936fe73821f35c019be817877f9a85488be818ec8383ef47a6"},
+    {file = "lmdb-2.2.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:dd505c995a595403f69367cbf16bcd5c88cdd208c706d709ba9b1bc2f9a16f69"},
+    {file = "lmdb-2.2.0-cp312-cp312-win_amd64.whl", hash = "sha256:dacf737ad869c6e48e1471dfa4d3e7c6ce2d082a218c069e20c4a138804e5fd2"},
+    {file = "lmdb-2.2.0-cp312-cp312-win_arm64.whl", hash = "sha256:653f5e183b04b9124c505c519a3ff691038b4fb459c3211b1323c67bfba53f37"},
+    {file = "lmdb-2.2.0-cp313-cp313-macosx_10_13_x86_64.whl", hash = "sha256:36e0cbe6b7d59f6e19b448942c5f9e91674f596a802743258f82e926a9a09632"},
+    {file = "lmdb-2.2.0-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:e5d7a9dfd279a5884806fd478244961e4483cc6d7eb769caed1d7019a8608c20"},
+    {file = "lmdb-2.2.0-cp313-cp313-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:d0dbe7902b2cdb60bf6c893f307ef2b2a5039afd22f029515b86183f05ab1353"},
+    {file = "lmdb-2.2.0-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:9c576cdb163ae61a7ef6eecbc20a6025a4abe085491c1dc0c667d726f4926b53"},
+    {file = "lmdb-2.2.0-cp313-cp313-win_amd64.whl", hash = "sha256:746eebcd4c0aeaf0eb2f897028929d270c5bc80ef4918500eec16db6f26f3fcc"},
+    {file = "lmdb-2.2.0-cp313-cp313-win_arm64.whl", hash = "sha256:006153aac9fb0415a5f3e8ac88789e5730dba3dd0743cd84c95e3951ff68bc3a"},
+    {file = "lmdb-2.2.0-cp314-cp314-macosx_10_15_x86_64.whl", hash = "sha256:0398fef4ab54d66f531257e7a68c03314a267da5d2fd76d75481f62a237ec28b"},
+    {file = "lmdb-2.2.0-cp314-cp314-macosx_11_0_arm64.whl", hash = "sha256:1610c601f397b0b523310b2393fd430f5973bfdb5dbec9cdc5f89510c5e887ca"},
+    {file = "lmdb-2.2.0-cp314-cp314-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:dc1d32c08afdbc7db1315d199c827e14c6ad8cdfc7d70872ff983f68079a5edb"},
+    {file = "lmdb-2.2.0-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:bdba273466d099f3ff3a10a26dc1d45101ac519bf67ae23b402a2f3191965e13"},
+    {file = "lmdb-2.2.0-cp314-cp314-win_amd64.whl", hash = "sha256:00a051a0d29e0d88e84035884e91a57e2e850355c7e1a3ea05c34753a56d3e12"},
+    {file = "lmdb-2.2.0-cp314-cp314-win_arm64.whl", hash = "sha256:2d2968d2a3ff6e69596d9604d2029d2d1265079aa2864eb721c27e076a1fd792"},
+    {file = "lmdb-2.2.0-cp39-cp39-macosx_10_9_x86_64.whl", hash = "sha256:45017fef816f613626139da8160f15bb2b82fd47e01e57ae5cd640a1162bd3d0"},
+    {file = "lmdb-2.2.0-cp39-cp39-macosx_11_0_arm64.whl", hash = "sha256:cd027ffae1a1589bded6984e7fba97996e0faef7575469918b90c712dd1a5cdb"},
+    {file = "lmdb-2.2.0-cp39-cp39-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:0ff7da7d9a1c5ff5d82793fffd0690c4741efa51bc1e1bf6ba41d46c3aedcb91"},
+    {file = "lmdb-2.2.0-cp39-cp39-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:508e7f3c60586ae919d915c21adc323941d5e0c7f0ce2c9b415c54560b507f63"},
+    {file = "lmdb-2.2.0-cp39-cp39-win_amd64.whl", hash = "sha256:fec85043d18a870e98eca2ba062297ab54960a5dc159fcb8c27bde25ef80c935"},
+    {file = "lmdb-2.2.0-cp39-cp39-win_arm64.whl", hash = "sha256:bef2bf1b1b7a12f2bb4962d16a3abb0796a45389b18739c89fba0d6bd1a1055f"},
+    {file = "lmdb-2.2.0-pp310-pypy310_pp73-manylinux_2_38_x86_64.whl", hash = "sha256:a678e0ffcdc366a197b60e1f3e28e7c425031b35d5cbd73c0f08290ee7791ca6"},
+    {file = "lmdb-2.2.0.tar.gz", hash = "sha256:53020e20305c043ea6e68089bc242d744fba6073cdb268332299ba6dda2886d4"},
+]
+
+[[package]]
 name = "markdown-it-py"
 version = "4.0.0"
 description = "Python port of markdown-it. Markdown parsing, done right!"
@@ -2754,6 +2803,26 @@ files = [
     {file = "pandocfilters-1.5.1-py2.py3-none-any.whl", hash = "sha256:93be382804a9cdb0a7267585f157e5d1731bbe5545a85b268d6f5fe6232de2bc"},
     {file = "pandocfilters-1.5.1.tar.gz", hash = "sha256:002b4a555ee4ebc03f8b66307e287fa492e4a77b4ea14d3f934328297bb4939e"},
 ]
+
+[[package]]
+name = "parasail"
+version = "1.3.4"
+description = "pairwise sequence alignment library"
+optional = false
+python-versions = "*"
+groups = ["main"]
+markers = "(sys_platform == \"linux\" or sys_platform == \"win32\") and (platform_machine == \"aarch64\" or platform_machine == \"x86_64\") or sys_platform != \"linux\" or platform_machine != \"x86_64\""
+files = [
+    {file = "parasail-1.3.4-py2.py3-none-macosx_10_9_x86_64.whl", hash = "sha256:58bb1a981ccab67721f88da070e305d04e5e4e35aac51dadd278301e6c799c93"},
+    {file = "parasail-1.3.4-py2.py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:ede927ccbd8cd4180c33c4c44af9d720aedb31d098b2a83cdc32ba0059d7ea59"},
+    {file = "parasail-1.3.4-py2.py3-none-musllinux_1_1_i686.whl", hash = "sha256:e58b2d3cf1dd3a4c399e835861fbfd8d725abf3f7de2bd21cdee1d36c65f5e12"},
+    {file = "parasail-1.3.4-py2.py3-none-win32.whl", hash = "sha256:bccd9b561e87b345aa5676facfb2555da395dd56d202b293d1a6ee1488788257"},
+    {file = "parasail-1.3.4-py2.py3-none-win_amd64.whl", hash = "sha256:25b8260b922933c8e7e8ce008ddcbbff4ef998b7d077169ed441d70ab7a78b5a"},
+    {file = "parasail-1.3.4.tar.gz", hash = "sha256:d6a7035dfae3ef5aafdd7e6915711214c22b572ea059fa69d9d7ecbfb9b61b0f"},
+]
+
+[package.dependencies]
+numpy = "*"
 
 [[package]]
 name = "parso"
@@ -4337,9 +4406,9 @@ files = [
 
 [extras]
 dev = ["pyright", "pytest", "pytest-cov"]
-notebooks = ["biopython", "ipykernel", "jupyter", "matplotlib", "pandas", "seaborn", "tqdm"]
+notebooks = ["biopython", "ipykernel", "ipywidgets", "jupyter", "lmdb", "matplotlib", "pandas", "seaborn", "tqdm"]
 
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.13,<4.0"
-content-hash = "a7072233d9785936e8f59efc43477122299f5cfe7ad843183c1c3909231dbb10"
+content-hash = "80311fa1061d47b2fb80e23b91de2ab23774cd476c486c608b0360339ee58f27"

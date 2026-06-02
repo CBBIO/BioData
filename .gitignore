@@ -13,3 +13,4 @@ uniref50_gcrp_reps.fasta.split/*
 go_embedding/*
 *.npy
 uniref*
+notebooks/data/*
