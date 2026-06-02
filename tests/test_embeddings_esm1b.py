@@ -8,7 +8,7 @@ from typing import Any
 import pytest
 
 from CBBIO.embeddings import EmbeddingDependencyError, GenerationInput
-from CBBIO.embeddings_esm1b import Esm1bEmbeddingGenerator, Esm1bPreprocessor
+from CBBIO.embeddings_esm1b import Esm1bEmbeddingGenerator, Esm1bModelAdapter, Esm1bPreprocessor
 
 
 class _FakeTensor:
@@ -49,8 +49,16 @@ class _FakeAlphabet:
 
     def get_batch_converter(self) -> Any:
         def _convert(data: Any) -> Any:
-            _ = data
-            return (["query"], ["ACDE"], _FakeTensor([[1, 2, 3, 4, 5, 1, 0]]))
+            labels = [str(label) for label, _sequence in data]
+            sequences = [str(sequence) for _label, sequence in data]
+            max_len = max(len(sequence) for sequence in sequences)
+            tokens = []
+            for sequence in sequences:
+                residue_tokens = list(range(2, 2 + len(sequence)))
+                row = [1] + residue_tokens + [1]
+                row.extend([self.padding_idx] * (max_len + 2 - len(row)))
+                tokens.append(row)
+            return (labels, sequences, _FakeTensor(tokens))
 
         return _convert
 
@@ -70,11 +78,42 @@ class _FakeModel:
 
     def __call__(self, tokens: Any, repr_layers: list[int], return_contacts: bool) -> dict[str, Any]:
         _ = return_contacts
-        seq_len = len(tokens.tolist()[0])
+        token_rows = tokens.tolist()
+        seq_len = len(token_rows[0])
         reps = {}
         for layer in repr_layers:
-            reps[layer] = _FakeTensor([[[float(layer), float(pos)] for pos in range(seq_len)]])
+            reps[layer] = _FakeTensor(
+                [
+                    [[float(layer), float(row_index * 100 + pos)] for pos in range(seq_len)]
+                    for row_index, _row in enumerate(token_rows)
+                ]
+            )
         return {"representations": reps}
+
+
+class _FakeHfOutput:
+    def __init__(self, hidden_states: Any) -> None:
+        self.hidden_states = hidden_states
+
+
+class _FakeLayerNorm:
+    def __call__(self, value: Any) -> Any:
+        return value + 100.0
+
+
+class _FakeHfEncoder:
+    emb_layer_norm_after = _FakeLayerNorm()
+
+
+class _FakeHfModel:
+    encoder = _FakeHfEncoder()
+
+    def __call__(self, **kwargs: Any) -> _FakeHfOutput:
+        import torch
+
+        _ = kwargs
+        hidden_states = [torch.full((1, 4, 1), float(index)) for index in range(34)]
+        return _FakeHfOutput(hidden_states)
 
 
 def test_esm1b_preprocessor_normalizes_sequence() -> None:
@@ -110,6 +149,84 @@ def test_esm1b_generate_returns_per_residue_matrices_without_pooling() -> None:
     assert [record.layer_index for record in result.records] == [33]
     assert result.records[0].shape == (4, 2)
     assert isinstance(result.records[0].embedding[0], list)
+
+
+def test_esm1b_generate_slices_variable_length_batches_to_residues() -> None:
+    generator = Esm1bEmbeddingGenerator(
+        model=_FakeModel(),
+        alphabet=_FakeAlphabet(),
+    )
+    result = generator.generate(
+        [
+            GenerationInput(id="P1", sequence="ACDE"),
+            GenerationInput(id="P2", sequence="AC"),
+        ],
+        layer_index=[33],
+        fail_fast=True,
+    )
+
+    assert result.errors == []
+    assert [record.id for record in result.records] == ["P1", "P2"]
+    assert [record.shape for record in result.records] == [(4, 2), (2, 2)]
+    assert result.records[0].embedding == [[33.0, 1.0], [33.0, 2.0], [33.0, 3.0], [33.0, 4.0]]
+    assert result.records[1].embedding == [[33.0, 101.0], [33.0, 102.0]]
+
+
+def test_esm1b_cls_pooler_returns_leading_special_token() -> None:
+    generator = Esm1bEmbeddingGenerator(
+        model=_FakeModel(),
+        alphabet=_FakeAlphabet(),
+    )
+    result = generator.generate(
+        [
+            GenerationInput(id="P1", sequence="ACDE"),
+            GenerationInput(id="P2", sequence="AC"),
+        ],
+        layer_index=[33],
+        pooler="cls",
+        fail_fast=True,
+    )
+
+    assert result.errors == []
+    assert [record.id for record in result.records] == ["P1", "P2"]
+    assert [record.shape for record in result.records] == [(2,), (2,)]
+    assert result.records[0].embedding == [33.0, 0.0]
+    assert result.records[1].embedding == [33.0, 100.0]
+
+
+def test_esm1b_hf_adapter_normalizes_intermediate_hidden_states_only() -> None:
+    import torch
+
+    adapter = Esm1bModelAdapter(_FakeHfModel(), normalize_hf_hidden_states=True)
+    result = adapter.infer(
+        {
+            "input_ids": torch.tensor([[0, 5, 23, 2]]),
+            "attention_mask": torch.tensor([[1, 1, 1, 1]]),
+        },
+        layer_index=[0, 1, 33],
+    )
+
+    assert result["sample_spans"] == [(1, 3)]
+    assert float(result["layers"][0][0, 0, 0]) == 100.0
+    assert float(result["layers"][1][0, 0, 0]) == 101.0
+    assert float(result["layers"][33][0, 0, 0]) == 33.0
+
+
+def test_esm1b_hf_adapter_can_return_raw_intermediate_hidden_states() -> None:
+    import torch
+
+    adapter = Esm1bModelAdapter(_FakeHfModel(), normalize_hf_hidden_states=False)
+    result = adapter.infer(
+        {
+            "input_ids": torch.tensor([[0, 5, 23, 2]]),
+            "attention_mask": torch.tensor([[1, 1, 1, 1]]),
+        },
+        layer_index=[0, 1, 33],
+    )
+
+    assert float(result["layers"][0][0, 0, 0]) == 0.0
+    assert float(result["layers"][1][0, 0, 0]) == 1.0
+    assert float(result["layers"][33][0, 0, 0]) == 33.0
 
 
 def test_esm1b_generator_records_requested_dtype(

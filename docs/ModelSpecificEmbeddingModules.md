@@ -60,12 +60,10 @@ Populate once per `generate(...)` call:
 Keep model metadata and run metadata separate. Do not mix mutable run values into `ModelMetadata`.
 
 ## Layer Indexing Policy
-- If the target database/tooling uses a different layer numbering than the model runtime,
-  implement the mapping inside the model-specific adapter module.
-- Add a clear inline code comment near the mapping logic.
-- Record the chosen policy in `ModelMetadata.parameters` (for example:
-  `\"layer_indexing\": \"biodata_reversed_0_is_last_hidden\"`).
-- Avoid duplicating this mapping in notebooks or caller code.
+- Model-specific adapters expose native hidden-state order: layer 0 is the
+  earliest returned hidden state and larger indices move deeper through the model.
+- Record the chosen policy in `ModelMetadata.parameters`.
+- Avoid duplicating layer mappings in notebooks or caller code.
 
 ## Dependency Handling
 - Import optional heavy dependencies inside code paths that need them.

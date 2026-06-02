@@ -80,7 +80,7 @@ def _parse_args() -> argparse.Namespace:
         "--layer-index",
         type=int,
         default=0,
-        help="BioData layer index, where 0 means the last hidden layer. Default: 0.",
+        help="Native hidden-state layer index. Layer 0 is the earliest hidden state. Default: 0.",
     )
     parser.add_argument(
         "--pooling",
@@ -185,10 +185,6 @@ def _schedule_batches(
     if batch_size is not None:
         return [list(chunk) for chunk in _chunked(items, batch_size)]
     return [list(chunk) for chunk in _chunked_by_token_budget(items, int(max_tokens_per_batch))]
-
-
-def _to_hf_layer_index(user_layer_index: int, *, total_layers: int) -> int:
-    return (total_layers - 1) - int(user_layer_index)
 
 
 def _pool_rows(rows: Sequence[Sequence[float]], *, pooling: str) -> List[float]:
@@ -416,7 +412,14 @@ def _run_true_batched_embeddings(
             if hidden_states is None:
                 raise RuntimeError("ProtT5 output did not include hidden_states.")
             total_layers = len(hidden_states)
-            hf_layer_index = _to_hf_layer_index(layer_index, total_layers=total_layers)
+            if layer_index < 0:
+                hf_layer_index = total_layers + layer_index
+            else:
+                hf_layer_index = layer_index
+            if hf_layer_index < 0 or hf_layer_index >= total_layers:
+                raise RuntimeError(
+                    f"Requested layer index {layer_index} out of range for total layers={total_layers}."
+                )
             selected = hidden_states[hf_layer_index]
 
             for row_index, record in enumerate(chunk):

@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from CBBIO.embeddings import EmbeddingDependencyError, GenerationInput
+from CBBIO.embeddings import EmbeddingDependencyError, EmbeddingInputError, GenerationInput
 from CBBIO.embeddings_prostt5 import ProstT5EmbeddingGenerator, ProstT5Preprocessor
 
 
@@ -160,11 +160,32 @@ def test_prostt5_generate_returns_per_residue_matrix_without_pooling(
 
     assert result.errors == []
     assert [record.layer_index for record in result.records] == [0, 2]
+    assert result.records[0].embedding[0] == [0.0, 0.0, 1.0]
+    assert result.records[1].embedding[0] == [2.0, 0.0, 1.0]
     # residues only: 4 rows, hidden dimension 3 in fake model
     assert all(record.shape == (4, 3) for record in result.records)
     assert isinstance(result.records[0].embedding[0], list)
     assert model.did_float is True
     assert model.did_half is False
+
+
+def test_prostt5_rejects_cls_pooler(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_torch = types.SimpleNamespace(
+        tensor=lambda values: _FakeTensor(values),
+        no_grad=lambda: _FakeNoGrad(),
+    )
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+
+    generator = ProstT5EmbeddingGenerator(
+        tokenizer=_FakeTokenizer(),
+        model=_FakeModel(),
+        device="cpu",
+    )
+
+    with pytest.raises(EmbeddingInputError, match="Supported poolers"):
+        generator.generate([GenerationInput(id="P1", sequence="ACDE")], layer_index=[0], pooler="cls")
 
 
 def test_prostt5_generator_records_requested_dtype(
@@ -188,6 +209,7 @@ def test_prostt5_generator_records_requested_dtype(
     assert generator.model_metadata.parameters is not None
     assert generator.model_metadata.parameters["torch_dtype"] == "float16"
     assert generator.model_metadata.parameters["precision_policy"] == "explicit_torch_dtype"
+    assert generator.model_metadata.parameters["layer_indexing"] == "hf_native_0_is_first_hidden"
     assert model.did_half is True
 
 

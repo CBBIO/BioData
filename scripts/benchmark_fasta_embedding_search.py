@@ -290,8 +290,11 @@ def _maybe_release_cuda_cache(device: str | None) -> None:
         return
 
 
-def _to_prott5_hf_layer_index(user_layer_index: int, *, total_layers: int) -> int:
-    return (total_layers - 1) - int(user_layer_index)
+def _resolve_hf_layer_index(layer_index: int, *, total_layers: int) -> int:
+    resolved = total_layers + layer_index if layer_index < 0 else layer_index
+    if resolved < 0 or resolved >= total_layers:
+        raise RuntimeError(f"Requested layer index {layer_index} out of range for total layers={total_layers}.")
+    return resolved
 
 
 def _generate_embeddings_for_batch_prott5(
@@ -347,7 +350,7 @@ def _generate_embeddings_for_batch_prott5(
             hidden_states = getattr(model_output, "hidden_states", None)
             if hidden_states is None:
                 raise RuntimeError("ProtT5 model output did not include hidden_states.")
-            hf_layer_index = _to_prott5_hf_layer_index(layer_index, total_layers=len(hidden_states))
+            hf_layer_index = _resolve_hf_layer_index(layer_index, total_layers=len(hidden_states))
             selected = hidden_states[hf_layer_index]
             for row_index, record in enumerate(chunk):
                 residue_len = max(int(attention_mask[row_index].sum().item()) - 1, 1)

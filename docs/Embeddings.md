@@ -224,8 +224,8 @@ FASTA and persistence helpers also remain:
 
 ## Model Families
 
-- `protT5`: Hugging Face ProtT5; BioData layer convention where `layer_index=0` is the last hidden layer.
-- `prostT5`: ProstT5 protein-to-embedding path; BioData layer convention.
+- `protT5`: Hugging Face ProtT5; native hidden-state layer indexing.
+- `prostT5`: ProstT5 protein-to-embedding path; native hidden-state layer indexing.
 - `ankh3`: ANKH3 via `T5Tokenizer` and `T5EncoderModel`.
 - `esm2`: ESM2 via `esm.pretrained` or Transformers fallback; native ESM2 layer indexing.
 - `esm1b`: ESM-1b via `esm.pretrained` or Transformers fallback; native ESM1b layer indexing.

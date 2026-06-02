@@ -3,7 +3,7 @@ from __future__ import annotations
 import builtins
 import sys
 import types
-from typing import Any, cast
+from typing import Any, Sequence, cast
 
 import pytest
 
@@ -64,19 +64,29 @@ class _FakeESMProtein:
 
 
 class _FakeLogitsConfig:
-    def __init__(self, sequence: bool, return_embeddings: bool) -> None:
+    def __init__(
+        self,
+        sequence: bool,
+        return_embeddings: bool,
+        return_hidden_states: bool = False,
+        ith_hidden_layer: int | None = None,
+    ) -> None:
         self.sequence = sequence
         self.return_embeddings = return_embeddings
+        self.return_hidden_states = return_hidden_states
+        self.ith_hidden_layer = ith_hidden_layer
 
 
 class _FakeLogitsOutput:
-    def __init__(self, embeddings: Any) -> None:
+    def __init__(self, embeddings: Any = None, hidden_states: Any = None) -> None:
         self.embeddings = embeddings
+        self.hidden_states = hidden_states
 
 
 class _FakeClient:
     def __init__(self) -> None:
         self.device = "cpu"
+        self.requested_layers: list[int | None] = []
 
     def to(self, device: str) -> "_FakeClient":
         self.device = device
@@ -85,12 +95,15 @@ class _FakeClient:
     def encode(self, protein: _FakeESMProtein) -> Any:
         return protein.sequence
 
-    def logits(self, protein_tensor: Any, _config: _FakeLogitsConfig) -> _FakeLogitsOutput:
-        # Return [layers, residues, hidden] with two layers.
+    def logits(self, protein_tensor: Any, config: _FakeLogitsConfig) -> _FakeLogitsOutput:
+        assert config.sequence is False
+        assert config.return_embeddings is True
+        assert config.return_hidden_states is True
+        self.requested_layers.append(config.ith_hidden_layer)
         residues = len(str(protein_tensor))
-        layer0 = [[0.0, float(i)] for i in range(residues)]
-        layer1 = [[1.0, float(i)] for i in range(residues)]
-        return _FakeLogitsOutput(_FakeTensor([layer0, layer1]))
+        layer = float(config.ith_hidden_layer or 0)
+        hidden = [[layer, float(i)] for i in range(residues)]
+        return _FakeLogitsOutput(hidden_states=_FakeTensor([hidden]))
 
 
 def test_esmc_preprocessor_replaces_ambiguous_amino_acids() -> None:
@@ -130,10 +143,42 @@ def test_esmc_generate_returns_per_residue_matrix_without_pooling() -> None:
     assert result.errors == []
     assert [record.layer_index for record in result.records] == [0, 1]
     assert result.records[0].shape == (4, 2)
+    second_embedding = cast(Sequence[Sequence[float]], result.records[1].embedding)
+    assert second_embedding[0][0] == 1.0
     assert isinstance(result.records[0].embedding[0], list)
+    assert client.requested_layers == [0, 1]
+
+
+def test_esmc_singleton_batch_mean_pooling_removes_batch_axis() -> None:
+    client = _FakeClient()
+    generator = EsmcEmbeddingGenerator(
+        client=client,
+        model_name="esmc_300m",
+        from_pretrained_kwargs={},
+    )
+    cast(Any, generator.tokenizer).protein_cls = _FakeESMProtein
+    cast(Any, generator.model).logits_config_cls = _FakeLogitsConfig
+
+    result = generator.generate([GenerationInput(id="Q1", sequence="ACDE")], layer_index=[1], pooler="mean", fail_fast=True)
+
+    assert result.errors == []
+    assert result.records[0].shape == (2,)
+    assert result.records[0].embedding == [1.0, 1.5]
 
 
 def test_esmc_available_layers_uses_family_hint() -> None:
     generator = EsmcEmbeddingGenerator(client=_FakeClient(), model_name="esmc_300m")
     assert generator.num_layers() == 30
     assert generator.available_layers()[:3] == [0, 1, 2]
+
+
+def test_esmc_layer_none_requests_all_known_layers() -> None:
+    client = _FakeClient()
+    generator = EsmcEmbeddingGenerator(client=client, model_name="esmc_300m")
+    cast(Any, generator.tokenizer).protein_cls = _FakeESMProtein
+    cast(Any, generator.model).logits_config_cls = _FakeLogitsConfig
+
+    result = generator.generate([GenerationInput(id="Q1", sequence="AC")], layer_index=None, fail_fast=True)
+
+    assert len(result.records) == 30
+    assert client.requested_layers == list(range(30))

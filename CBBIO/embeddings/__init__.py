@@ -239,6 +239,7 @@ class EmbeddingGenerator:
         pooler: Any | None = None,
         fail_fast: bool = False,
     ) -> GenerationResult:
+        self._validate_pooler_selection(pooler)
         if not isinstance(layer_index, int):
             raise EmbeddingInputError("Base EmbeddingGenerator.generate requires an integer layer_index.")
         resolved_layer_index = int(layer_index)
@@ -246,7 +247,7 @@ class EmbeddingGenerator:
         resolved_pooler: Any | None = None
         mean_pooler_type: type[Any] | None = None
         if pooler is not None:
-            from .embeddings_pooler import MeanPooler, resolve_pooler
+            from .pooler import MeanPooler, resolve_pooler
 
             resolved_pooler = resolve_pooler(pooler)
             mean_pooler_type = MeanPooler
@@ -316,7 +317,8 @@ class EmbeddingGenerator:
         requested_layers: List[int] | None,
         run_parameters: Dict[str, Any] | None,
     ) -> GenerationResult:
-        from .embeddings_pooler import materialize_embedding_payload, resolve_pooler
+        self._validate_pooler_selection(pooler)
+        from .pooler import materialize_embedding_payload, resolve_pooler
 
         result = GenerationResult()
         resolved_pooler = resolve_pooler(pooler)
@@ -399,6 +401,7 @@ class EmbeddingGenerator:
         token tensors or ``residue_lens=[length, ...]`` for residue-aligned
         tensors.
         """
+        self._validate_pooler_selection(pooler)
         result = GenerationResult()
         prepared_records: List[Tuple[int, GenerationInput, str]] = []
 
@@ -475,7 +478,7 @@ class EmbeddingGenerator:
         pooler: Any | None,
         missing_layers_error: str,
     ) -> None:
-        from .embeddings_pooler import materialize_embedding_payload, resolve_pooler
+        from .pooler import materialize_embedding_payload, resolve_pooler
 
         resolved_pooler = resolve_pooler(pooler)
         model_output_map = cast(Dict[str, Any], model_output) if isinstance(model_output, dict) else None
@@ -491,15 +494,24 @@ class EmbeddingGenerator:
         for row_index, (_source_index, normalized, _prepared) in enumerate(prepared_records):
             start, end = spans[row_index]
             for layer_id, layer_tensor in sorted(layers_obj.items(), key=lambda item: int(item[0])):
-                sample_tensor = _slice_batched_layer_tensor(
-                    layer_tensor,
-                    row_index=row_index,
-                    start=start,
-                    end=end,
-                    singleton_count=len(prepared_records),
-                    explicit_spans=explicit_spans,
-                )
-                payload = resolved_pooler(sample_tensor) if resolved_pooler is not None else sample_tensor
+                if _is_cls_pooler(resolved_pooler):
+                    sample_tensor = _slice_batched_cls_tensor(
+                        layer_tensor,
+                        row_index=row_index,
+                        start=start,
+                        explicit_spans=explicit_spans,
+                    )
+                    payload = sample_tensor
+                else:
+                    sample_tensor = _slice_batched_layer_tensor(
+                        layer_tensor,
+                        row_index=row_index,
+                        start=start,
+                        end=end,
+                        singleton_count=len(prepared_records),
+                        explicit_spans=explicit_spans,
+                    )
+                    payload = resolved_pooler(sample_tensor) if resolved_pooler is not None else sample_tensor
                 embedding, shape = materialize_embedding_payload(payload)
                 result.records.append(
                     EmbeddingRecord(
@@ -521,6 +533,7 @@ class EmbeddingGenerator:
         layer_index: LayerSelection = 0,
         pooler: Any | None = None,
         fail_fast: bool = False,
+        length_sort_window: int | None = None,
     ) -> Iterator[GenerationResult]:
         """Yield one ``GenerationResult`` per input batch."""
         resolved_batch_size = _validate_batch_size(batch_size)
@@ -528,6 +541,7 @@ class EmbeddingGenerator:
             records,
             batch_size=resolved_batch_size,
             max_batch_tokens=max_batch_tokens,
+            length_sort_window=length_sort_window,
         ):
             yield self.generate(batch, layer_index=cast(Any, layer_index), pooler=pooler, fail_fast=fail_fast)
 
@@ -551,6 +565,39 @@ class EmbeddingGenerator:
             fail_fast=fail_fast,
         ):
             yield from result.records
+
+    def _validate_pooler_selection(self, pooler: Any | None) -> None:
+        supported_values = getattr(self, "SUPPORTED_POOLERS", None)
+        if supported_values is None:
+            return
+
+        from .pooler import resolve_pooler
+
+        resolved_pooler = resolve_pooler(pooler)
+        if resolved_pooler is None:
+            requested_pooler = "none"
+        else:
+            requested_pooler = str(getattr(resolved_pooler, "name", "")).strip().lower()
+            if requested_pooler == "identity":
+                requested_pooler = "none"
+            elif requested_pooler == "bos":
+                requested_pooler = "cls"
+
+        known_poolers = {"none", "mean", "cls"}
+        if requested_pooler not in known_poolers:
+            return
+
+        normalized_supported = {
+            str(value).strip().lower().replace("identity", "none").replace("bos", "cls")
+            for value in cast(Sequence[object], supported_values)
+            if str(value).strip()
+        }
+        if requested_pooler not in normalized_supported:
+            supported_text = ", ".join(sorted(normalized_supported)) if normalized_supported else "none"
+            raise EmbeddingInputError(
+                f"Pooler {requested_pooler!r} is not supported for model class "
+                f"{self.__class__.__name__}. Supported poolers: {supported_text}."
+            )
 
 
 def load_fasta_inputs(
@@ -582,23 +629,50 @@ def iter_fasta_inputs(
         yield _generation_input_from_fasta_record(record_obj, index=index, id_from=id_from)
 
 
+def _iter_length_sorted_windows(
+    records: Iterable[GenerationInput],
+    *,
+    window_size: int | None,
+) -> Iterator[GenerationInput]:
+    if window_size is None:
+        yield from records
+        return
+    pending: List[GenerationInput] = []
+    for record in records:
+        pending.append(record)
+        if len(pending) >= window_size:
+            pending.sort(key=lambda r: len(r.sequence), reverse=True)
+            yield from pending
+            pending = []
+    if pending:
+        pending.sort(key=lambda r: len(r.sequence), reverse=True)
+        yield from pending
+
+
 def batch_generation_inputs(
     records: Iterable[GenerationInput],
     *,
     batch_size: int,
     max_batch_tokens: int | None = None,
+    length_sort_window: int | None = None,
 ) -> Iterator[List[GenerationInput]]:
     """Group generation inputs into size-capped lists.
 
     ``max_batch_tokens`` caps the padded token budget estimated as
     ``batch_size * max(sequence_length + 1)``. A single over-budget record is
     still yielded as a singleton because a record cannot be split here.
+
+    ``length_sort_window`` buffers that many records and sorts them
+    longest-first before batching, reducing padding waste when
+    ``max_batch_tokens`` is set.
     """
     resolved_batch_size = _validate_batch_size(batch_size)
     resolved_max_batch_tokens = _validate_optional_positive_int("max_batch_tokens", max_batch_tokens)
+    resolved_window = _validate_optional_positive_int("length_sort_window", length_sort_window)
+    sorted_records = _iter_length_sorted_windows(records, window_size=resolved_window)
     batch: List[GenerationInput] = []
     batch_max_tokens = 0
-    for record in records:
+    for record in sorted_records:
         record_tokens = len(str(record.sequence)) + 1
         candidate_max_tokens = max(batch_max_tokens, record_tokens)
         if batch and (
@@ -936,8 +1010,46 @@ def _slice_batched_layer_tensor(
     explicit_spans: bool,
 ) -> Any:
     if singleton_count == 1 and not explicit_spans:
+        if _looks_like_batched_tensor(layer_tensor):
+            return layer_tensor[row_index, start:end]
         return layer_tensor[start:end]
     return layer_tensor[row_index, start:end]
+
+
+def _slice_batched_cls_tensor(
+    layer_tensor: Any,
+    *,
+    row_index: int,
+    start: int,
+    explicit_spans: bool,
+) -> Any:
+    if not explicit_spans or start <= 0:
+        raise EmbeddingBackendError("CLS pooling requires token-aligned sample_spans that exclude a leading CLS/BOS token.")
+    return layer_tensor[row_index, start - 1]
+
+
+def _is_cls_pooler(pooler: Any | None) -> bool:
+    return str(getattr(pooler, "name", "")).strip().lower() in {"cls", "bos"}
+
+
+def _looks_like_batched_tensor(value: Any) -> bool:
+    shape = getattr(value, "shape", None)
+    if shape is not None:
+        try:
+            return len(shape) >= 3
+        except TypeError:
+            pass
+
+    tolist = getattr(value, "tolist", None)
+    raw = tolist() if callable(tolist) else value
+    if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes, bytearray)) or not raw:
+        return False
+    raw_seq = cast(Sequence[object], raw)
+    first = raw_seq[0]
+    if not isinstance(first, Sequence) or isinstance(first, (str, bytes, bytearray)) or not first:
+        return False
+    first_row = cast(Sequence[object], first)
+    return isinstance(first_row[0], Sequence) and not isinstance(first_row[0], (str, bytes, bytearray))
 
 
 def _result_sequence_count(result: GenerationResult) -> int:

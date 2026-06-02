@@ -195,6 +195,16 @@ def test_generate_with_mean_pooler_keeps_vector_outputs() -> None:
     assert result.records[0].shape == (3,)
 
 
+def test_pooler_factory_supports_cls_aliases() -> None:
+    cls_pooler = pooler_factory("cls")
+    bos_pooler = pooler_factory("bos")
+
+    assert cls_pooler is not None
+    assert bos_pooler is not None
+    assert cls_pooler.name == "cls"
+    assert bos_pooler.name == "cls"
+
+
 def test_base_generator_available_layers_raises_when_model_adapter_does_not_expose_it() -> None:
     generator = _generator()
     with pytest.raises(EmbeddingBackendError):
@@ -1326,6 +1336,8 @@ def test_prott5_generate_returns_requested_layers(monkeypatch: pytest.MonkeyPatc
 
     assert result.errors == []
     assert [record.layer_index for record in result.records] == [0, 2]
+    assert result.records[0].embedding[0] == [0.0, 0.0, 0.0]
+    assert result.records[1].embedding[0] == [2.0, 0.0, 0.0]
 
 
 def test_prott5_generate_batches_records_in_one_model_call(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1349,7 +1361,7 @@ def test_prott5_generate_batches_records_in_one_model_call(monkeypatch: pytest.M
     assert [record.id for record in result.records] == ["P1", "P2"]
     assert result.records[0].shape == (4, 3)
     assert result.records[1].shape == (2, 3)
-    assert result.records[1].embedding[0] == [2.0, 1.0, 0.0]
+    assert result.records[1].embedding[0] == [0.0, 1.0, 0.0]
 
 
 def test_prott5_generate_with_mean_pooler_returns_vectors(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1371,8 +1383,8 @@ def test_prott5_generate_with_mean_pooler_returns_vectors(monkeypatch: pytest.Mo
 
     assert result.errors == []
     assert [record.shape for record in result.records] == [(3,), (3,)]
-    assert result.records[0].embedding == [2.0, 0.0, 1.5]
-    assert result.records[1].embedding == [2.0, 1.0, 0.5]
+    assert result.records[0].embedding == [0.0, 0.0, 1.5]
+    assert result.records[1].embedding == [0.0, 1.0, 0.5]
 
 
 def test_prott5_generator_available_layers_and_count(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1410,7 +1422,7 @@ def test_prott5_generation_populates_model_and_run_metadata(monkeypatch: pytest.
     assert generator.model_metadata.parameters == {
         "representation": "per-residue",
         "pooling": "none",
-        "layer_indexing": "biodata_reversed_0_is_last_hidden",
+        "layer_indexing": "hf_native_0_is_first_hidden",
     }
     assert isinstance(result.model_metadata, ModelMetadata)
     assert isinstance(result.run_metadata, RunMetadata)
