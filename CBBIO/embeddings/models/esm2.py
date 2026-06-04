@@ -95,6 +95,7 @@ class Esm2TokenizerAdapter(TokenizerAdapter):
         labeled = [(f"query_{index}", sequence) for index, sequence in enumerate(sequences)]
         labels, strs, tokens = cast(Tuple[Any, Any, Any], self.batch_converter(labeled))
         _ = labels, strs
+        tokens = tokens.to(self.device)
         lens = (tokens != self.padding_idx).sum(1)
         return {"tokens": tokens, "lens": lens}
 

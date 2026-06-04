@@ -8,7 +8,7 @@ from typing import Any
 import pytest
 
 from CBBIO.embeddings import EmbeddingDependencyError, GenerationInput
-from CBBIO.embeddings_esm2 import Esm2EmbeddingGenerator, Esm2Preprocessor
+from CBBIO.embeddings_esm2 import Esm2EmbeddingGenerator, Esm2Preprocessor, Esm2TokenizerAdapter
 
 
 class _FakeScalar:
@@ -20,28 +20,32 @@ class _FakeScalar:
 
 
 class _FakeTensor:
-    def __init__(self, data: Any) -> None:
+    def __init__(self, data: Any, *, device: str = "cpu") -> None:
         self.data = data
+        self.device = device
 
     def __getitem__(self, item: Any) -> "_FakeTensor":
         if isinstance(item, tuple):
             first = item[0]
             second = item[1] if len(item) > 1 else slice(None)
             base = self.data[first]
-            return _FakeTensor(base[second])
-        return _FakeTensor(self.data[item])
+            return _FakeTensor(base[second], device=self.device)
+        return _FakeTensor(self.data[item], device=self.device)
 
     def __ne__(self, other: Any) -> "_FakeTensor":
         _ = other
         converted = []
         for row in self.data:
             converted.append([1 if val != 0 else 0 for val in row])
-        return _FakeTensor(converted)
+        return _FakeTensor(converted, device=self.device)
 
     def sum(self, dim: int) -> "_FakeTensor":
         if dim != 1:
             raise ValueError("fake tensor supports dim=1 only")
-        return _FakeTensor([sum(row) for row in self.data])
+        return _FakeTensor([sum(row) for row in self.data], device=self.device)
+
+    def to(self, device: str) -> "_FakeTensor":
+        return _FakeTensor(self.data, device=str(device))
 
     def item(self) -> float:
         if isinstance(self.data, (int, float)):
@@ -92,6 +96,23 @@ class _FakeModel:
 def test_esm2_preprocessor_normalizes_sequence() -> None:
     pre = Esm2Preprocessor()
     assert pre.preprocess("acduzob") == "ACDXXXX"
+
+
+def test_esm2_native_tokenizer_moves_tokens_and_lens_to_device() -> None:
+    def _convert(data: Any) -> Any:
+        _ = data
+        return (["query"], ["ACDE"], _FakeTensor([[1, 2, 3, 4, 5, 1, 0]]))
+
+    tokenizer = Esm2TokenizerAdapter(
+        batch_converter=_convert,
+        padding_idx=0,
+        device="cuda:0",
+    )
+
+    result = tokenizer.tokenize_many(["ACDE"])
+
+    assert result["tokens"].device == "cuda:0"
+    assert result["lens"].device == "cuda:0"
 
 
 def test_esm2_generator_raises_dependency_error_when_esm_missing(
