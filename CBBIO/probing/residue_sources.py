@@ -377,6 +377,15 @@ def load_dbptm_benchmark_archive(
     if not path.exists():
         raise EmbeddingInputError(f"dbPTM benchmark archive does not exist: {path}.")
     examples: List[ResidueExample] = []
+    seen_ids: dict[str, int] = {}
+
+    def _unique_dbptm_id(base_id: str) -> str:
+        count = seen_ids.get(base_id, 0)
+        seen_ids[base_id] = count + 1
+        if count == 0:
+            return base_id
+        return f"{base_id}__dup{count + 1}"
+
     with tarfile.open(path, "r:gz") as archive:
         for member in archive.getmembers():
             if not member.isfile() or not member.name.lower().endswith((".fa", ".fasta", ".faa")):
@@ -390,9 +399,10 @@ def load_dbptm_benchmark_archive(
                 labels = [0] * len(sequence)
                 if label == 1:
                     labels[_center_index(sequence)] = 1
+                base_id = f"{Path(member.name).stem}:{record_id}"
                 examples.append(
                     ResidueExample(
-                        id=f"{Path(member.name).stem}:{record_id}",
+                        id=_unique_dbptm_id(base_id),
                         sequence=sequence,
                         labels={target: labels},
                         split=split,
