@@ -496,6 +496,19 @@ def test_iterable_batcher_limit_applies_first_accepted_records() -> None:
     assert [[record.id for record in batch] for batch in batches] == [["P0", "P1", "P2"]]
 
 
+def test_iterable_batcher_can_sort_by_length_window() -> None:
+    records = [
+        GenerationInput(id="P0", sequence="A"),
+        GenerationInput(id="P1", sequence="AAAAA"),
+        GenerationInput(id="P2", sequence="AAA"),
+        GenerationInput(id="P3", sequence="AA"),
+    ]
+
+    batches = list(IterableBatcher(records, batch_size=10, length_sort_window=3))
+
+    assert [[record.id for record in batch] for batch in batches] == [["P1", "P2", "P0", "P3"]]
+
+
 @pytest.mark.skipif("Bio" not in sys.modules and __import__("importlib").util.find_spec("Bio") is None, reason="Biopython not installed")
 def test_fasta_batcher_defaults_to_singletons(tmp_path: Path) -> None:
     fasta_path = tmp_path / "input.fasta"

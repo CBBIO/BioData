@@ -197,6 +197,7 @@ class IterableBatcher:
         batch_size: int | None = None,
         max_batch_tokens: int | None = None,
         limit: int | None = None,
+        length_sort_window: int | None = None,
         max_sequence_length: int | None = None,
         skipped_path: str | Path | None = None,
         token_estimator: Callable[[GenerationInput], int] | None = None,
@@ -205,6 +206,7 @@ class IterableBatcher:
         self.batch_size = _validate_optional_positive("batch_size", batch_size)
         self.max_batch_tokens = _validate_optional_positive("max_batch_tokens", max_batch_tokens)
         self.limit = _validate_optional_positive("limit", limit)
+        self.length_sort_window = _validate_optional_positive("length_sort_window", length_sort_window)
         self.max_sequence_length = _validate_optional_positive("max_sequence_length", max_sequence_length)
         self.skipped_path = Path(skipped_path) if skipped_path is not None else None
         self.token_estimator = token_estimator
@@ -217,6 +219,7 @@ class IterableBatcher:
         writer = _SkippedTsvWriter(self.skipped_path) if self.skipped_path is not None else None
         try:
             records = self._iter_accepted_records(writer.write if writer is not None else None)
+            records = _iter_length_sorted_windows(records, window_size=self.length_sort_window)
             records = _limit_records(records, self.limit)
             yield from _batch_records(
                 records,
