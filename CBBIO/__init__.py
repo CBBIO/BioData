@@ -75,6 +75,7 @@ from .embeddings.io import (
     generate_fasta_npy_shards,
     generate_fasta_pickle_shards,
     load_embedding_records,
+    load_embedding_records_h5,
     load_embedding_records_npy,
     load_embedding_records_pickle,
     mean_pool_embedding_record,

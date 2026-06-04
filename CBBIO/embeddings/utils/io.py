@@ -24,7 +24,7 @@ from .. import (
     as_float_vector,
 )
 from .pooler import mean_pool_embedding_record
-from .writer import _H5EmbeddingWriter  # pyright: ignore[reportPrivateUsage]
+from .writer import _H5EmbeddingWriter, _normalize_embedding_record  # pyright: ignore[reportPrivateUsage]
 
 
 def _warn_deprecated(name: str, replacement: str) -> None:
@@ -58,6 +58,8 @@ def load_embedding_records(
             layer_index=layer_index,
             ids=ids,
         )
+    if suffix in {".h5", ".hdf5"}:
+        return load_embedding_records_h5(file_path)
     raise EmbeddingInputError(f"Unsupported embedding file extension: {suffix!r}")
 
 
@@ -392,8 +394,8 @@ def save_embedding_records_h5(
     append: bool = False,
     compression: str | None = "gzip",
 ) -> H5WriteResult:
-    """Write or append vector embeddings to one extendable HDF5 file."""
-    normalized = _normalize_embedding_records(records)
+    """Write or append vector/matrix embeddings to one extendable HDF5 file."""
+    normalized = [_normalize_embedding_record(record) for record in records]
     if not normalized:
         raise EmbeddingInputError("Cannot save empty embedding record list to HDF5.")
 
@@ -417,6 +419,122 @@ def load_embedding_records_pickle(
     with file_path.open("rb") as handle:
         payload = pickle.load(handle)
     return _records_from_payload(payload, model_reference=model_reference, layer_index=layer_index)
+
+
+def load_embedding_records_h5(path: str | Path) -> List[EmbeddingRecord]:
+    """Load embedding records from HDF5 files with vector, matrix, or mixed payloads."""
+    try:
+        import h5py  # type: ignore
+    except ModuleNotFoundError as exc:
+        raise EmbeddingDependencyError(
+            "h5py is required for HDF5 loading. Install with: pip install h5py"
+        ) from exc
+
+    file_path = Path(path)
+    with h5py.File(file_path, "r") as handle:
+        if "ids" not in handle:
+            raise EmbeddingInputError("HDF5 file is missing required dataset 'ids'.")
+        ids = handle["ids"].asstr()[:].tolist()
+        total = len(ids)
+        if total == 0:
+            return []
+
+        if "layer_index" not in handle or "model_reference" not in handle:
+            raise EmbeddingInputError("HDF5 file is missing required datasets 'layer_index' or 'model_reference'.")
+
+        layer_values = [int(value) for value in handle["layer_index"][:].tolist()]
+        model_values = handle["model_reference"].asstr()[:].tolist()
+        if len(layer_values) != total or len(model_values) != total:
+            raise EmbeddingInputError("HDF5 index datasets are inconsistent in length.")
+
+        if "payload_kind" not in handle:
+            if "embeddings" not in handle:
+                raise EmbeddingInputError("HDF5 file is missing required dataset 'embeddings'.")
+            embeddings = handle["embeddings"]
+            if int(embeddings.shape[0]) != total:
+                raise EmbeddingInputError("HDF5 ids and embeddings lengths do not match.")
+            return [
+                EmbeddingRecord(
+                    id=ids[index],
+                    embedding=as_float_vector(embeddings[index].tolist()),
+                    layer_index=layer_values[index],
+                    model_reference=model_values[index],
+                    shape=(len(as_float_vector(embeddings[index].tolist())),),
+                    metadata=None,
+                )
+                for index in range(total)
+            ]
+
+        payload_kinds = handle["payload_kind"].asstr()[:].tolist()
+        if len(payload_kinds) != total:
+            raise EmbeddingInputError("HDF5 payload_kind index length mismatch.")
+
+        vector_index = handle["vector_index"][:].tolist() if "vector_index" in handle else list(range(total))
+        matrix_index = handle["matrix_index"][:].tolist() if "matrix_index" in handle else [-1] * total
+        embeddings = handle["embeddings"] if "embeddings" in handle else None
+        matrix_values = handle["matrix_values"] if "matrix_values" in handle else None
+        matrix_offsets = handle["matrix_offsets"][:] if "matrix_offsets" in handle else None
+        matrix_rows = handle["matrix_rows"][:] if "matrix_rows" in handle else None
+        matrix_cols = handle["matrix_cols"][:] if "matrix_cols" in handle else None
+
+        records: List[EmbeddingRecord] = []
+        for index in range(total):
+            kind = str(payload_kinds[index]).strip().lower()
+            if kind == "vector":
+                if embeddings is None:
+                    raise EmbeddingInputError("HDF5 vector payload requested but 'embeddings' dataset is missing.")
+                row_index = int(vector_index[index])
+                if row_index < 0 or row_index >= int(embeddings.shape[0]):
+                    raise EmbeddingInputError(f"Invalid vector_index {row_index} for record {index}.")
+                vector = as_float_vector(embeddings[row_index].tolist())
+                records.append(
+                    EmbeddingRecord(
+                        id=ids[index],
+                        embedding=vector,
+                        layer_index=layer_values[index],
+                        model_reference=model_values[index],
+                        shape=(len(vector),),
+                        metadata=None,
+                    )
+                )
+                continue
+
+            if kind == "matrix":
+                if (
+                    matrix_values is None
+                    or matrix_offsets is None
+                    or matrix_rows is None
+                    or matrix_cols is None
+                ):
+                    raise EmbeddingInputError("HDF5 matrix payload requested but matrix datasets are missing.")
+                mat_index = int(matrix_index[index])
+                if mat_index < 0 or mat_index >= int(len(matrix_rows)):
+                    raise EmbeddingInputError(f"Invalid matrix_index {mat_index} for record {index}.")
+                start = int(matrix_offsets[mat_index])
+                end = int(matrix_offsets[mat_index + 1])
+                rows = int(matrix_rows[mat_index])
+                cols = int(matrix_cols[mat_index])
+                flat = as_float_vector(matrix_values[start:end].tolist())
+                if len(flat) != rows * cols:
+                    raise EmbeddingInputError(
+                        f"Matrix payload length mismatch for record {index}: expected {rows * cols}, got {len(flat)}."
+                    )
+                matrix = [flat[row * cols : (row + 1) * cols] for row in range(rows)]
+                records.append(
+                    EmbeddingRecord(
+                        id=ids[index],
+                        embedding=matrix,
+                        layer_index=layer_values[index],
+                        model_reference=model_values[index],
+                        shape=(rows, cols),
+                        metadata=None,
+                    )
+                )
+                continue
+
+            raise EmbeddingInputError(f"Unsupported payload_kind {kind!r} at record index {index}.")
+
+        return records
 
 
 def load_embedding_records_npy(
@@ -693,6 +811,7 @@ def _int_or_default(value: object, *, default: int) -> int:
 __all__ = [
     "load_embedding_records",
     "load_embedding_records_pickle",
+    "load_embedding_records_h5",
     "load_embedding_records_npy",
     "save_embedding_records_pickle",
     "save_embedding_records_pickle_shards",

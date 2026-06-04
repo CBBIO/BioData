@@ -40,6 +40,7 @@ from CBBIO import (
     generate_fasta_npy_shards,
     generate_fasta_pickle_shards,
     load_embedding_records,
+    load_embedding_records_h5,
     load_embedding_records_npy,
     load_embedding_records_pickle,
     mean_pool_embedding_record,
@@ -994,6 +995,88 @@ def test_save_embedding_records_h5_appends_records(tmp_path: Path) -> None:
         assert handle["embeddings"].shape == (2, 2)
         assert handle["embeddings"][1].tolist() == pytest.approx([3.0, 4.0])
         assert handle["ids"].asstr()[:].tolist() == ["R1", "R2"]
+
+
+def test_save_and_load_embedding_records_h5_vector_round_trip(tmp_path: Path) -> None:
+    h5py = pytest.importorskip("h5py")
+    records = [
+        EmbeddingRecord(id="R1", embedding=[1.0, 2.0], layer_index=0, model_reference="m", shape=(2,)),
+        EmbeddingRecord(id="R2", embedding=[3.0, 4.0], layer_index=1, model_reference="m", shape=(2,)),
+    ]
+    path = tmp_path / "vector.h5"
+
+    save_embedding_records_h5(path, records)
+    loaded = load_embedding_records_h5(path)
+
+    assert [record.id for record in loaded] == ["R1", "R2"]
+    assert [record.embedding for record in loaded] == [[1.0, 2.0], [3.0, 4.0]]
+    assert [record.shape for record in loaded] == [(2,), (2,)]
+    with h5py.File(path, "r") as handle:
+        assert handle.attrs["payload_kind"] == "vector"
+        assert handle["embeddings"].shape == (2, 2)
+
+
+def test_save_and_load_embedding_records_h5_matrix_round_trip(tmp_path: Path) -> None:
+    h5py = pytest.importorskip("h5py")
+    records = [
+        EmbeddingRecord(
+            id="M1",
+            embedding=[[1.0, 2.0], [3.0, 4.0]],
+            layer_index=0,
+            model_reference="m",
+            shape=(2, 2),
+        ),
+        EmbeddingRecord(
+            id="M2",
+            embedding=[[5.0, 6.0]],
+            layer_index=0,
+            model_reference="m",
+            shape=(1, 2),
+        ),
+    ]
+    path = tmp_path / "matrix.h5"
+
+    save_embedding_records_h5(path, records)
+    loaded = load_embedding_records_h5(path)
+
+    assert [record.id for record in loaded] == ["M1", "M2"]
+    assert loaded[0].embedding == [[1.0, 2.0], [3.0, 4.0]]
+    assert loaded[1].embedding == [[5.0, 6.0]]
+    assert [record.shape for record in loaded] == [(2, 2), (1, 2)]
+    with h5py.File(path, "r") as handle:
+        assert handle.attrs["payload_kind"] == "matrix"
+        assert handle["matrix_offsets"][:].tolist() == [0, 4, 6]
+
+
+def test_save_and_load_embedding_records_h5_mixed_round_trip(tmp_path: Path) -> None:
+    h5py = pytest.importorskip("h5py")
+    records = [
+        EmbeddingRecord(id="V1", embedding=[1.0, 2.0], layer_index=0, model_reference="m", shape=(2,)),
+        EmbeddingRecord(
+            id="M1",
+            embedding=[[7.0, 8.0], [9.0, 10.0]],
+            layer_index=0,
+            model_reference="m",
+            shape=(2, 2),
+        ),
+        EmbeddingRecord(id="V2", embedding=[3.0, 4.0], layer_index=1, model_reference="m", shape=(2,)),
+    ]
+    path = tmp_path / "mixed.h5"
+
+    save_embedding_records_h5(path, records)
+    loaded = load_embedding_records_h5(path)
+
+    assert [record.id for record in loaded] == ["V1", "M1", "V2"]
+    assert loaded[0].embedding == [1.0, 2.0]
+    assert loaded[1].embedding == [[7.0, 8.0], [9.0, 10.0]]
+    assert loaded[2].embedding == [3.0, 4.0]
+    with h5py.File(path, "r") as handle:
+        assert handle.attrs["payload_kind"] == "mixed"
+        assert handle["payload_kind"].asstr()[:].tolist() == ["vector", "matrix", "vector"]
+        assert handle["vector_index"][:].tolist() == [0, -1, 1]
+        assert handle["matrix_index"][:].tolist() == [-1, 0, -1]
+        assert handle["embeddings"].shape == (2, 2)
+        assert handle["matrix_offsets"][:].tolist() == [0, 4]
 
 
 @pytest.mark.skipif("Bio" not in sys.modules and __import__("importlib").util.find_spec("Bio") is None, reason="Biopython not installed")
