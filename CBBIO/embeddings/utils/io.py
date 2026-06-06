@@ -453,17 +453,17 @@ def load_embedding_records_h5(path: str | Path) -> List[EmbeddingRecord]:
             embeddings = handle["embeddings"]
             if int(embeddings.shape[0]) != total:
                 raise EmbeddingInputError("HDF5 ids and embeddings lengths do not match.")
-            return [
-                EmbeddingRecord(
+            def _vector_record(index: int) -> EmbeddingRecord:
+                vector = as_float_vector(embeddings[index])
+                return EmbeddingRecord(
                     id=ids[index],
-                    embedding=as_float_vector(embeddings[index].tolist()),
+                    embedding=vector,
                     layer_index=layer_values[index],
                     model_reference=model_values[index],
-                    shape=(len(as_float_vector(embeddings[index].tolist())),),
+                    shape=(len(vector),),
                     metadata=None,
                 )
-                for index in range(total)
-            ]
+            return [_vector_record(i) for i in range(total)]
 
         payload_kinds = handle["payload_kind"].asstr()[:].tolist()
         if len(payload_kinds) != total:
@@ -514,12 +514,12 @@ def load_embedding_records_h5(path: str | Path) -> List[EmbeddingRecord]:
                 end = int(matrix_offsets[mat_index + 1])
                 rows = int(matrix_rows[mat_index])
                 cols = int(matrix_cols[mat_index])
-                flat = as_float_vector(matrix_values[start:end].tolist())
-                if len(flat) != rows * cols:
+                value_count = end - start
+                if value_count != rows * cols:
                     raise EmbeddingInputError(
-                        f"Matrix payload length mismatch for record {index}: expected {rows * cols}, got {len(flat)}."
+                        f"Matrix payload length mismatch for record {index}: expected {rows * cols}, got {value_count}."
                     )
-                matrix = [flat[row * cols : (row + 1) * cols] for row in range(rows)]
+                matrix = _LazyH5Matrix(file_path, start=start, end=end, rows=rows, cols=cols)
                 records.append(
                     EmbeddingRecord(
                         id=ids[index],
@@ -535,6 +535,52 @@ def load_embedding_records_h5(path: str | Path) -> List[EmbeddingRecord]:
             raise EmbeddingInputError(f"Unsupported payload_kind {kind!r} at record index {index}.")
 
         return records
+
+
+class _LazyH5Matrix:
+    """Array-like HDF5 matrix payload that reads values only when materialized.
+
+    The first call to any accessor loads the full slice from HDF5 and caches it
+    as a float32 numpy array.  Subsequent calls return the cached array without
+    reopening the file, which avoids one file-open per training epoch when the
+    same protein appears in multiple probe batches.
+    """
+
+    def __init__(self, path: Path, *, start: int, end: int, rows: int, cols: int) -> None:
+        self.path = Path(path)
+        self.start = int(start)
+        self.end = int(end)
+        self.shape = (int(rows), int(cols))
+        self._cached: Any = None
+
+    def __len__(self) -> int:
+        return self.shape[0]
+
+    def __getitem__(self, index: int) -> Any:
+        return self._array()[index]
+
+    def __array__(self, dtype: Any = None) -> Any:
+        array = self._array()
+        if dtype is not None:
+            return array.astype(dtype, copy=False)
+        return array
+
+    def tolist(self) -> list[list[float]]:
+        return cast(list[list[float]], self._array().tolist())
+
+    def _array(self) -> Any:
+        if self._cached is not None:
+            return self._cached
+        try:
+            import h5py  # type: ignore
+        except ModuleNotFoundError as exc:
+            raise EmbeddingDependencyError(
+                "h5py is required for HDF5 loading. Install with: pip install h5py"
+            ) from exc
+        with h5py.File(self.path, "r") as handle:
+            flat = handle["matrix_values"][self.start:self.end]
+        self._cached = flat.astype("float32", copy=False).reshape(self.shape)
+        return self._cached
 
 
 def load_embedding_records_npy(

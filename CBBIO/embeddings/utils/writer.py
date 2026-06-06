@@ -61,24 +61,28 @@ class EmbeddingWriter:
             self._h5_writer = _H5EmbeddingWriter(cast(Path, self.path), compression=self.compression)
 
     def write(self, records: Sequence[EmbeddingRecord]) -> None:
-        normalized = [_normalize_embedding_record(record) for record in records]
-        if not normalized:
+        if not records:
             return
 
         if self.format == "memory":
+            normalized = [_normalize_embedding_record(record) for record in records]
             self.records.extend(normalized)
             self.record_count += len(normalized)
             return
 
         if self.format in {"pkl", "npy"}:
+            normalized = [_normalize_embedding_record(record) for record in records]
             self._pending.extend(normalized)
             while len(self._pending) >= self.records_per_shard:
                 self._write_pending_shard(self.records_per_shard)
             return
 
         if self.format == "h5":
+            # Normalization (tensor→list conversion) happens once inside
+            # _H5EmbeddingWriter.append; pre-normalizing here would copy every
+            # embedding matrix twice before it reaches the HDF5 dataset.
             assert self._h5_writer is not None
-            pending = list(normalized)
+            pending = list(records)
             while pending:
                 chunk = pending[: self.write_batch_size]
                 pending = pending[self.write_batch_size :]
@@ -287,6 +291,12 @@ class _H5EmbeddingWriter:
         self.handle: Any = h5py_module.File(self.path, "a" if append else "w")
         self.record_count = int(self.handle.attrs.get("record_count", 0))
 
+        # Track payload kinds via flags so _update_payload_kind_attr never has to
+        # load all "payload_kind" strings from the HDF5 dataset (O(N) per flush).
+        existing_kind = str(self.handle.attrs.get("payload_kind", "vector"))
+        self._has_vectors: bool = existing_kind in {"vector", "mixed"}
+        self._has_matrices: bool = existing_kind in {"matrix", "mixed"}
+
     def append(self, records: Sequence[EmbeddingRecord]) -> None:
         try:
             import numpy as np
@@ -314,6 +324,7 @@ class _H5EmbeddingWriter:
         return "payload_kind" not in self.handle
 
     def _append_legacy_vectors(self, records: Sequence[EmbeddingRecord], np: Any) -> None:
+        self._has_vectors = True
         matrix = np.array([list(record.embedding) for record in records], dtype=np.float32)
         ids = [record.id for record in records]
         layer_indices = np.array([int(record.layer_index) for record in records], dtype=np.int32)
@@ -361,6 +372,10 @@ class _H5EmbeddingWriter:
         self.handle.attrs["payload_schema_version"] = 1
 
     def _append_extended_payloads(self, records: Sequence[EmbeddingRecord], payload_kinds: Sequence[str], np: Any) -> None:
+        if any(k == "vector" for k in payload_kinds):
+            self._has_vectors = True
+        if any(k == "matrix" for k in payload_kinds):
+            self._has_matrices = True
         self._ensure_extended_schema(np)
 
         ids_ds = self.handle["ids"]
@@ -431,11 +446,11 @@ class _H5EmbeddingWriter:
                     raise EmbeddingInputError("Embedding matrix rows must have the same length.")
                 row_values.append(rows)
                 col_values.append(cols)
-                flat_row_major: List[float] = []
+                element_count = 0
                 for row in matrix:
-                    flat_row_major.extend(row)
-                flat_values.extend(flat_row_major)
-                cursor += len(flat_row_major)
+                    flat_values.extend(row)
+                    element_count += len(row)
+                cursor += element_count
                 new_offsets.append(cursor)
 
             new_matrix_count = old_matrix_count + len(matrix_records)
@@ -530,16 +545,13 @@ class _H5EmbeddingWriter:
         )
 
     def _update_payload_kind_attr(self) -> None:
-        if "payload_kind" not in self.handle:
-            self.handle.attrs["payload_kind"] = "vector"
-            return
-        values = set(self.handle["payload_kind"].asstr()[:].tolist())
-        if values == {"vector"}:
-            self.handle.attrs["payload_kind"] = "vector"
-        elif values == {"matrix"}:
-            self.handle.attrs["payload_kind"] = "matrix"
+        if self._has_vectors and self._has_matrices:
+            kind = "mixed"
+        elif self._has_matrices:
+            kind = "matrix"
         else:
-            self.handle.attrs["payload_kind"] = "mixed"
+            kind = "vector"
+        self.handle.attrs["payload_kind"] = kind
 
     def close(self) -> None:
         self.handle.close()
