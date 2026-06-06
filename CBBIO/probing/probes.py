@@ -47,8 +47,10 @@ def train_and_evaluate_probe(
         classes=prediction.classes,
     )
 
+    device = _probe_device(torch)
     torch.manual_seed(int(probe.seed))
     model = _build_probe_model(torch, probe=probe, input_dim=input_dim, output_dim=output_dim)
+    model = model.to(device)
     optimizer = torch.optim.Adam(
         model.parameters(),
         lr=float(probe.learning_rate),
@@ -58,8 +60,10 @@ def train_and_evaluate_probe(
 
     train_x = _tensor_for_ids(torch, train_ids, embeddings)
     feature_mean, feature_std = _feature_standardization_stats(torch, train_x)
-    train_x = _standardize_features(train_x, mean=feature_mean, std=feature_std)
-    train_y = _label_tensor(torch, [encoded_labels[item] for item in train_ids], prediction.objective)
+    feature_mean = feature_mean.to(device)
+    feature_std = feature_std.to(device)
+    train_x = _standardize_features(train_x.to(device), mean=feature_mean, std=feature_std)
+    train_y = _label_tensor(torch, [encoded_labels[item] for item in train_ids], prediction.objective).to(device)
     batch_size = int(probe.batch_size or len(train_ids))
 
     model.train()
@@ -75,8 +79,8 @@ def train_and_evaluate_probe(
             optimizer.step()
 
     model.eval()
-    with torch.no_grad():
-        test_x = _tensor_for_ids(torch, test_ids, embeddings)
+    with torch.inference_mode():
+        test_x = _tensor_for_ids(torch, test_ids, embeddings).to(device)
         test_x = _standardize_features(test_x, mean=feature_mean, std=feature_std)
         logits = model(test_x)
 
@@ -122,9 +126,11 @@ def train_and_evaluate_residue_probe(
     if test_count < 1:
         raise EmbeddingInputError("Residue-level probe requires at least one valid test residue.")
 
+    device = _probe_device(torch)
     torch.manual_seed(int(probe.seed))
     input_dim = _residue_input_dim(train_ids, embeddings=embeddings, masks=masks)
     model = _build_probe_model(torch, probe=probe, input_dim=input_dim, output_dim=output_dim)
+    model = model.to(device)
     optimizer = torch.optim.Adam(
         model.parameters(),
         lr=float(probe.learning_rate),
@@ -132,12 +138,15 @@ def train_and_evaluate_residue_probe(
     )
     loss_fn = _loss_fn(torch, prediction.objective)
 
+    # Stats are computed from CPU tensors (streaming from numpy); move to device after.
     feature_mean, feature_std = _residue_feature_standardization_stats(
         torch,
         train_ids,
         embeddings=embeddings,
         masks=masks,
     )
+    feature_mean = feature_mean.to(device)
+    feature_std = feature_std.to(device)
     batch_size = int(probe.batch_size or min(train_count, DEFAULT_RESIDUE_BATCH_SIZE))
 
     model.train()
@@ -149,8 +158,9 @@ def train_and_evaluate_residue_probe(
             masks=masks,
             batch_size=batch_size,
         ):
-            batch_x = _standardize_features(batch_x, mean=feature_mean, std=feature_std)
-            batch_y = _label_tensor(torch, [encoded_labels[item] for item in batch_label_ids], prediction.objective)
+            # Embeddings stay in CPU RAM; only one batch moves to VRAM at a time.
+            batch_x = _standardize_features(batch_x.to(device), mean=feature_mean, std=feature_std)
+            batch_y = _label_tensor(torch, [encoded_labels[item] for item in batch_label_ids], prediction.objective).to(device)
             optimizer.zero_grad()
             logits = model(batch_x)
             loss = _compute_loss(logits, batch_y, loss_fn, prediction.objective)
@@ -160,7 +170,7 @@ def train_and_evaluate_residue_probe(
     model.eval()
     test_logits = []
     test_label_ids: List[str] = []
-    with torch.no_grad():
+    with torch.inference_mode():
         for batch_x, batch_label_ids in _iter_residue_batches(
             torch,
             test_ids,
@@ -168,8 +178,9 @@ def train_and_evaluate_residue_probe(
             masks=masks,
             batch_size=batch_size,
         ):
-            batch_x = _standardize_features(batch_x, mean=feature_mean, std=feature_std)
-            test_logits.append(model(batch_x))
+            batch_x = _standardize_features(batch_x.to(device), mean=feature_mean, std=feature_std)
+            # Move logits to CPU immediately so test results don't accumulate on VRAM.
+            test_logits.append(model(batch_x).cpu())
             test_label_ids.extend(batch_label_ids)
 
     return _evaluate_outputs(
@@ -191,6 +202,14 @@ def _import_torch() -> Any:
         raise EmbeddingDependencyError(
             "PyTorch is required for probing. Install torch or run probes in an environment that provides it."
         ) from exc
+
+
+def _probe_device(torch: Any) -> Any:
+    cuda_available = getattr(torch, "cuda", None)
+    if cuda_available is not None and callable(getattr(cuda_available, "is_available", None)):
+        if cuda_available.is_available():
+            return torch.device("cuda")
+    return torch.device("cpu")
 
 
 def _validate_embeddings(ids: Sequence[str], embeddings: Mapping[str, Sequence[float]]) -> int:
