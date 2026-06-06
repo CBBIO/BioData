@@ -149,6 +149,11 @@ def train_and_evaluate_residue_probe(
     feature_std = feature_std.to(device)
     batch_size = int(probe.batch_size or min(train_count, DEFAULT_RESIDUE_BATCH_SIZE))
 
+    # Pre-allocate a pinned-memory buffer for fast async H2D transfers on CUDA.
+    # copy_() into pinned memory then non_blocking=True lets the DMA engine transfer
+    # batch K to the GPU while the CPU assembles batch K+1 from numpy, hiding H2D latency.
+    x_pin: Any = _try_alloc_pinned(torch, device, rows=batch_size, cols=input_dim)
+
     model.train()
     for _epoch in range(int(probe.epochs)):
         for batch_x, batch_label_ids in _iter_residue_batches(
@@ -159,10 +164,12 @@ def train_and_evaluate_residue_probe(
             batch_size=batch_size,
         ):
             # Embeddings stay in CPU RAM; only one batch moves to VRAM at a time.
-            batch_x = _standardize_features(batch_x.to(device), mean=feature_mean, std=feature_std)
+            batch_x_dev = _send_to_device(batch_x, device, x_pin)
+            # Build labels on CPU while the async H2D transfer of batch_x runs.
             batch_y = _label_tensor(torch, [encoded_labels[item] for item in batch_label_ids], prediction.objective).to(device)
+            batch_x_dev = _standardize_features(batch_x_dev, mean=feature_mean, std=feature_std)
             optimizer.zero_grad()
-            logits = model(batch_x)
+            logits = model(batch_x_dev)
             loss = _compute_loss(logits, batch_y, loss_fn, prediction.objective)
             loss.backward()
             optimizer.step()
@@ -178,9 +185,10 @@ def train_and_evaluate_residue_probe(
             masks=masks,
             batch_size=batch_size,
         ):
-            batch_x = _standardize_features(batch_x.to(device), mean=feature_mean, std=feature_std)
+            batch_x_dev = _send_to_device(batch_x, device, x_pin)
+            batch_x_dev = _standardize_features(batch_x_dev, mean=feature_mean, std=feature_std)
             # Move logits to CPU immediately so test results don't accumulate on VRAM.
-            test_logits.append(model(batch_x).cpu())
+            test_logits.append(model(batch_x_dev).cpu())
             test_label_ids.extend(batch_label_ids)
 
     return _evaluate_outputs(
@@ -210,6 +218,25 @@ def _probe_device(torch: Any) -> Any:
         if cuda_available.is_available():
             return torch.device("cuda")
     return torch.device("cpu")
+
+
+def _try_alloc_pinned(torch: Any, device: Any, *, rows: int, cols: int) -> Any:
+    """Return a pinned float32 buffer of shape (rows, cols), or None on failure/CPU."""
+    if getattr(device, "type", None) != "cuda":
+        return None
+    try:
+        return torch.empty(rows, cols, dtype=torch.float32).pin_memory()
+    except Exception:
+        return None
+
+
+def _send_to_device(batch_cpu: Any, device: Any, x_pin: Any) -> Any:
+    """Copy batch into pinned buffer and start an async H2D transfer, or fall back to blocking."""
+    if x_pin is None:
+        return batch_cpu.to(device)
+    bsz = int(batch_cpu.shape[0])
+    x_pin[:bsz].copy_(batch_cpu)
+    return x_pin[:bsz].to(device, non_blocking=True)
 
 
 def _validate_embeddings(ids: Sequence[str], embeddings: Mapping[str, Sequence[float]]) -> int:
