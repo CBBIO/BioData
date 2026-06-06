@@ -147,6 +147,7 @@ def test_prostt5_generate_returns_per_residue_matrix_without_pooling(
     fake_torch = types.SimpleNamespace(
         tensor=lambda values: _FakeTensor(values),
         no_grad=lambda: _FakeNoGrad(),
+        inference_mode=lambda: _FakeNoGrad(),
     )
     monkeypatch.setitem(sys.modules, "torch", fake_torch)
 
@@ -175,6 +176,7 @@ def test_prostt5_rejects_cls_pooler(
     fake_torch = types.SimpleNamespace(
         tensor=lambda values: _FakeTensor(values),
         no_grad=lambda: _FakeNoGrad(),
+        inference_mode=lambda: _FakeNoGrad(),
     )
     monkeypatch.setitem(sys.modules, "torch", fake_torch)
 
@@ -219,6 +221,7 @@ def test_prostt5_generator_available_layers_and_count(
     fake_torch = types.SimpleNamespace(
         tensor=lambda values: _FakeTensor(values),
         no_grad=lambda: _FakeNoGrad(),
+        inference_mode=lambda: _FakeNoGrad(),
     )
     monkeypatch.setitem(sys.modules, "torch", fake_torch)
 

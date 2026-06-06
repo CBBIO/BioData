@@ -293,9 +293,15 @@ class _H5EmbeddingWriter:
 
         # Track payload kinds via flags so _update_payload_kind_attr never has to
         # load all "payload_kind" strings from the HDF5 dataset (O(N) per flush).
-        existing_kind = str(self.handle.attrs.get("payload_kind", "vector"))
-        self._has_vectors: bool = existing_kind in {"vector", "mixed"}
-        self._has_matrices: bool = existing_kind in {"matrix", "mixed"}
+        # Only read the attr when it actually exists (append mode); a new file
+        # has no records yet so both flags start False.
+        if "payload_kind" in self.handle.attrs:
+            existing_kind = str(self.handle.attrs["payload_kind"])
+            self._has_vectors: bool = existing_kind in {"vector", "mixed"}
+            self._has_matrices: bool = existing_kind in {"matrix", "mixed"}
+        else:
+            self._has_vectors = False
+            self._has_matrices = False
 
     def append(self, records: Sequence[EmbeddingRecord]) -> None:
         try:

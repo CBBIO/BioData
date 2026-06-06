@@ -40,6 +40,9 @@ class _FakeTensor:
             return float(self.data)
         raise TypeError("not a scalar")
 
+    def to(self, device: Any) -> "_FakeTensor":
+        return self
+
     def tolist(self) -> Any:
         return self.data
 

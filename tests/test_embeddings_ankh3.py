@@ -148,6 +148,7 @@ def test_ankh3_generate_returns_per_residue_matrix_without_pooling(
 ) -> None:
     fake_torch = types.SimpleNamespace(
         no_grad=lambda: _FakeNoGrad(),
+        inference_mode=lambda: _FakeNoGrad(),
     )
     monkeypatch.setitem(sys.modules, "torch", fake_torch)
 
