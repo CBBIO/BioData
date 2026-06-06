@@ -122,7 +122,7 @@ class Esm2ModelAdapter(ModelAdapter):
         total = self._total_layers()
         requested = _resolve_layer_indices(layer_index, total_layers=total)
         if "tokens" in token_map and "lens" in token_map:
-            with torch.no_grad():
+            with torch.inference_mode():
                 out = self.model(token_map["tokens"], repr_layers=requested, return_contacts=False)
 
             reps = out.get("representations")
@@ -139,7 +139,7 @@ class Esm2ModelAdapter(ModelAdapter):
             return {"layers": layers, "sample_spans": _esm_sample_spans_from_lens(token_map["lens"])}
 
         if "input_ids" in token_map and "attention_mask" in token_map:
-            with torch.no_grad():
+            with torch.inference_mode():
                 out = self.model(
                     input_ids=token_map["input_ids"],
                     attention_mask=token_map["attention_mask"],

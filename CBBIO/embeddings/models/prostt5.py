@@ -146,7 +146,7 @@ class ProstT5ModelAdapter(ModelAdapter):
                 "PyTorch is required for ProstT5 inference. Install with: pip install torch"
             ) from exc
 
-        with torch.no_grad():
+        with torch.inference_mode():
             model_output = self.model(
                 input_ids=token_map["input_ids"],
                 attention_mask=token_map["attention_mask"],
