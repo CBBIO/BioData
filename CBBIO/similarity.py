@@ -142,9 +142,9 @@ def align_sequences(
             "Missing dependency 'parasail'. Install with: pip install parasail"
         ) from exc
 
-    if not seq1:
+    if not isinstance(seq1, str) or not seq1:
         raise InvalidSequenceError("seq1 must be a non-empty string.")
-    if not seq2:
+    if not isinstance(seq2, str) or not seq2:
         raise InvalidSequenceError("seq2 must be a non-empty string.")
 
     subst_matrix = getattr(_parasail, matrix, None)
