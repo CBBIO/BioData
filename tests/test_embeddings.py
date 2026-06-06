@@ -1040,8 +1040,8 @@ def test_save_and_load_embedding_records_h5_matrix_round_trip(tmp_path: Path) ->
     loaded = load_embedding_records_h5(path)
 
     assert [record.id for record in loaded] == ["M1", "M2"]
-    assert loaded[0].embedding == [[1.0, 2.0], [3.0, 4.0]]
-    assert loaded[1].embedding == [[5.0, 6.0]]
+    assert loaded[0].embedding.tolist() == [[1.0, 2.0], [3.0, 4.0]]
+    assert loaded[1].embedding.tolist() == [[5.0, 6.0]]
     assert [record.shape for record in loaded] == [(2, 2), (1, 2)]
     with h5py.File(path, "r") as handle:
         assert handle.attrs["payload_kind"] == "matrix"
@@ -1068,7 +1068,7 @@ def test_save_and_load_embedding_records_h5_mixed_round_trip(tmp_path: Path) -> 
 
     assert [record.id for record in loaded] == ["V1", "M1", "V2"]
     assert loaded[0].embedding == [1.0, 2.0]
-    assert loaded[1].embedding == [[7.0, 8.0], [9.0, 10.0]]
+    assert loaded[1].embedding.tolist() == [[7.0, 8.0], [9.0, 10.0]]
     assert loaded[2].embedding == [3.0, 4.0]
     with h5py.File(path, "r") as handle:
         assert handle.attrs["payload_kind"] == "mixed"
