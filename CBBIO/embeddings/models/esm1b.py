@@ -75,6 +75,7 @@ class Esm1bTokenizerAdapter(TokenizerAdapter):
             raise EmbeddingBackendError("ESM1b tokenizer adapter is missing batch converter configuration.")
         labeled = [(f"query_{index}", sequence) for index, sequence in enumerate(sequences)]
         _, _, tokens = cast(Tuple[Any, Any, Any], self.batch_converter(labeled))
+        tokens = tokens.to(self.device)
         lens = (tokens != self.padding_idx).sum(1)
         return {"tokens": tokens, "lens": lens}
 
@@ -108,7 +109,7 @@ class Esm1bModelAdapter(ModelAdapter):
         total = self._total_layers()
         requested = _resolve_layer_indices(layer_index, total_layers=total)
         if "tokens" in token_map and "lens" in token_map:
-            with torch.no_grad():
+            with torch.inference_mode():
                 out = self.model(token_map["tokens"], repr_layers=requested, return_contacts=False)
 
             reps = out.get("representations")
@@ -125,26 +126,26 @@ class Esm1bModelAdapter(ModelAdapter):
             return {"layers": layers, "sample_spans": _esm_sample_spans_from_lens(token_map["lens"])}
 
         if "input_ids" in token_map and "attention_mask" in token_map:
-            with torch.no_grad():
+            with torch.inference_mode():
                 out = self.model(
                     input_ids=token_map["input_ids"],
                     attention_mask=token_map["attention_mask"],
                     output_hidden_states=True,
                     return_dict=True,
                 )
-            hidden_states = getattr(out, "hidden_states", None)
-            if hidden_states is None:
-                raise EmbeddingBackendError("ESM1b HF output missing hidden_states.")
-            layers = {
-                idx: _maybe_normalize_hf_hidden_state(
-                    self.model,
-                    hidden_states[idx],
-                    layer_index=idx,
-                    total_layers=total,
-                    enabled=self.normalize_hf_hidden_states,
-                )
-                for idx in requested
-            }
+                hidden_states = getattr(out, "hidden_states", None)
+                if hidden_states is None:
+                    raise EmbeddingBackendError("ESM1b HF output missing hidden_states.")
+                layers = {
+                    idx: _maybe_normalize_hf_hidden_state(
+                        self.model,
+                        hidden_states[idx],
+                        layer_index=idx,
+                        total_layers=total,
+                        enabled=self.normalize_hf_hidden_states,
+                    )
+                    for idx in requested
+                }
             return {
                 "layers": layers,
                 "sample_spans": _esm_sample_spans_from_attention_mask(token_map["attention_mask"]),
