@@ -491,9 +491,13 @@ class EmbeddingGenerator:
             sample_count=len(prepared_records),
         )
 
-        for row_index, (_source_index, normalized, _prepared) in enumerate(prepared_records):
-            start, end = spans[row_index]
-            for layer_id, layer_tensor in sorted(layers_obj.items(), key=lambda item: int(item[0])):
+        # Iterate layers in the outer loop so we can release each GPU tensor
+        # immediately after all records for that layer are materialized, instead
+        # of holding every layer tensor alive until the full nested loop exits.
+        for layer_id in sorted(int(k) for k in layers_obj.keys()):
+            layer_tensor = layers_obj.pop(layer_id)
+            for row_index, (_source_index, normalized, _prepared) in enumerate(prepared_records):
+                start, end = spans[row_index]
                 if _is_cls_pooler(resolved_pooler):
                     sample_tensor = _slice_batched_cls_tensor(
                         layer_tensor,
@@ -517,12 +521,13 @@ class EmbeddingGenerator:
                     EmbeddingRecord(
                         id=normalized.id,
                         embedding=embedding,
-                        layer_index=int(layer_id),
+                        layer_index=layer_id,
                         model_reference=self.model_reference,
                         shape=shape,
                         metadata=normalized.metadata,
                     )
                 )
+            del layer_tensor  # allow CUDA allocator to reclaim this layer's memory
 
     def generate_batches(
         self,
@@ -889,6 +894,10 @@ def _as_float_matrix(value: object) -> List[List[float]]:
     tolist = getattr(value, "tolist", None)
     if callable(tolist):
         value = tolist()
+        # .tolist() on a 2-D tensor already produces list[list[float]]; return directly
+        # to avoid a second O(L*D) copy through the Python list comprehension below.
+        if isinstance(value, list) and value and isinstance(value[0], list):
+            return value  # type: ignore[return-value]
 
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
         raise EmbeddingBackendError("Embedding output must be a row-major sequence of numeric vectors.")
