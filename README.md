@@ -151,7 +151,7 @@ Detailed API reference: `docs/BioData.md`
 
 ### `CBBIO.GO`
 
-Main entrypoints:
+Main top-level `CBBIO` entrypoints:
 
 - `GOOntology`
 - `load_go`
@@ -242,6 +242,7 @@ Main entrypoints:
 - `iter_fasta_inputs`
 - `FastaBatcher` / `IterableBatcher`
 - `EmbeddingWriter(format="memory" | "pkl" | "npy" | "h5")`
+- `H5EmbeddingReader`
 - `run_embedding_generation(...)`
 - `Generator(...).generate(...)` / `Generator(...).generate_batches(...)`
 - `load_embedding_records` / `save_embedding_records_*`
@@ -250,8 +251,9 @@ Key capabilities:
 
 - Model-agnostic adapter interfaces (`PreprocessorAdapter`, `TokenizerAdapter`, `ModelAdapter`, `PostprocessorAdapter`)
 - Streaming FASTA and iterable batching for large sequence collections
-- Pooler-based output shaping (`pooler=None`, `pooler_factory("mean")`)
+- Pooler-based output shaping (`pooler=None`, `pooler_factory("none" | "mean" | "cls")`)
 - Memory, pickle shard, NumPy shard, and HDF5 job outputs
+- HDF5 reads by protein id, layer, pool method, and residue segment
 - Reproducibility metadata types (`ModelMetadata`, `RunMetadata`)
 
 Detailed API reference: `docs/Embeddings.md`

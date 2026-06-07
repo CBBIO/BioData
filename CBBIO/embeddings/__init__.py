@@ -285,7 +285,7 @@ class EmbeddingGenerator:
                     layer_index=resolved_layer_index,
                     model_reference=self.model_reference,
                     shape=(len(vector),),
-                    metadata=normalized.metadata,
+                    metadata=_metadata_with_pooler(normalized.metadata, resolved_pooler),
                 )
 
                 result.records.append(
@@ -346,7 +346,7 @@ class EmbeddingGenerator:
                             layer_index=int(layer_id),
                             model_reference=self.model_reference,
                             shape=shape,
-                            metadata=normalized.metadata,
+                            metadata=_metadata_with_pooler(normalized.metadata, resolved_pooler),
                         )
                     )
             except Exception as exc:
@@ -524,7 +524,7 @@ class EmbeddingGenerator:
                         layer_index=layer_id,
                         model_reference=self.model_reference,
                         shape=shape,
-                        metadata=normalized.metadata,
+                        metadata=_metadata_with_pooler(normalized.metadata, resolved_pooler),
                     )
                 )
             del layer_tensor  # allow CUDA allocator to reclaim this layer's memory
@@ -1039,6 +1039,21 @@ def _slice_batched_cls_tensor(
 
 def _is_cls_pooler(pooler: Any | None) -> bool:
     return str(getattr(pooler, "name", "")).strip().lower() in {"cls", "bos"}
+
+
+def _metadata_with_pooler(metadata: Dict[str, Any] | None, pooler: Any | None) -> Dict[str, Any] | None:
+    if pooler is None:
+        return metadata
+    pool_name = str(getattr(pooler, "name", "")).strip().lower()
+    if not pool_name:
+        return metadata
+    if pool_name == "identity":
+        pool_name = "none"
+    elif pool_name == "bos":
+        pool_name = "cls"
+    merged = dict(metadata) if metadata is not None else {}
+    merged.setdefault("pooling", pool_name)
+    return merged
 
 
 def _looks_like_batched_tensor(value: Any) -> bool:

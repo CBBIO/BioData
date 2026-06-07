@@ -1,12 +1,12 @@
 # CBBIO Embeddings
 
-`CBBIO.embeddings` provides model-agnostic protein embedding generation. Model-specific generators still expose the low-level `generate(...)` and `generate_batches(...)` methods, but new file and production workflows should use the job API:
+`CBBIO.embeddings` provides model-agnostic protein embedding generation. Use the job API for file-backed and production workflows: choose a generator, stream inputs through a batcher, shape the output with a pooler, and persist records with an `EmbeddingWriter`.
 
 ```python
-from CBBIO.embeddings import (
+from CBBIO import (
+    EmbeddingWriter,
     FastaBatcher,
     Generator,
-    EmbeddingWriter,
     pooler_factory,
     run_embedding_generation,
 )
@@ -16,28 +16,212 @@ batcher = FastaBatcher(
     "proteins.fasta",
     batch_size=None,
     max_batch_tokens=32768,
-    limit=1000,
     length_sort_window=1000,
     max_sequence_length=4000,
     skipped_path="skipped.tsv",
 )
-writer = EmbeddingWriter(
-    format="npy",
-    path="embeddings.npy",
-    records_per_shard=10000,
-)
+writer = EmbeddingWriter(format="h5", path="embeddings.h5", write_batch_size=128)
 
 result = run_embedding_generation(
     generator,
     batcher,
     writer,
-    layer_index=0,
-    pooler=pooler_factory("mean"),
+    layer_index=[0, 12, 24],
+    pooler=None,
     fail_fast=False,
 )
 ```
 
-## Job API
+For large residue-level stores, prefer HDF5 (`format="h5"`). It supports vector and matrix payloads, multiple layers per protein, multiple pool methods per protein/layer, and indexed partial reads.
+
+## Main Workflows
+
+### Generate from FASTA
+
+```python
+from CBBIO import EmbeddingWriter, FastaBatcher, Generator, run_embedding_generation
+
+generator = Generator(model_class="esm2", name="esm2_t33_650M_UR50D", device="cuda:0")
+batcher = FastaBatcher(
+    "proteins.fasta",
+    batch_size=None,
+    max_batch_tokens=32768,
+    max_sequence_length=4000,
+)
+writer = EmbeddingWriter(format="h5", path="esm2_residue_layers.h5")
+
+run_embedding_generation(
+    generator,
+    batcher,
+    writer,
+    layer_index=[0, 16, 33],
+    pooler=None,
+    fail_fast=False,
+)
+```
+
+`FastaBatcher` streams records and can batch by record count, padded-token budget, or both. When no `max_sequence_length` is set, the runner emits an OOM-risk warning. The warning is stronger when `max_batch_tokens` is also unset.
+
+### Generate from In-Memory Records
+
+```python
+from CBBIO import EmbeddingWriter, GenerationInput, Generator, IterableBatcher, run_embedding_generation
+
+records = [
+    GenerationInput(id="P1", sequence="MTEYKLVVVG"),
+    GenerationInput(id="P2", sequence="GAGGVGKSAL"),
+]
+
+generator = Generator(model_class="protT5", device="cuda:0", dtype="float16")
+batcher = IterableBatcher(records, batch_size=16)
+writer = EmbeddingWriter(format="memory")
+
+result = run_embedding_generation(generator, batcher, writer, layer_index=0)
+memory_records = writer.records
+```
+
+### Choose Output Shape
+
+Poolers are run-level output-shaping configuration:
+
+```python
+from CBBIO import pooler_factory
+
+pooler_factory("mean")
+pooler_factory("none")
+pooler_factory("cls")
+```
+
+- `pooler=None`: keep the original model payload shape. Residue-level outputs are matrix payloads with shape `(n_residues, embedding_dim)`.
+- `pooler_factory("none")`: identity/no pooling. This is equivalent to an unpooled residue matrix when the backend returns residue embeddings.
+- `pooler_factory("mean")`: mean-pool a residue matrix into one vector with shape `(embedding_dim,)`.
+- `pooler_factory("cls")`: use the model-specific CLS/BOS token path when supported.
+
+Generated pooled records carry `metadata["pooling"]`. H5 stores this as `pool_method`, so a raw residue matrix and pooled vectors can coexist for the same protein and layer. Pooling aliases are normalized: identity/no pooling maps to `none`, and `bos` maps to `cls`.
+
+## Writers and Formats
+
+One writer class handles all persistence targets:
+
+```python
+EmbeddingWriter(format="memory")
+EmbeddingWriter(format="pkl", path="embeddings.pkl", records_per_shard=10000, payload_format="records")
+EmbeddingWriter(format="npy", path="embeddings.npy", records_per_shard=10000)
+EmbeddingWriter(format="h5", path="embeddings.h5", compression="gzip", write_batch_size=128)
+```
+
+- `memory`: stores materialized `EmbeddingRecord` objects on `writer.records`.
+- `pkl`: writes numbered pickle shards.
+- `npy`: writes numbered `.npy` shards plus `.ids.txt` sidecars. Use this for same-width vector payloads.
+- `h5`: writes one extendable HDF5 file. Use this for large residue-level stores, mixed vector/matrix payloads, or partial reads.
+
+Format helpers remain available:
+
+```python
+from CBBIO import (
+    load_embedding_records,
+    load_embedding_records_h5,
+    load_embedding_records_npy,
+    load_embedding_records_pickle,
+    save_embedding_records_h5,
+    save_embedding_records_npy,
+    save_embedding_records_npy_shards,
+    save_embedding_records_pickle,
+    save_embedding_records_pickle_shards,
+)
+```
+
+`load_embedding_records(path)` dispatches by extension for `.pkl`, `.pickle`, `.npy`, `.npz`, `.h5`, and `.hdf5`.
+
+## H5 IO and Partial Reads
+
+H5 files store record indexes (`id`, `layer_index`, `model_reference`, payload kind, and `pool_method`) separately from the numeric payload. Matrix payloads are stored flat with offsets, so reading a residue segment can load only the requested rows.
+
+### Write Residue-Level Layers
+
+```python
+from CBBIO import EmbeddingWriter, FastaBatcher, Generator, run_embedding_generation
+
+generator = Generator(model_class="esm2", name="esm2_t33_650M_UR50D", device="cuda:0")
+batcher = FastaBatcher("proteins.fasta", max_batch_tokens=32768, max_sequence_length=4000)
+writer = EmbeddingWriter(format="h5", path="esm2_residue_layers.h5", compression="gzip")
+
+run_embedding_generation(
+    generator,
+    batcher,
+    writer,
+    layer_index=[0, 16, 33],
+    pooler=None,
+    fail_fast=False,
+)
+```
+
+### Read a Full Layer
+
+```python
+from CBBIO import load_embedding_records_h5
+
+layer_16 = load_embedding_records_h5(
+    "esm2_residue_layers.h5",
+    layer_index=16,
+    pool_method="none",
+)
+```
+
+### Read One Protein Across Several Layers
+
+```python
+from CBBIO import H5EmbeddingReader
+
+reader = H5EmbeddingReader("esm2_residue_layers.h5")
+protein_layers = reader.read_many(
+    ids="P12345",
+    layer_index=[0, 16, 33],
+    pool_method="none",
+)
+```
+
+### Read One Residue Segment
+
+```python
+segment = reader.read(
+    "P12345",
+    layer_index=16,
+    pool_method="none",
+    residue_slice=(100, 150),
+)
+
+matrix = segment.embedding
+```
+
+`residue_slice=(start, end)` follows Python slice semantics and is zero-based, end-exclusive. You can also pass `residue_start=100, residue_end=150`. Residue slicing is only valid for matrix payloads.
+
+### Store and Select Pooled Variants
+
+Generate residue matrices and pooled vectors separately, then append them into one H5 file when you need both lookup styles:
+
+```python
+from CBBIO import pooler_factory, save_embedding_records_h5
+
+residue_result = generator.generate(records, layer_index=16, pooler=None)
+mean_result = generator.generate(records, layer_index=16, pooler=pooler_factory("mean"))
+
+save_embedding_records_h5("esm2_layers.h5", residue_result.records)
+save_embedding_records_h5("esm2_layers.h5", mean_result.records, append=True)
+```
+
+Then select the variant explicitly:
+
+```python
+reader = H5EmbeddingReader("esm2_layers.h5")
+
+raw_residues = reader.read("P12345", layer_index=16, pool_method="none")
+mean_vector = reader.read("P12345", layer_index=16, pool_method="mean")
+```
+
+If more than one record matches `reader.read(...)`, it raises `EmbeddingInputError`. Add `layer_index` and/or `pool_method` to make the selection unique.
+
+## Job API Reference
 
 ### `Generator(...)`
 
@@ -55,8 +239,6 @@ Catalog helpers:
 - `available_generator_models(model_class=None)`
 
 ### `FastaBatcher(...)`
-
-Streams FASTA records and yields batches:
 
 ```python
 FastaBatcher(
@@ -78,46 +260,9 @@ Batching rules:
 - `max_batch_tokens=N`: token-budget batching.
 - both caps set: both constraints are enforced.
 - `length_sort_window=None`: no sorting.
-- `max_sequence_length=None`: no length filter.
-- `skipped_path=None`: skipped records are counted in memory only.
 - `limit` means the first N accepted records after filtering and optional window sorting.
 
-When no `max_sequence_length` is set, the job runner emits an OOM-risk warning. The warning is stronger when `max_batch_tokens` is also unset.
-
 ESM-C batching depends on the installed ESM SDK accepting multiple encoded proteins in one logits call. If your SDK version does not support that path, set `batch_size=1` for `model_class="esmc"`.
-
-### `IterableBatcher(...)`
-
-Use this for in-memory records:
-
-```python
-from CBBIO.embeddings import GenerationInput, IterableBatcher
-
-batcher = IterableBatcher(
-    [GenerationInput(id="P1", sequence="MTEYKLVVVG")],
-    batch_size=None,
-    max_batch_tokens=None,
-    limit=None,
-)
-```
-
-### `EmbeddingWriter(...)`
-
-One writer class handles all output formats:
-
-```python
-EmbeddingWriter(format="memory")
-EmbeddingWriter(format="pkl", path="embeddings.pkl", records_per_shard=10000, payload_format="records")
-EmbeddingWriter(format="npy", path="embeddings.npy", records_per_shard=10000)
-EmbeddingWriter(format="h5", path="embeddings.h5", compression="gzip", write_batch_size=128)
-```
-
-Formats:
-
-- `memory`: stores materialized `EmbeddingRecord` objects on `writer.records`.
-- `pkl`: writes numbered pickle shards.
-- `npy`: writes numbered `.npy` shards plus `.ids.txt` sidecars.
-- `h5`: writes one HDF5 file.
 
 ### `run_embedding_generation(...)`
 
@@ -135,23 +280,6 @@ run_embedding_generation(
 ```
 
 The runner requires a non-null batcher and writer. It recursively bisects a batch on CUDA OOM. A protein is recorded as OOM-causing only when it fails as a singleton.
-
-## Poolers
-
-Poolers are run-level configuration:
-
-```python
-from CBBIO.embeddings import pooler_factory
-
-pooler_factory("mean")
-pooler_factory("none")
-```
-
-- `pooler=None`: keep the original model payload shape.
-- `pooler_factory("mean")`: mean-pool `n_residues x embedding_dim` into `embedding_dim`.
-- `pooler_factory("none")`: identity/no pooling.
-
-The pooler receives the tensor-like residue payload before conversion to Python lists when the model backend exposes tensors.
 
 ## Low-Level API
 
@@ -172,18 +300,11 @@ generator.generate_batches(
 generator.iter_records(records, batch_size=512, layer_index=0)
 ```
 
-FASTA and persistence helpers also remain:
+FASTA helpers also remain:
 
 - `iter_fasta_inputs(path, id_from="record_id")`
 - `load_fasta_inputs(path, id_from="record_id")`
 - `batch_generation_inputs(records, batch_size=..., max_batch_tokens=None)`
-- `load_embedding_records(...)`
-- `load_embedding_records_pickle(...)`
-- `load_embedding_records_npy(...)`
-- `save_embedding_records_pickle(...)`
-- `save_embedding_records_npy(...)`
-- `save_embedding_records_npy_shards(...)`
-- `save_embedding_records_h5(...)`
 
 ## Core Types
 
@@ -244,7 +365,7 @@ These wrappers remain compatible but emit `DeprecationWarning` and will be remov
 | `generate_fasta_npy_shards(...)` | `FastaBatcher(...)` + `EmbeddingWriter(format="npy")` + `run_embedding_generation(...)` |
 | `generate_fasta_h5(...)` | `FastaBatcher(...)` + `EmbeddingWriter(format="h5")` + `run_embedding_generation(...)` |
 
-`generate_pooled(...)` and `generate_batches_pooled(...)` were experimental and are removed. Use `generate(..., pooler=...)` and `generate_batches(..., pooler=...)`.
+The old pooled-generation wrappers were experimental and have been removed. Use `generate(..., pooler=...)`, `generate_batches(..., pooler=...)`, or `run_embedding_generation(..., pooler=...)`.
 
 ## Exceptions
 

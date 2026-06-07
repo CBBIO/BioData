@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import pickle
+from collections.abc import Mapping as MappingABC
 from typing import Any, Dict, List, Literal, Sequence, Tuple, cast
 
 from .. import (
@@ -335,6 +336,7 @@ class _H5EmbeddingWriter:
         ids = [record.id for record in records]
         layer_indices = np.array([int(record.layer_index) for record in records], dtype=np.int32)
         model_refs = [record.model_reference for record in records]
+        pool_methods = [_pool_method_from_record(record, payload_kind="vector") for record in records]
 
         if "embeddings" not in self.handle:
             dim = int(matrix.shape[1])
@@ -355,6 +357,7 @@ class _H5EmbeddingWriter:
                 dtype=string_dtype,
                 chunks=True,
             )
+            self.handle.create_dataset("pool_method", data=pool_methods, maxshape=(None,), dtype=string_dtype, chunks=True)
             record_count = int(matrix.shape[0])
         else:
             embeddings = self.handle["embeddings"]
@@ -367,10 +370,13 @@ class _H5EmbeddingWriter:
             for dataset_name in ("embeddings", "ids", "layer_index", "model_reference"):
                 shape = (new_size, matrix.shape[1]) if dataset_name == "embeddings" else (new_size,)
                 self.handle[dataset_name].resize(shape)
+            self._ensure_pool_method_dataset(record_count=old_size)
+            self.handle["pool_method"].resize((new_size,))
             self.handle["embeddings"][old_size:new_size] = matrix
             self.handle["ids"][old_size:new_size] = ids
             self.handle["layer_index"][old_size:new_size] = layer_indices
             self.handle["model_reference"][old_size:new_size] = model_refs
+            self.handle["pool_method"][old_size:new_size] = pool_methods
             record_count = new_size
 
         self.handle.attrs["record_count"] = int(record_count)
@@ -390,11 +396,12 @@ class _H5EmbeddingWriter:
         payload_kind_ds = self.handle["payload_kind"]
         vector_index_ds = self.handle["vector_index"]
         matrix_index_ds = self.handle["matrix_index"]
+        pool_method_ds = self.handle["pool_method"]
 
         old_record_count = int(ids_ds.shape[0])
         add_count = len(records)
         new_record_count = old_record_count + add_count
-        for dataset in (ids_ds, layer_ds, model_ds, payload_kind_ds, vector_index_ds, matrix_index_ds):
+        for dataset in (ids_ds, layer_ds, model_ds, payload_kind_ds, vector_index_ds, matrix_index_ds, pool_method_ds):
             dataset.resize((new_record_count,))
 
         ids_ds[old_record_count:new_record_count] = [record.id for record in records]
@@ -403,6 +410,10 @@ class _H5EmbeddingWriter:
         payload_kind_ds[old_record_count:new_record_count] = list(payload_kinds)
         vector_index_ds[old_record_count:new_record_count] = np.full((add_count,), -1, dtype=np.int64)
         matrix_index_ds[old_record_count:new_record_count] = np.full((add_count,), -1, dtype=np.int64)
+        pool_method_ds[old_record_count:new_record_count] = [
+            _pool_method_from_record(record, payload_kind=payload_kinds[index])
+            for index, record in enumerate(records)
+        ]
 
         vector_records: List[List[float]] = []
         vector_positions: List[int] = []
@@ -496,6 +507,7 @@ class _H5EmbeddingWriter:
 
     def _ensure_extended_schema(self, np: Any) -> None:
         if "payload_kind" in self.handle:
+            self._ensure_pool_method_dataset(record_count=int(self.handle["ids"].shape[0]))
             return
 
         string_dtype = self._h5py.string_dtype(encoding="utf-8")
@@ -524,6 +536,7 @@ class _H5EmbeddingWriter:
             maxshape=(None,),
             chunks=True,
         )
+        self._ensure_pool_method_dataset(record_count=record_count)
         self.handle.create_dataset(
             "matrix_values",
             data=np.zeros((0,), dtype=np.float32),
@@ -559,8 +572,45 @@ class _H5EmbeddingWriter:
             kind = "vector"
         self.handle.attrs["payload_kind"] = kind
 
+    def _ensure_pool_method_dataset(self, *, record_count: int) -> None:
+        if "pool_method" in self.handle:
+            return
+        string_dtype = self._h5py.string_dtype(encoding="utf-8")
+        if "payload_kind" in self.handle:
+            pool_methods = [
+                "none" if str(kind).strip().lower() == "matrix" else "unknown"
+                for kind in self.handle["payload_kind"].asstr()[:].tolist()
+            ]
+        else:
+            default_kind = str(self.handle.attrs.get("payload_kind", "")).strip().lower()
+            default_pool = "none" if default_kind == "matrix" else "unknown"
+            pool_methods = [default_pool] * int(record_count)
+        self.handle.create_dataset(
+            "pool_method",
+            data=pool_methods,
+            maxshape=(None,),
+            dtype=string_dtype,
+            chunks=True,
+        )
+
     def close(self) -> None:
         self.handle.close()
+
+
+def _pool_method_from_record(record: EmbeddingRecord, *, payload_kind: str) -> str:
+    metadata = record.metadata
+    if isinstance(metadata, MappingABC):
+        for key in ("pool_method", "pooling", "pooler", "pool"):
+            value = metadata.get(key)
+            if value is not None:
+                normalized = str(value).strip().lower()
+                if normalized:
+                    if normalized == "identity":
+                        return "none"
+                    if normalized == "bos":
+                        return "cls"
+                    return normalized
+    return "none" if str(payload_kind).strip().lower() == "matrix" else "unknown"
 
 
 __all__ = ["EmbeddingWriter", "EmbeddingWriterFormat"]

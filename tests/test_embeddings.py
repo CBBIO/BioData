@@ -35,6 +35,7 @@ from CBBIO import (
     EmbeddingWriter,
     FastaBatcher,
     Generator,
+    H5EmbeddingReader,
     IterableBatcher,
     generate_fasta_h5,
     generate_fasta_npy_shards,
@@ -1040,8 +1041,8 @@ def test_save_and_load_embedding_records_h5_matrix_round_trip(tmp_path: Path) ->
     loaded = load_embedding_records_h5(path)
 
     assert [record.id for record in loaded] == ["M1", "M2"]
-    assert loaded[0].embedding.tolist() == [[1.0, 2.0], [3.0, 4.0]]
-    assert loaded[1].embedding.tolist() == [[5.0, 6.0]]
+    assert cast(Any, loaded[0].embedding).tolist() == [[1.0, 2.0], [3.0, 4.0]]
+    assert cast(Any, loaded[1].embedding).tolist() == [[5.0, 6.0]]
     assert [record.shape for record in loaded] == [(2, 2), (1, 2)]
     with h5py.File(path, "r") as handle:
         assert handle.attrs["payload_kind"] == "matrix"
@@ -1068,7 +1069,7 @@ def test_save_and_load_embedding_records_h5_mixed_round_trip(tmp_path: Path) -> 
 
     assert [record.id for record in loaded] == ["V1", "M1", "V2"]
     assert loaded[0].embedding == [1.0, 2.0]
-    assert loaded[1].embedding.tolist() == [[7.0, 8.0], [9.0, 10.0]]
+    assert cast(Any, loaded[1].embedding).tolist() == [[7.0, 8.0], [9.0, 10.0]]
     assert loaded[2].embedding == [3.0, 4.0]
     with h5py.File(path, "r") as handle:
         assert handle.attrs["payload_kind"] == "mixed"
@@ -1077,6 +1078,88 @@ def test_save_and_load_embedding_records_h5_mixed_round_trip(tmp_path: Path) -> 
         assert handle["matrix_index"][:].tolist() == [-1, 0, -1]
         assert handle["embeddings"].shape == (2, 2)
         assert handle["matrix_offsets"][:].tolist() == [0, 4]
+
+
+def test_load_embedding_records_h5_filters_and_slices_matrix_payloads(tmp_path: Path) -> None:
+    pytest.importorskip("h5py")
+    records = [
+        EmbeddingRecord(
+            id="P1",
+            embedding=[[1.0, 10.0], [2.0, 20.0], [3.0, 30.0], [4.0, 40.0]],
+            layer_index=0,
+            model_reference="m",
+            shape=(4, 2),
+        ),
+        EmbeddingRecord(
+            id="P1",
+            embedding=[[101.0, 1001.0], [102.0, 1002.0]],
+            layer_index=1,
+            model_reference="m",
+            shape=(2, 2),
+        ),
+        EmbeddingRecord(
+            id="P2",
+            embedding=[[5.0, 50.0]],
+            layer_index=0,
+            model_reference="m",
+            shape=(1, 2),
+        ),
+    ]
+    path = tmp_path / "matrix_segments.h5"
+
+    save_embedding_records_h5(path, records)
+    loaded = load_embedding_records_h5(path, ids="P1", layer_index=0, residue_start=1, residue_end=3)
+
+    assert len(loaded) == 1
+    assert loaded[0].id == "P1"
+    assert loaded[0].layer_index == 0
+    assert loaded[0].shape == (2, 2)
+    assert cast(Any, loaded[0].embedding).tolist() == [[2.0, 20.0], [3.0, 30.0]]
+
+
+def test_h5_embedding_reader_selects_pool_method_for_same_id_and_layer(tmp_path: Path) -> None:
+    h5py = pytest.importorskip("h5py")
+    records = [
+        EmbeddingRecord(
+            id="P1",
+            embedding=[[1.0, 2.0], [3.0, 4.0]],
+            layer_index=0,
+            model_reference="m",
+            shape=(2, 2),
+            metadata={"pooling": "none"},
+        ),
+        EmbeddingRecord(
+            id="P1",
+            embedding=[2.0, 3.0],
+            layer_index=0,
+            model_reference="m",
+            shape=(2,),
+            metadata={"pooling": "mean"},
+        ),
+        EmbeddingRecord(
+            id="P1",
+            embedding=[1.0, 2.0],
+            layer_index=0,
+            model_reference="m",
+            shape=(2,),
+            metadata={"pooling": "cls"},
+        ),
+    ]
+    path = tmp_path / "pooled_variants.h5"
+
+    save_embedding_records_h5(path, records)
+    reader = H5EmbeddingReader(path)
+    mean_record = reader.read("P1", layer_index=0, pool_method="mean")
+    raw_record = reader.read("P1", layer_index=0, pool_method="none", residue_slice=(0, 1))
+
+    assert mean_record.embedding == [2.0, 3.0]
+    assert mean_record.metadata == {"pooling": "mean"}
+    assert raw_record.shape == (1, 2)
+    assert cast(Any, raw_record.embedding).tolist() == [[1.0, 2.0]]
+    with pytest.raises(EmbeddingInputError):
+        reader.read("P1", layer_index=0)
+    with h5py.File(path, "r") as handle:
+        assert handle["pool_method"].asstr()[:].tolist() == ["none", "mean", "cls"]
 
 
 @pytest.mark.skipif("Bio" not in sys.modules and __import__("importlib").util.find_spec("Bio") is None, reason="Biopython not installed")

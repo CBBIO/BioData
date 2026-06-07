@@ -71,6 +71,7 @@ from .embeddings import (
 from .embeddings.batcher import FastaBatcher, IterableBatcher
 from .embeddings.factory import Generator, available_generator_classes, available_generator_models
 from .embeddings.io import (
+    H5EmbeddingReader,
     generate_fasta_h5,
     generate_fasta_npy_shards,
     generate_fasta_pickle_shards,
@@ -427,6 +428,7 @@ __all__ = [
     "generate_from_fasta",
     "generate_from_fasta_batches",
     "generate_fasta_h5",
+    "H5EmbeddingReader",
     "generate_fasta_npy_shards",
     "generate_fasta_pickle_shards",
     "iter_fasta_inputs",
@@ -434,6 +436,7 @@ __all__ = [
     "load_embedding_records",
     "load_embedding_records_pickle",
     "load_embedding_records_npy",
+    "load_embedding_records_h5",
     "save_embedding_records_pickle",
     "save_embedding_records_pickle_shards",
     "save_embedding_records_npy",
