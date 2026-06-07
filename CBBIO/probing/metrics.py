@@ -44,12 +44,17 @@ def binary_metrics(y_true: Sequence[int], y_pred: Sequence[int], y_score: Sequen
 
 def multiclass_metrics(y_true: Sequence[int], y_pred: Sequence[int], *, class_count: int) -> Dict[str, float]:
     _require_same_non_empty_length(y_true, y_pred)
-    accuracy = sum(1 for true, pred in zip(y_true, y_pred) if int(true) == int(pred)) / float(len(y_true))
+    # Build confusion matrix in O(N) instead of the previous O(class_count × N) triple scan.
+    conf = [[0] * class_count for _ in range(class_count)]
+    for t, p in zip(y_true, y_pred):
+        conf[int(t)][int(p)] += 1
+    correct = sum(conf[c][c] for c in range(class_count))
+    accuracy = float(correct) / float(len(y_true))
     f1_values: List[float] = []
-    for class_index in range(class_count):
-        tp = sum(1 for true, pred in zip(y_true, y_pred) if int(true) == class_index and int(pred) == class_index)
-        fp = sum(1 for true, pred in zip(y_true, y_pred) if int(true) != class_index and int(pred) == class_index)
-        fn = sum(1 for true, pred in zip(y_true, y_pred) if int(true) == class_index and int(pred) != class_index)
+    for c in range(class_count):
+        tp = conf[c][c]
+        fp = sum(conf[r][c] for r in range(class_count)) - tp
+        fn = sum(conf[c][r] for r in range(class_count)) - tp
         precision = float(tp) / float(tp + fp) if tp + fp else 0.0
         recall = float(tp) / float(tp + fn) if tp + fn else 0.0
         f1_values.append(2.0 * precision * recall / (precision + recall) if precision + recall else 0.0)

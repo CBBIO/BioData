@@ -78,8 +78,30 @@ def resolve_pooler(pooler: PoolerInput) -> EmbeddingPooler | None:
 
 
 def materialize_embedding_payload(value: object) -> tuple[Sequence[float] | Sequence[Sequence[float]], tuple[int, ...]]:
+    import numpy as _np
+
     shape = getattr(value, "shape", None)
     if shape is not None:
+        try:
+            ndim = len(shape)
+            if ndim in {1, 2}:
+                # Fast path for tensor-like objects: avoid .tolist() which boxes every
+                # element as a Python float (~28 bytes each).  For residue matrices
+                # (L, D) this saves O(L*D) allocations — the dominant cost at large
+                # batch sizes.  Returns a numpy float32 array which satisfies the
+                # Sequence[float] | Sequence[Sequence[float]] contract and is accepted
+                # directly by np.array() in the notebook with zero extra copy.
+                detach = getattr(value, "detach", None)
+                if callable(detach):
+                    arr = detach().cpu().float().numpy()
+                    return arr, tuple(int(d) for d in arr.shape)
+                # numpy arrays: ensure float32, return as-is
+                to_numpy = getattr(value, "__array__", None)
+                if callable(to_numpy):
+                    arr = _np.asarray(value, dtype=_np.float32)
+                    return arr, tuple(int(d) for d in arr.shape)
+        except (TypeError, RuntimeError, AttributeError):
+            pass
         try:
             if len(shape) == 1:
                 vector = as_float_vector(value)

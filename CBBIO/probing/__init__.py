@@ -45,7 +45,7 @@ from .peer import (
     list_residue_dataset_catalog,
     load_peer_dataset,
 )
-from .probes import ProbeEvaluation, train_and_evaluate_probe, train_and_evaluate_residue_probe
+from .probes import ProbeEvaluation, ResidueDataFlat, compute_residue_feature_stats, compute_residue_flat_data, train_and_evaluate_probe, train_and_evaluate_residue_probe
 from .residue_sources import (
     DBPTM_BENCHMARKS,
     DISPROT_CURRENT_TSV_URL,
@@ -146,6 +146,9 @@ __all__ = [
     "load_residue_label_table",
     "load_residue_label_csv",
     "load_residue_source_dataset",
+    "compute_residue_feature_stats",
+    "compute_residue_flat_data",
+    "ResidueDataFlat",
     "run_task_on_layer",
     "search_dataset_catalog",
     "train_and_evaluate_probe",

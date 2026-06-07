@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 import time
-from typing import Dict, cast
+from typing import Any, Dict, cast
 
 from CBBIO.embeddings import EmbeddingInputError
 
@@ -33,6 +33,9 @@ def run_task_on_layer(
     embeddings: Mapping[str, Sequence[float] | Sequence[Sequence[float]]],
     model_reference: str = "precomputed",
     layer_index: int = 0,
+    feature_mean: Any = None,
+    feature_std: Any = None,
+    flat_data: Any = None,
 ) -> TaskLayerResult:
     """Train and evaluate one task against one model/layer embedding matrix."""
 
@@ -64,6 +67,9 @@ def run_task_on_layer(
             masks=masks,
             prediction=task.prediction,
             probe=task.probe,
+            feature_mean=feature_mean,
+            feature_std=feature_std,
+            flat_data=flat_data,
         )
     else:
         raise EmbeddingInputError(f"Unsupported task level: {task.prediction.level!r}.")

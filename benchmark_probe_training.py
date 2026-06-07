@@ -5,11 +5,11 @@ Simulates the ESM2-3B secondary_structure scenario:
   - 3-class multiclass probe (H/E/C secondary structure)
   - batch_size 8192, 5 epochs
 
-Measures wall time for three variants:
-  1. CPU only      — baseline
-  2. GPU blocking  — batch_x.to("cuda")  (pageable → staging → DMA, blocks CPU)
-  3. GPU pinned    — copy to pre-alloc pinned buf, then non_blocking=True
-                     (direct DMA, CPU freed immediately to assemble next batch)
+Sections
+--------
+1. H2D transfer variants (CPU / GPU blocking / GPU pinned)
+2. P1 — feature-stats caching: once-per-layer vs once-per-(seed,layer)
+3. P2 — multiclass_metrics: O(N) confusion matrix vs O(class_count × N) triple scan
 
 Run with:
     python benchmark_probe_training.py
@@ -225,6 +225,115 @@ def run_benchmark(
     return wall_total_ms / 1000.0
 
 
+def _benchmark_feature_stats_caching(
+    ids: List[str],
+    embeddings: Dict[str, np.ndarray],
+    *,
+    n_layers: int = 37,
+    n_seeds: int = 3,
+    n_warmup: int = 2,
+) -> None:
+    """P1: compare one stats pass per (seed,layer) vs one pass per layer."""
+    print(f"\n{'═' * 60}")
+    print("  P1 — Feature stats caching")
+    print(f"       {n_layers} layers × {n_seeds} seeds  →  {n_layers * n_seeds} vs {n_layers} passes")
+    print(f"{'═' * 60}")
+
+    train_ids = ids[: int(len(ids) * 0.8)]
+
+    def _one_stats_pass() -> None:
+        feat_sum = torch.zeros(1, HIDDEN_DIM)
+        feat_sumsq = torch.zeros(1, HIDDEN_DIM)
+        n = 0
+        for batch in _iter_batches(train_ids, embeddings, BATCH_SIZE):
+            feat_sum += batch.sum(dim=0, keepdim=True)
+            feat_sumsq += (batch * batch).sum(dim=0, keepdim=True)
+            n += batch.shape[0]
+        _ = feat_sum / n
+        _ = torch.clamp(torch.sqrt(torch.clamp(feat_sumsq / n - (feat_sum / n) ** 2, min=0.0)), min=1e-6)
+
+    for _ in range(n_warmup):
+        _one_stats_pass()
+
+    t0 = time.perf_counter()
+    for _ in range(n_layers * n_seeds):
+        _one_stats_pass()
+    uncached_s = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
+    for _ in range(n_layers):
+        _one_stats_pass()
+    cached_s = time.perf_counter() - t0
+
+    train_residues = sum(embeddings[pid].shape[0] for pid in train_ids)
+    print(f"  Train residues:      {train_residues:,}")
+    print(f"  Without caching:     {uncached_s:.2f}s  ({n_layers * n_seeds} passes)")
+    print(f"  With caching:        {cached_s:.2f}s  ({n_layers} passes)")
+    print(f"  Speedup:             {uncached_s / cached_s:.2f}×  "
+          f"(saves {uncached_s - cached_s:.2f}s per sweep)")
+
+
+def _benchmark_multiclass_metrics(*, n_test_residues: int = 350_000, n_classes: int = 3) -> None:
+    """P2: O(N) confusion matrix vs O(class_count × N) triple scan."""
+    print(f"\n{'═' * 60}")
+    print("  P2 — multiclass_metrics O(N) vs O(class_count × N)")
+    print(f"       {n_test_residues:,} residues, {n_classes} classes")
+    print(f"{'═' * 60}")
+
+    rng = np.random.default_rng(SEED)
+    y_true = rng.integers(0, n_classes, size=n_test_residues).tolist()
+    y_pred = rng.integers(0, n_classes, size=n_test_residues).tolist()
+
+    def _old_triple_scan(y_true: list, y_pred: list, *, class_count: int) -> Dict[str, float]:
+        correct = sum(t == p for t, p in zip(y_true, y_pred))
+        accuracy = float(correct) / float(len(y_true))
+        f1_values = []
+        for c in range(class_count):
+            tp = sum(1 for t, p in zip(y_true, y_pred) if t == c and p == c)
+            fp = sum(1 for t, p in zip(y_true, y_pred) if t != c and p == c)
+            fn = sum(1 for t, p in zip(y_true, y_pred) if t == c and p != c)
+            precision = float(tp) / float(tp + fp) if tp + fp else 0.0
+            recall = float(tp) / float(tp + fn) if tp + fn else 0.0
+            f1_values.append(2.0 * precision * recall / (precision + recall) if precision + recall else 0.0)
+        return {"accuracy": accuracy, "macro_f1": sum(f1_values) / float(len(f1_values))}
+
+    def _new_single_pass(y_true: list, y_pred: list, *, class_count: int) -> Dict[str, float]:
+        conf = [[0] * class_count for _ in range(class_count)]
+        for t, p in zip(y_true, y_pred):
+            conf[int(t)][int(p)] += 1
+        correct = sum(conf[c][c] for c in range(class_count))
+        accuracy = float(correct) / float(len(y_true))
+        f1_values = []
+        for c in range(class_count):
+            tp = conf[c][c]
+            fp = sum(conf[r][c] for r in range(class_count)) - tp
+            fn = sum(conf[c][r] for r in range(class_count)) - tp
+            precision = float(tp) / float(tp + fp) if tp + fp else 0.0
+            recall = float(tp) / float(tp + fn) if tp + fn else 0.0
+            f1_values.append(2.0 * precision * recall / (precision + recall) if precision + recall else 0.0)
+        return {"accuracy": accuracy, "macro_f1": sum(f1_values) / float(len(f1_values))}
+
+    # warmup
+    _old_triple_scan(y_true[:1000], y_pred[:1000], class_count=n_classes)
+    _new_single_pass(y_true[:1000], y_pred[:1000], class_count=n_classes)
+
+    t0 = time.perf_counter()
+    old_result = _old_triple_scan(y_true, y_pred, class_count=n_classes)
+    old_s = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
+    new_result = _new_single_pass(y_true, y_pred, class_count=n_classes)
+    new_s = time.perf_counter() - t0
+
+    assert abs(old_result["accuracy"] - new_result["accuracy"]) < 1e-9, "accuracy mismatch"
+    assert abs(old_result["macro_f1"] - new_result["macro_f1"]) < 1e-9, "macro_f1 mismatch"
+
+    print(f"  Old O(class × N):    {old_s * 1000:.1f}ms")
+    print(f"  New O(N):            {new_s * 1000:.1f}ms")
+    print(f"  Speedup:             {old_s / new_s:.2f}×")
+    print(f"  Results match:       accuracy={new_result['accuracy']:.4f}  macro_f1={new_result['macro_f1']:.4f}")
+
+
 def main() -> None:
     print(f"PyTorch {torch.__version__}")
     print(f"CUDA available: {torch.cuda.is_available()}")
@@ -255,23 +364,25 @@ def main() -> None:
 
     if not torch.cuda.is_available():
         print("No CUDA device — skipping GPU benchmarks.")
-        return
+    else:
+        gpu_blocking_s = run_benchmark(
+            torch.device("cuda"), "GPU  —  blocking H2D (pageable memory)", ids, embeddings, use_pinned=False
+        )
+        gpu_pinned_s = run_benchmark(
+            torch.device("cuda"), "GPU  —  pinned memory + non_blocking H2D", ids, embeddings, use_pinned=True
+        )
 
-    gpu_blocking_s = run_benchmark(
-        torch.device("cuda"), "GPU  —  blocking H2D (pageable memory)", ids, embeddings, use_pinned=False
-    )
-    gpu_pinned_s = run_benchmark(
-        torch.device("cuda"), "GPU  —  pinned memory + non_blocking H2D", ids, embeddings, use_pinned=True
-    )
+        print("=" * 60)
+        print("  H2D Summary")
+        print("=" * 60)
+        print(f"  CPU baseline:            {cpu_s:.2f}s")
+        print(f"  GPU blocking H2D:        {gpu_blocking_s:.2f}s  ({cpu_s / gpu_blocking_s:.2f}× vs CPU)")
+        print(f"  GPU pinned non_blocking:  {gpu_pinned_s:.2f}s  ({cpu_s / gpu_pinned_s:.2f}× vs CPU, "
+              f"{gpu_blocking_s / gpu_pinned_s:.2f}× vs blocking)")
+        print()
 
-    print("=" * 60)
-    print("  Summary")
-    print("=" * 60)
-    print(f"  CPU baseline:           {cpu_s:.2f}s")
-    print(f"  GPU blocking H2D:       {gpu_blocking_s:.2f}s  ({cpu_s / gpu_blocking_s:.2f}× vs CPU)")
-    print(f"  GPU pinned non_blocking: {gpu_pinned_s:.2f}s  ({cpu_s / gpu_pinned_s:.2f}× vs CPU, "
-          f"{gpu_blocking_s / gpu_pinned_s:.2f}× vs blocking)")
-    print()
+    _benchmark_feature_stats_caching(ids, embeddings)
+    _benchmark_multiclass_metrics()
 
 
 if __name__ == "__main__":

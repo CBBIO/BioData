@@ -90,6 +90,9 @@ from .embeddings.pooler import EmbeddingPooler, IdentityPooler, MeanPooler, pool
 from .embeddings.writer import EmbeddingWriter
 from .probing import (
     DBPTM_BENCHMARKS,
+    compute_residue_feature_stats,
+    compute_residue_flat_data,
+    ResidueDataFlat,
     DATASET_CATALOG,
     DISPROT_CURRENT_TSV_URL,
     DTU_PROBING_CATALOG,
@@ -378,6 +381,9 @@ __all__ = [
     "IdentityPooler",
     "MeanPooler",
     "pooler_factory",
+    "compute_residue_feature_stats",
+    "compute_residue_flat_data",
+    "ResidueDataFlat",
     "run_task_on_layer",
     "search_dataset_catalog",
     "train_and_evaluate_probe",
