@@ -493,8 +493,15 @@ class H5EmbeddingReader:
         residue_start: int | None = None,
         residue_end: int | None = None,
         residue_slice: slice | tuple[int | None, int | None] | None = None,
+        eager: bool = True,
     ) -> List[EmbeddingRecord]:
-        """Read records matching optional id/layer filters."""
+        """Read records matching optional id/layer filters.
+
+        eager=True (default): reads all matrix values within a single open file
+        handle — avoids one h5py.File() open per record when iterating embeddings.
+        Set eager=False to get lazy _LazyH5Matrix wrappers instead (useful when
+        you only need a small fraction of a very large file).
+        """
         selected = _select_h5_record_indices(
             self._index,
             ids=ids,
@@ -508,6 +515,7 @@ class H5EmbeddingReader:
             residue_start=residue_start,
             residue_end=residue_end,
             residue_slice=residue_slice,
+            eager=eager,
         )
 
 
@@ -520,6 +528,7 @@ def load_embedding_records_h5(
     residue_start: int | None = None,
     residue_end: int | None = None,
     residue_slice: slice | tuple[int | None, int | None] | None = None,
+    eager: bool = True,
 ) -> List[EmbeddingRecord]:
     """Load embedding records from HDF5 files with optional id/layer/row filters."""
     try:
@@ -540,6 +549,7 @@ def load_embedding_records_h5(
         residue_start=residue_start,
         residue_end=residue_end,
         residue_slice=residue_slice,
+        eager=eager,
     )
 
 
@@ -552,19 +562,19 @@ def _read_h5_record_index(handle: Any) -> _H5RecordIndex:
     if "layer_index" not in handle or "model_reference" not in handle:
         raise EmbeddingInputError("HDF5 file is missing required datasets 'layer_index' or 'model_reference'.")
 
-    layer_values = [int(value) for value in handle["layer_index"][:].tolist()]
+    layer_values = handle["layer_index"][:].astype(int).tolist()
     model_values = handle["model_reference"].asstr()[:].tolist()
     if len(layer_values) != total or len(model_values) != total:
         raise EmbeddingInputError("HDF5 index datasets are inconsistent in length.")
 
     payload_kinds: List[str] | None = None
     if "payload_kind" in handle:
-        payload_kinds = [str(value).strip().lower() for value in handle["payload_kind"].asstr()[:].tolist()]
+        payload_kinds = [v.strip().lower() for v in handle["payload_kind"].asstr()[:].tolist()]
         if len(payload_kinds) != total:
             raise EmbeddingInputError("HDF5 payload_kind index length mismatch.")
 
     if "pool_method" in handle:
-        pool_methods = [_normalize_pool_method(value) for value in handle["pool_method"].asstr()[:].tolist()]
+        pool_methods = [_normalize_pool_method(v) for v in handle["pool_method"].asstr()[:].tolist()]
         if len(pool_methods) != total:
             raise EmbeddingInputError("HDF5 pool_method index length mismatch.")
     elif payload_kinds is None:
@@ -572,15 +582,15 @@ def _read_h5_record_index(handle: Any) -> _H5RecordIndex:
     else:
         pool_methods = ["none" if kind == "matrix" else "unknown" for kind in payload_kinds]
 
-    vector_index = [int(value) for value in handle["vector_index"][:].tolist()] if "vector_index" in handle else list(range(total))
-    matrix_index = [int(value) for value in handle["matrix_index"][:].tolist()] if "matrix_index" in handle else [-1] * total
+    vector_index = handle["vector_index"][:].astype(int).tolist() if "vector_index" in handle else list(range(total))
+    matrix_index = handle["matrix_index"][:].astype(int).tolist() if "matrix_index" in handle else [-1] * total
     if len(vector_index) != total or len(matrix_index) != total:
         raise EmbeddingInputError("HDF5 vector/matrix index datasets are inconsistent in length.")
 
     return _H5RecordIndex(
-        ids=[str(value) for value in ids],
+        ids=ids,
         layer_values=layer_values,
-        model_values=[str(value) for value in model_values],
+        model_values=model_values,
         pool_methods=pool_methods,
         payload_kinds=payload_kinds,
         vector_index=vector_index,
@@ -618,6 +628,7 @@ def _load_h5_records_by_index(
     residue_start: int | None,
     residue_end: int | None,
     residue_slice: slice | tuple[int | None, int | None] | None,
+    eager: bool = True,
 ) -> List[EmbeddingRecord]:
     if not selected:
         return []
@@ -633,7 +644,7 @@ def _load_h5_records_by_index(
             "h5py is required for HDF5 loading. Install with: pip install h5py"
         ) from exc
 
-    records: List[EmbeddingRecord] = []
+    result: Dict[int, EmbeddingRecord] = {}
     with h5py.File(file_path, "r") as handle:
         if record_index.payload_kinds is None:
             if row_start is not None or row_end is not None:
@@ -643,66 +654,145 @@ def _load_h5_records_by_index(
             embeddings = cast(Any, handle["embeddings"])
             if int(embeddings.shape[0]) != len(record_index.ids):
                 raise EmbeddingInputError("HDF5 ids and embeddings lengths do not match.")
-            for index in selected:
-                vector = as_float_vector(embeddings[index])
-                records.append(
-                    EmbeddingRecord(
-                        id=record_index.ids[index],
-                        embedding=vector,
-                        layer_index=record_index.layer_values[index],
-                        model_reference=record_index.model_values[index],
-                        shape=(len(vector),),
-                        metadata={"pooling": record_index.pool_methods[index]},
-                    )
+            # Bulk read: one contiguous HDF5 slice instead of one per vector
+            sorted_sel = sorted(selected)
+            bulk = embeddings[sorted_sel[0] : sorted_sel[-1] + 1].astype("float32", copy=False)
+            sel_set = {v: i for i, v in enumerate(sorted_sel)}
+            for pos, index in enumerate(selected):
+                row = bulk[sel_set[index]]
+                result[pos] = EmbeddingRecord(
+                    id=record_index.ids[index],
+                    embedding=as_float_vector(row.tolist()),
+                    layer_index=record_index.layer_values[index],
+                    model_reference=record_index.model_values[index],
+                    shape=(int(row.shape[0]),),
+                    metadata={"pooling": record_index.pool_methods[index]},
                 )
-            return records
+            return [result[pos] for pos in range(len(selected))]
 
         embeddings = cast(Any, handle["embeddings"]) if "embeddings" in handle else None
         matrix_offsets = cast(Any, handle["matrix_offsets"])[:] if "matrix_offsets" in handle else None
         matrix_rows = cast(Any, handle["matrix_rows"])[:] if "matrix_rows" in handle else None
         matrix_cols = cast(Any, handle["matrix_cols"])[:] if "matrix_cols" in handle else None
 
-        for index in selected:
+        # Separate vector and matrix records; use a positional dict to preserve order
+        # when emitting the final list (vectors and matrices are processed independently).
+        result: Dict[int, EmbeddingRecord] = {}   # position-in-selected → record
+        vector_selected: List[int] = []           # (position, record_index) pairs
+        matrix_selected: List[int] = []
+        for pos, index in enumerate(selected):
             kind = record_index.payload_kinds[index]
             if kind == "vector":
-                if row_start is not None or row_end is not None:
-                    raise EmbeddingInputError("Residue slicing is only supported for matrix HDF5 payloads.")
-                if embeddings is None:
-                    raise EmbeddingInputError("HDF5 vector payload requested but 'embeddings' dataset is missing.")
-                row_index = int(record_index.vector_index[index])
-                if row_index < 0 or row_index >= int(embeddings.shape[0]):
-                    raise EmbeddingInputError(f"Invalid vector_index {row_index} for record {index}.")
-                vector = as_float_vector(embeddings[row_index].tolist())
-                records.append(
-                    EmbeddingRecord(
+                vector_selected.append(pos)
+            elif kind == "matrix":
+                matrix_selected.append(pos)
+            else:
+                raise EmbeddingInputError(f"Unsupported payload_kind {kind!r} at record index {index}.")
+
+        for pos in vector_selected:
+            index = selected[pos]
+            if row_start is not None or row_end is not None:
+                raise EmbeddingInputError("Residue slicing is only supported for matrix HDF5 payloads.")
+            if embeddings is None:
+                raise EmbeddingInputError("HDF5 vector payload requested but 'embeddings' dataset is missing.")
+            row_index = int(record_index.vector_index[index])
+            if row_index < 0 or row_index >= int(embeddings.shape[0]):
+                raise EmbeddingInputError(f"Invalid vector_index {row_index} for record {index}.")
+            vector = as_float_vector(embeddings[row_index].tolist())
+            result[pos] = EmbeddingRecord(
+                id=record_index.ids[index],
+                embedding=vector,
+                layer_index=record_index.layer_values[index],
+                model_reference=record_index.model_values[index],
+                shape=(len(vector),),
+                metadata={"pooling": record_index.pool_methods[index]},
+            )
+
+        if matrix_selected:
+            if matrix_offsets is None or matrix_rows is None or matrix_cols is None:
+                raise EmbeddingInputError("HDF5 matrix payload requested but matrix datasets are missing.")
+
+            if eager:
+                # Group records by contiguous runs of matrix_index.
+                # In protein-major files (all layers per protein stored together) this
+                # collapses 24 individual reads per protein into 1 bulk read per protein,
+                # giving up to N_layers× fewer HDF5 I/O calls.
+                matrix_values_ds = cast(Any, handle["matrix_values"])
+
+                # Sort positions by matrix_index to form contiguous groups
+                sorted_pos = sorted(
+                    matrix_selected,
+                    key=lambda pos: int(record_index.matrix_index[selected[pos]]),
+                )
+
+                # Walk sorted list, emit one bulk HDF5 read per contiguous run
+                i = 0
+                mat_arrays: Dict[int, Any] = {}  # pos → numpy array
+                while i < len(sorted_pos):
+                    run = [sorted_pos[i]]
+                    first_mat_idx = int(record_index.matrix_index[selected[sorted_pos[i]]])
+                    j = i + 1
+                    while j < len(sorted_pos):
+                        next_mat_idx = int(record_index.matrix_index[selected[sorted_pos[j]]])
+                        if next_mat_idx == first_mat_idx + (j - i):
+                            run.append(sorted_pos[j])
+                            j += 1
+                        else:
+                            break
+
+                    first_mat = int(record_index.matrix_index[selected[run[0]]])
+                    last_mat = int(record_index.matrix_index[selected[run[-1]]])
+                    bulk_start = int(matrix_offsets[first_mat])
+                    bulk_end = int(matrix_offsets[last_mat + 1])
+                    bulk = matrix_values_ds[bulk_start:bulk_end].astype("float32", copy=False)
+
+                    for pos in run:
+                        index = selected[pos]
+                        mat_idx = int(record_index.matrix_index[index])
+                        local_start = int(matrix_offsets[mat_idx]) - bulk_start
+                        local_end = int(matrix_offsets[mat_idx + 1]) - bulk_start
+                        rows = int(matrix_rows[mat_idx])
+                        cols = int(matrix_cols[mat_idx])
+                        if local_end - local_start != rows * cols:
+                            raise EmbeddingInputError(
+                                f"Matrix payload length mismatch for record {index}."
+                            )
+                        start_row, end_row = _resolve_row_bounds(row_start, row_end, rows=rows)
+                        s = local_start + start_row * cols
+                        e = local_start + end_row * cols
+                        mat_arrays[pos] = bulk[s:e].reshape(end_row - start_row, cols)
+
+                    i = j
+
+                for pos in matrix_selected:
+                    index = selected[pos]
+                    arr = mat_arrays[pos]
+                    result[pos] = EmbeddingRecord(
                         id=record_index.ids[index],
-                        embedding=vector,
+                        embedding=cast(Any, arr),
                         layer_index=record_index.layer_values[index],
                         model_reference=record_index.model_values[index],
-                        shape=(len(vector),),
+                        shape=arr.shape,
                         metadata={"pooling": record_index.pool_methods[index]},
                     )
-                )
-                continue
-
-            if kind == "matrix":
-                if matrix_offsets is None or matrix_rows is None or matrix_cols is None:
-                    raise EmbeddingInputError("HDF5 matrix payload requested but matrix datasets are missing.")
-                mat_index = int(record_index.matrix_index[index])
-                if mat_index < 0 or mat_index >= int(len(matrix_rows)):
-                    raise EmbeddingInputError(f"Invalid matrix_index {mat_index} for record {index}.")
-                matrix = _lazy_h5_matrix_for_record(
-                    file_path,
-                    record_index=index,
-                    matrix_index=mat_index,
-                    matrix_offsets=matrix_offsets,
-                    matrix_rows=matrix_rows,
-                    matrix_cols=matrix_cols,
-                    row_start=row_start,
-                    row_end=row_end,
-                )
-                records.append(
-                    EmbeddingRecord(
+            else:
+                # Lazy path: defers the read to first .embedding access
+                for pos in matrix_selected:
+                    index = selected[pos]
+                    mat_index = int(record_index.matrix_index[index])
+                    if mat_index < 0 or mat_index >= int(len(matrix_rows)):
+                        raise EmbeddingInputError(f"Invalid matrix_index {mat_index} for record {index}.")
+                    matrix = _lazy_h5_matrix_for_record(
+                        file_path,
+                        record_index=index,
+                        matrix_index=mat_index,
+                        matrix_offsets=matrix_offsets,
+                        matrix_rows=matrix_rows,
+                        matrix_cols=matrix_cols,
+                        row_start=row_start,
+                        row_end=row_end,
+                    )
+                    result[pos] = EmbeddingRecord(
                         id=record_index.ids[index],
                         embedding=cast(Any, matrix),
                         layer_index=record_index.layer_values[index],
@@ -710,12 +800,8 @@ def _load_h5_records_by_index(
                         shape=matrix.shape,
                         metadata={"pooling": record_index.pool_methods[index]},
                     )
-                )
-                continue
 
-            raise EmbeddingInputError(f"Unsupported payload_kind {kind!r} at record index {index}.")
-
-    return records
+    return [result[pos] for pos in range(len(selected))]
 
 
 def _lazy_h5_matrix_for_record(
@@ -832,11 +918,11 @@ class _LazyH5Matrix:
     def __getitem__(self, index: int) -> Any:
         return self._array()[index]
 
-    def __array__(self, dtype: Any = None) -> Any:
+    def __array__(self, dtype: Any = None, copy: bool = False) -> Any:
         array = self._array()
         if dtype is not None:
-            return array.astype(dtype, copy=False)
-        return array
+            return array.astype(dtype, copy=copy)
+        return array.copy() if copy else array
 
     def tolist(self) -> list[list[float]]:
         return cast(list[list[float]], self._array().tolist())
@@ -1047,16 +1133,22 @@ def _records_from_numpy(
     except Exception as exc:
         raise EmbeddingInputError("Could not determine NumPy array dimensions.") from exc
 
-    rows: List[List[float]] = []
+    try:
+        import numpy as _np
+        arr = _np.asarray(matrix, dtype=_np.float32)
+    except Exception as exc:
+        raise EmbeddingInputError("Could not convert matrix to float32 NumPy array.") from exc
+
     if ndim == 1:
-        rows = [as_float_vector(matrix)]
+        numpy_rows = [arr]
+        row_shapes = [(int(arr.shape[0]),)]
     elif ndim == 2:
-        row_count = int(matrix.shape[0])
-        rows = [as_float_vector(matrix[idx]) for idx in range(row_count)]
+        numpy_rows = [arr[idx] for idx in range(int(arr.shape[0]))]
+        row_shapes = [(int(arr.shape[1]),)] * int(arr.shape[0])
     else:
         raise EmbeddingInputError(f"Expected 1D or 2D array, got ndim={ndim}.")
 
-    total = len(rows)
+    total = len(numpy_rows)
     if ids is None:
         resolved_ids = [f"row_{idx}" for idx in range(total)]
     else:
@@ -1072,10 +1164,10 @@ def _records_from_numpy(
             embedding=vector,
             layer_index=int(layer_index),
             model_reference=model_reference,
-            shape=(len(vector),),
+            shape=row_shapes[idx],
             metadata={"source": "npy"},
         )
-        for idx, vector in enumerate(rows)
+        for idx, vector in enumerate(numpy_rows)
     ]
 
 

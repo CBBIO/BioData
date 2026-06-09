@@ -142,15 +142,24 @@ def as_mean_pooled_vector(value: object) -> List[float]:
 def mean_pool_embedding_record(record: EmbeddingRecord) -> EmbeddingRecord:
     """Return a vector-valued record by mean-pooling row-major embeddings."""
 
-    values = list(record.embedding)
-    if not values:
-        raise EmbeddingInputError(f"Record {record.id!r} has an empty embedding.")
-
-    first = values[0]
-    if isinstance(first, Sequence) and not isinstance(first, (str, bytes, bytearray)):
-        vector = as_mean_pooled_vector(values)
+    emb = record.embedding
+    # Peek at shape before materialising to Python — avoids O(L*D) list() conversion.
+    # Default to () (empty tuple) so plain Python lists (no .shape) land in the else branch.
+    ndim = len(getattr(emb, "shape", ()))
+    if ndim == 2:
+        vector = as_mean_pooled_vector(emb)
+    elif ndim == 1:
+        vector = as_float_vector(emb)
     else:
-        vector = as_float_vector(values)
+        # Plain Python list — check first element to decide
+        values = list(emb)
+        if not values:
+            raise EmbeddingInputError(f"Record {record.id!r} has an empty embedding.")
+        first = values[0]
+        if isinstance(first, Sequence) and not isinstance(first, (str, bytes, bytearray)):
+            vector = as_mean_pooled_vector(values)
+        else:
+            vector = as_float_vector(values)
 
     return EmbeddingRecord(
         id=record.id,
@@ -163,6 +172,20 @@ def mean_pool_embedding_record(record: EmbeddingRecord) -> EmbeddingRecord:
 
 
 def mean_pool_matrix(matrix: Sequence[Sequence[float]]) -> List[float]:
+    # Fast path: numpy arrays avoid the O(L*D) Python element loop
+    shape = getattr(matrix, "shape", None)
+    if shape is not None:
+        try:
+            import numpy as _np
+            arr = _np.asarray(matrix, dtype=_np.float32)
+            if arr.ndim != 2 or arr.shape[0] == 0:
+                raise EmbeddingInputError("Cannot mean-pool an empty embedding matrix.")
+            return arr.mean(axis=0).tolist()
+        except EmbeddingInputError:
+            raise
+        except Exception:
+            pass
+
     rows = [as_float_vector(row) for row in matrix]
     if not rows or not rows[0]:
         raise EmbeddingInputError("Cannot mean-pool an empty embedding matrix.")

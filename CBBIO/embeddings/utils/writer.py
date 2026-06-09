@@ -32,6 +32,7 @@ class EmbeddingWriter:
         payload_format: PicklePayloadFormat = "records",
         compression: str | None = "gzip",
         write_batch_size: int = 1,
+        flush_interval: int = 1,
     ) -> None:
         self.format = str(format).strip().lower()
         if self.format not in {"memory", "pkl", "npy", "h5"}:
@@ -49,6 +50,7 @@ class EmbeddingWriter:
         self.payload_format: PicklePayloadFormat = payload_format
         self.compression = compression
         self.write_batch_size = _validate_positive("write_batch_size", write_batch_size)
+        self.flush_interval = max(0, int(flush_interval))
 
         self.records: List[EmbeddingRecord] = []
         self.paths: List[Path] = []
@@ -59,7 +61,11 @@ class EmbeddingWriter:
         self._h5_writer: _H5EmbeddingWriter | None = None
 
         if self.format == "h5":
-            self._h5_writer = _H5EmbeddingWriter(cast(Path, self.path), compression=self.compression)
+            self._h5_writer = _H5EmbeddingWriter(
+                cast(Path, self.path),
+                compression=self.compression,
+                flush_interval=self.flush_interval,
+            )
 
     def write(self, records: Sequence[EmbeddingRecord]) -> None:
         if not records:
@@ -157,6 +163,33 @@ def _normalize_embedding_record(record: object) -> EmbeddingRecord:
 
 
 def _normalize_payload(value: object) -> tuple[EmbeddingPayload, Tuple[int, ...]]:
+    # Fast path: numpy/torch arrays stay as float32 numpy — avoids O(L*D) .tolist()
+    # boxing that turns each element into a separate Python float object (~28 B each).
+    # Downstream writers that need a flat buffer can call .ravel() directly on the array
+    # instead of rebuilding it from a Python list.
+    shape = getattr(value, "shape", None)
+    if shape is not None and hasattr(value, "__array__"):
+        try:
+            import numpy as _np
+            # Detach from autograd graph if this is a live tensor
+            detach = getattr(value, "detach", None)
+            arr_src = detach().cpu() if callable(detach) else value
+            arr = _np.asarray(arr_src, dtype=_np.float32)
+            if arr.ndim == 1:
+                if arr.size == 0:
+                    raise EmbeddingInputError("Embedding payload is empty.")
+                return arr, (int(arr.shape[0]),)
+            if arr.ndim == 2:
+                if arr.size == 0:
+                    raise EmbeddingInputError("Embedding matrix is empty.")
+                if arr.shape[1] == 0:
+                    raise EmbeddingInputError("Embedding matrix rows must have the same length.")
+                return arr, (int(arr.shape[0]), int(arr.shape[1]))
+        except EmbeddingInputError:
+            raise
+        except Exception:
+            pass  # fall through to Python-list path
+
     tolist = getattr(value, "tolist", None)
     if callable(tolist):
         value = tolist()
@@ -240,7 +273,7 @@ def _save_npy(path: str | Path, records: Sequence[EmbeddingRecord]) -> None:
     dims = {len(cast(Sequence[float], record.embedding)) for record in normalized}
     if len(dims) != 1:
         raise EmbeddingInputError("All embeddings must have the same length for .npy output.")
-    matrix = np.array([list(record.embedding) for record in normalized], dtype=np.float32)
+    matrix = np.stack([np.asarray(record.embedding, dtype=np.float32) for record in normalized])
     file_path = Path(path)
     file_path.parent.mkdir(parents=True, exist_ok=True)
     np.save(file_path, matrix)
@@ -276,7 +309,14 @@ def _write_npy_shard(
 
 
 class _H5EmbeddingWriter:
-    def __init__(self, path: str | Path, *, compression: str | None, append: bool = False) -> None:
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        compression: str | None,
+        append: bool = False,
+        flush_interval: int = 1,
+    ) -> None:
         try:
             import h5py  # type: ignore
         except ModuleNotFoundError as exc:
@@ -291,6 +331,9 @@ class _H5EmbeddingWriter:
         self.compression = compression
         self.handle: Any = h5py_module.File(self.path, "a" if append else "w")
         self.record_count = int(self.handle.attrs.get("record_count", 0))
+        # flush every N append() calls; 0 = never flush (caller responsible for close())
+        self.flush_interval = max(0, int(flush_interval))
+        self._append_count = 0
 
         # Track payload kinds via flags so _update_payload_kind_attr never has to
         # load all "payload_kind" strings from the HDF5 dataset (O(N) per flush).
@@ -323,7 +366,9 @@ class _H5EmbeddingWriter:
             self._append_extended_payloads(normalized, payload_kinds, np)
 
         self.record_count = int(self.handle.attrs.get("record_count", 0))
-        self.handle.flush()
+        self._append_count += 1
+        if self.flush_interval > 0 and self._append_count % self.flush_interval == 0:
+            self.handle.flush()
 
     def _should_use_legacy_vector_schema(self, payload_kinds: Sequence[str]) -> bool:
         if any(kind != "vector" for kind in payload_kinds):
@@ -332,7 +377,7 @@ class _H5EmbeddingWriter:
 
     def _append_legacy_vectors(self, records: Sequence[EmbeddingRecord], np: Any) -> None:
         self._has_vectors = True
-        matrix = np.array([list(record.embedding) for record in records], dtype=np.float32)
+        matrix = np.stack([np.asarray(record.embedding, dtype=np.float32) for record in records])
         ids = [record.id for record in records]
         layer_indices = np.array([int(record.layer_index) for record in records], dtype=np.int32)
         model_refs = [record.model_reference for record in records]
@@ -417,7 +462,8 @@ class _H5EmbeddingWriter:
 
         vector_records: List[List[float]] = []
         vector_positions: List[int] = []
-        matrix_records: List[List[List[float]]] = []
+        # Store matrices as numpy arrays (fast path) or python lists (fallback)
+        matrix_arrays: List[Any] = []
         matrix_positions: List[int] = []
 
         for local_index, record in enumerate(records):
@@ -426,7 +472,12 @@ class _H5EmbeddingWriter:
                 vector_records.append(as_float_vector(record.embedding))
                 vector_positions.append(global_index)
             else:
-                matrix_records.append(as_float_matrix(record.embedding))
+                emb = record.embedding
+                # Fast path: numpy arrays avoid as_float_matrix() boxing (O(L*D) Python work)
+                if hasattr(emb, "shape") and hasattr(emb, "ravel"):
+                    matrix_arrays.append(np.asarray(emb, dtype=np.float32))
+                else:
+                    matrix_arrays.append(np.array(as_float_matrix(emb), dtype=np.float32))
                 matrix_positions.append(global_index)
 
         if vector_records:
@@ -439,7 +490,7 @@ class _H5EmbeddingWriter:
             embeddings_ds[old_vector_count:new_vector_count] = vector_matrix
             vector_index_ds[vector_positions] = np.arange(old_vector_count, new_vector_count, dtype=np.int64)
 
-        if matrix_records:
+        if matrix_arrays:
             values_ds = self.handle["matrix_values"]
             offsets_ds = self.handle["matrix_offsets"]
             rows_ds = self.handle["matrix_rows"]
@@ -449,36 +500,30 @@ class _H5EmbeddingWriter:
             old_values_count = int(values_ds.shape[0])
             old_offset_last = int(offsets_ds[old_matrix_count])
 
-            flat_values: List[float] = []
+            flat_parts: List[Any] = []
             new_offsets: List[int] = []
             row_values: List[int] = []
             col_values: List[int] = []
             cursor = old_offset_last
-            for matrix in matrix_records:
-                rows = len(matrix)
-                cols = len(matrix[0]) if rows else 0
-                if rows < 1 or cols < 1:
+            for arr in matrix_arrays:
+                if arr.ndim != 2 or arr.shape[0] < 1 or arr.shape[1] < 1:
                     raise EmbeddingInputError("Embedding matrix is empty.")
-                if any(len(row) != cols for row in matrix):
-                    raise EmbeddingInputError("Embedding matrix rows must have the same length.")
-                row_values.append(rows)
-                col_values.append(cols)
-                element_count = 0
-                for row in matrix:
-                    flat_values.extend(row)
-                    element_count += len(row)
-                cursor += element_count
+                row_values.append(int(arr.shape[0]))
+                col_values.append(int(arr.shape[1]))
+                flat_parts.append(arr.ravel())
+                cursor += int(arr.size)
                 new_offsets.append(cursor)
 
-            new_matrix_count = old_matrix_count + len(matrix_records)
+            new_matrix_count = old_matrix_count + len(matrix_arrays)
             rows_ds.resize((new_matrix_count,))
             cols_ds.resize((new_matrix_count,))
             rows_ds[old_matrix_count:new_matrix_count] = np.array(row_values, dtype=np.int32)
             cols_ds[old_matrix_count:new_matrix_count] = np.array(col_values, dtype=np.int32)
 
-            values_ds.resize((old_values_count + len(flat_values),))
-            if flat_values:
-                values_ds[old_values_count : old_values_count + len(flat_values)] = np.array(flat_values, dtype=np.float32)
+            flat_all = np.concatenate(flat_parts) if flat_parts else np.empty(0, dtype=np.float32)
+            values_ds.resize((old_values_count + len(flat_all),))
+            if len(flat_all):
+                values_ds[old_values_count : old_values_count + len(flat_all)] = flat_all
 
             offsets_ds.resize((new_matrix_count + 1,))
             offsets_ds[old_matrix_count + 1 : new_matrix_count + 1] = np.array(new_offsets, dtype=np.int64)
@@ -594,6 +639,7 @@ class _H5EmbeddingWriter:
         )
 
     def close(self) -> None:
+        self.handle.flush()
         self.handle.close()
 
 
