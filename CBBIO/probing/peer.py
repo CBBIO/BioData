@@ -8,6 +8,7 @@ import importlib
 from pathlib import Path
 import pickle
 import tarfile
+from collections.abc import Mapping
 from typing import Any, Dict, List, Literal, Sequence, Tuple, cast
 from urllib.parse import urlparse
 from urllib.request import urlretrieve
@@ -391,6 +392,7 @@ def load_peer_dataset(
     name: str,
     split: str | Sequence[str] | None = None,
     download: bool = False,
+    max_examples_per_split: Mapping[str, int | None] | None = None,
 ) -> ProteinDataset | ResidueDataset:
     """Load a PEER dataset without depending on TorchDrug.
 
@@ -416,12 +418,40 @@ def load_peer_dataset(
         download_peer_dataset(root, name=task.name)
     split_names = _resolve_peer_splits(spec, split)
     lmdb_paths = _peer_lmdb_paths(root, spec, split_names)
-    rows_by_split = [(split_name, _read_lmdb_records(path, spec)) for split_name, path in zip(split_names, lmdb_paths)]
+    split_limits = _resolve_split_limits(split_names, max_examples_per_split)
+
+    cached = _load_peer_converted_cache(
+        root,
+        task=task,
+        spec=spec,
+        split_names=split_names,
+        lmdb_paths=lmdb_paths,
+        split_limits=split_limits,
+    )
+    if cached is not None:
+        return cached
+
+    rows_by_split = [
+        (split_name, _read_lmdb_records(path, spec, limit=split_limits.get(split_name)))
+        for split_name, path in zip(split_names, lmdb_paths)
+    ]
     if task.level == "protein":
-        return _protein_rows_to_dataset(task, rows_by_split)
-    if task.level == "residue":
-        return _residue_rows_to_dataset(task, rows_by_split)
-    raise EmbeddingInputError(f"Native PEER importer does not support task level {task.level!r}.")
+        dataset: ProteinDataset | ResidueDataset = _protein_rows_to_dataset(task, rows_by_split)
+    elif task.level == "residue":
+        dataset = _residue_rows_to_dataset(task, rows_by_split)
+    else:
+        raise EmbeddingInputError(f"Native PEER importer does not support task level {task.level!r}.")
+
+    _save_peer_converted_cache(
+        root,
+        dataset,
+        task=task,
+        spec=spec,
+        split_names=split_names,
+        lmdb_paths=lmdb_paths,
+        split_limits=split_limits,
+    )
+    return dataset
 
 
 def download_peer_dataset(root: str | Path, *, name: str, force: bool = False) -> Path:
@@ -563,6 +593,28 @@ def _resolve_peer_splits(spec: PeerNativeDatasetSpec, split: str | Sequence[str]
     return normalized
 
 
+def _resolve_split_limits(
+    split_names: Sequence[str],
+    max_examples_per_split: Mapping[str, int | None] | None,
+) -> Dict[str, int | None]:
+    if max_examples_per_split is None:
+        return {split_name: None for split_name in split_names}
+
+    resolved: Dict[str, int | None] = {}
+    for split_name in split_names:
+        limit = max_examples_per_split.get(split_name)
+        if limit is None:
+            limit = max_examples_per_split.get(_normalize_peer_split(split_name))
+        if limit is None:
+            resolved[split_name] = None
+            continue
+        parsed = int(limit)
+        if parsed < 1:
+            raise EmbeddingInputError("max_examples_per_split values must be >= 1 when provided.")
+        resolved[split_name] = parsed
+    return resolved
+
+
 def _peer_lmdb_paths(root: str | Path, spec: PeerNativeDatasetSpec, splits: Sequence[str]) -> List[Path]:
     base = Path(root).expanduser() / spec.name / "raw" / spec.archive_subdir
     paths = [base / f"{spec.lmdb_prefix}_{split}.lmdb" for split in splits]
@@ -575,21 +627,134 @@ def _peer_lmdb_paths(root: str | Path, spec: PeerNativeDatasetSpec, splits: Sequ
     return paths
 
 
-def _read_lmdb_records(path: Path, spec: PeerNativeDatasetSpec) -> List[Dict[str, Any]]:
+_PEER_CONVERTED_CACHE_VERSION = 1
+
+
+def _peer_converted_cache_path(root: str | Path, task: PeerTaskMetadata, split_names: Sequence[str]) -> Path:
+    split_key = "_".join(_cache_key_part(split_name) for split_name in split_names)
+    return Path(root).expanduser() / task.name / "cache" / f"{task.name}.{split_key}.converted.v{_PEER_CONVERTED_CACHE_VERSION}.pkl"
+
+
+def _cache_key_part(value: object) -> str:
+    return "".join(char if char.isalnum() or char in {"-", "_"} else "_" for char in str(value).strip()) or "default"
+
+
+def _load_peer_converted_cache(
+    root: str | Path,
+    *,
+    task: PeerTaskMetadata,
+    spec: PeerNativeDatasetSpec,
+    split_names: Sequence[str],
+    lmdb_paths: Sequence[Path],
+    split_limits: Mapping[str, int | None],
+) -> ProteinDataset | ResidueDataset | None:
+    cache_path = _peer_converted_cache_path(root, task, split_names)
+    if not cache_path.exists():
+        return None
+
+    try:
+        with cache_path.open("rb") as handle:
+            payload = pickle.load(handle)
+    except Exception:
+        return None
+
+    if not isinstance(payload, dict):
+        return None
+    payload_map = cast(Dict[str, object], payload)
+    expected = _peer_cache_metadata(
+        task=task,
+        spec=spec,
+        split_names=split_names,
+        lmdb_paths=lmdb_paths,
+        split_limits=split_limits,
+    )
+    if payload_map.get("metadata") != expected:
+        return None
+
+    dataset = payload_map.get("dataset")
+    if task.level == "protein" and isinstance(dataset, ProteinDataset):
+        return dataset
+    if task.level == "residue" and isinstance(dataset, ResidueDataset):
+        return dataset
+    return None
+
+
+def _save_peer_converted_cache(
+    root: str | Path,
+    dataset: ProteinDataset | ResidueDataset,
+    *,
+    task: PeerTaskMetadata,
+    spec: PeerNativeDatasetSpec,
+    split_names: Sequence[str],
+    lmdb_paths: Sequence[Path],
+    split_limits: Mapping[str, int | None],
+) -> None:
+    cache_path = _peer_converted_cache_path(root, task, split_names)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "metadata": _peer_cache_metadata(
+            task=task,
+            spec=spec,
+            split_names=split_names,
+            lmdb_paths=lmdb_paths,
+            split_limits=split_limits,
+        ),
+        "dataset": dataset,
+    }
+    try:
+        with cache_path.open("wb") as handle:
+            pickle.dump(payload, handle, protocol=pickle.HIGHEST_PROTOCOL)
+    except Exception:
+        cache_path.unlink(missing_ok=True)
+
+
+def _peer_cache_metadata(
+    *,
+    task: PeerTaskMetadata,
+    spec: PeerNativeDatasetSpec,
+    split_names: Sequence[str],
+    lmdb_paths: Sequence[Path],
+    split_limits: Mapping[str, int | None],
+) -> Dict[str, Any]:
+    return {
+        "version": _PEER_CONVERTED_CACHE_VERSION,
+        "task": task.name,
+        "level": task.level,
+        "target": task.target,
+        "sequence_field": spec.sequence_field,
+        "target_fields": tuple(spec.target_fields),
+        "splits": tuple(split_names),
+        "limits": tuple((split_name, split_limits.get(split_name)) for split_name in split_names),
+        "sources": tuple(_lmdb_source_signature(path) for path in lmdb_paths),
+    }
+
+
+def _lmdb_source_signature(path: Path) -> Tuple[str, int, int]:
+    data_path = path / "data.mdb" if path.is_dir() else path
+    stat = data_path.stat()
+    return (str(path), int(stat.st_size), int(stat.st_mtime_ns))
+
+
+def _read_lmdb_records(path: Path, spec: PeerNativeDatasetSpec, *, limit: int | None = None) -> List[Dict[str, Any]]:
     try:
         lmdb = importlib.import_module("lmdb")
     except Exception as exc:
         raise EmbeddingDependencyError("Native PEER LMDB import requires the optional 'lmdb' package.") from exc
 
+    resolved_limit = None if limit is None else int(limit)
+    if resolved_limit is not None and resolved_limit < 1:
+        raise EmbeddingInputError("limit must be >= 1 when provided.")
+
     records: List[Dict[str, Any]] = []
-    env = lmdb.open(str(path), readonly=True, lock=False, readahead=False, meminit=False)
+    env = lmdb.open(str(path), readonly=True, lock=False, readahead=True, meminit=False)
     try:
         with env.begin(write=False) as txn:
             count_raw = txn.get(spec.number_field.encode())
             if count_raw is None:
                 raise EmbeddingInputError(f"LMDB file {path} is missing count field {spec.number_field!r}.")
             count = int(pickle.loads(count_raw))
-            for index in range(count):
+            read_count = count if resolved_limit is None else min(count, resolved_limit)
+            for index in range(read_count):
                 payload = txn.get(str(index).encode())
                 if payload is None:
                     raise EmbeddingInputError(f"LMDB file {path} is missing row {index}.")

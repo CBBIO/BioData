@@ -421,11 +421,12 @@ def test_load_peer_dataset_imports_native_protein_lmdb(monkeypatch: pytest.Monke
     for split in ("train", "valid", "test"):
         (raw / f"fluorescence_{split}.lmdb").touch()
 
-    def fake_read_lmdb_records(path, spec):
+    def fake_read_lmdb_records(path, spec, *, limit=None):
         split_name = path.stem.rsplit("_", 1)[-1]
-        return [
+        rows = [
             {"sequence": "ACDE", "log_fluorescence": 1.5 if split_name != "test" else 2.5},
         ]
+        return rows if limit is None else rows[:limit]
 
     monkeypatch.setattr(peer_module, "_read_lmdb_records", fake_read_lmdb_records)
 
@@ -445,10 +446,11 @@ def test_load_peer_dataset_imports_native_residue_lmdb(monkeypatch: pytest.Monke
     for split in ("train", "cb513"):
         (raw / f"secondary_structure_{split}.lmdb").touch()
 
-    def fake_read_lmdb_records(path, spec):
-        return [
+    def fake_read_lmdb_records(path, spec, *, limit=None):
+        rows = [
             {"sequence": "ACDE", "ss3": [0, 1, 2, 2], "valid_mask": [1, 1, 0, 1]},
         ]
+        return rows if limit is None else rows[:limit]
 
     monkeypatch.setattr(peer_module, "_read_lmdb_records", fake_read_lmdb_records)
 
@@ -463,6 +465,37 @@ def test_load_peer_dataset_imports_native_residue_lmdb(monkeypatch: pytest.Monke
     assert dataset.examples[0].mask == [True, True, False, True]
 
 
+def test_load_peer_dataset_applies_split_limits_during_native_import(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    raw = tmp_path / "secondary_structure" / "raw" / "secondary_structure"
+    raw.mkdir(parents=True)
+    for split in ("train", "valid", "cb513"):
+        (raw / f"secondary_structure_{split}.lmdb").touch()
+
+    observed_limits = {}
+
+    def fake_read_lmdb_records(path, spec, *, limit=None):
+        split_name = path.stem.removeprefix("secondary_structure_")
+        observed_limits[split_name] = limit
+        rows = [
+            {"sequence": "ACDE", "ss3": [0, 1, 2, 2], "valid_mask": [1, 1, 1, 1]},
+            {"sequence": "WXYZ", "ss3": [2, 2, 1, 0], "valid_mask": [1, 1, 1, 1]},
+        ]
+        return rows if limit is None else rows[:limit]
+
+    monkeypatch.setattr(peer_module, "_read_lmdb_records", fake_read_lmdb_records)
+
+    dataset = load_peer_dataset(
+        tmp_path,
+        name="SSP",
+        max_examples_per_split={"train": 1, "val": 1, "test": 1},
+    )
+
+    assert observed_limits == {"train": 1, "valid": 1, "cb513": 1}
+    assert dataset.split_counts() == {"train": 1, "val": 1, "test": 1}
+
+
 def test_load_peer_dataset_uses_benchmark_default_holdout_for_fold(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     raw = tmp_path / "fold" / "raw" / "remote_homology"
     raw.mkdir(parents=True)
@@ -471,12 +504,13 @@ def test_load_peer_dataset_uses_benchmark_default_holdout_for_fold(monkeypatch: 
 
     observed_paths = []
 
-    def fake_read_lmdb_records(path, spec):
+    def fake_read_lmdb_records(path, spec, *, limit=None):
         observed_paths.append(path.name)
         split_name = path.stem.removeprefix("remote_homology_")
-        return [
+        rows = [
             {"sequence": "ACDE", "fold_label": 1 if split_name == "test_fold_holdout" else 0},
         ]
+        return rows if limit is None else rows[:limit]
 
     monkeypatch.setattr(peer_module, "_read_lmdb_records", fake_read_lmdb_records)
 
