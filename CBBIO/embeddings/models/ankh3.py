@@ -145,6 +145,7 @@ class Ankh3EmbeddingGenerator(EmbeddingGenerator):
         "Ankh Base",
         "Ankh3 Large",
         "Ankh3 XL",
+        "ElnaggarLab/ankh3-xl",
         DEFAULT_MODEL_NAME,
     ]
     SUPPORTED_POOLERS = ("none", "mean")
