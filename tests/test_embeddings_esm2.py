@@ -8,15 +8,7 @@ from typing import Any
 import pytest
 
 from CBBIO.embeddings import EmbeddingDependencyError, GenerationInput
-from CBBIO.embeddings_esm2 import Esm2EmbeddingGenerator, Esm2Preprocessor, Esm2TokenizerAdapter
-
-
-class _FakeScalar:
-    def __init__(self, value: float) -> None:
-        self.value = value
-
-    def item(self) -> float:
-        return self.value
+from CBBIO.embeddings_esm2 import ESM2_HF_MODEL_NAMES, Esm2EmbeddingGenerator, Esm2Preprocessor, Esm2TokenizerAdapter
 
 
 class _FakeTensor:
@@ -32,50 +24,30 @@ class _FakeTensor:
             return _FakeTensor(base[second], device=self.device)
         return _FakeTensor(self.data[item], device=self.device)
 
-    def __ne__(self, other: Any) -> "_FakeTensor":
-        _ = other
-        converted = []
-        for row in self.data:
-            converted.append([1 if val != 0 else 0 for val in row])
-        return _FakeTensor(converted, device=self.device)
-
-    def sum(self, dim: int) -> "_FakeTensor":
-        if dim != 1:
-            raise ValueError("fake tensor supports dim=1 only")
-        return _FakeTensor([sum(row) for row in self.data], device=self.device)
-
     def to(self, device: str) -> "_FakeTensor":
         return _FakeTensor(self.data, device=str(device))
-
-    def item(self) -> float:
-        if isinstance(self.data, (int, float)):
-            return float(self.data)
-        raise TypeError("not a scalar")
 
     def tolist(self) -> Any:
         return self.data
 
 
-class _FakeAlphabet:
-    padding_idx = 0
-
-    def get_batch_converter(self) -> Any:
-        def _convert(data: Any) -> Any:
-            _ = data
-            # tokens: BOS=1, residues=2..5, EOS=1, PAD=0
-            return (["query"], ["ACDE"], _FakeTensor([[1, 2, 3, 4, 5, 1, 0]]))
-
-        return _convert
+class _FakeConfig:
+    num_hidden_layers = 3
 
 
-class _FakeModel:
-    num_layers = 3
+class _FakeHfOutput:
+    def __init__(self, hidden_states: Any) -> None:
+        self.hidden_states = hidden_states
+
+
+class _FakeHfModel:
+    config = _FakeConfig()
 
     def __init__(self) -> None:
         self.to_args: tuple[Any, ...] | None = None
         self.to_kwargs: dict[str, Any] | None = None
 
-    def to(self, *args: Any, **kwargs: Any) -> "_FakeModel":
+    def to(self, *args: Any, **kwargs: Any) -> "_FakeHfModel":
         self.to_args = args
         self.to_kwargs = kwargs
         return self
@@ -83,14 +55,45 @@ class _FakeModel:
     def eval(self) -> None:
         return None
 
-    def __call__(self, tokens: Any, repr_layers: list[int], return_contacts: bool) -> dict[str, Any]:
-        _ = return_contacts
-        seq_len = len(tokens.tolist()[0])
-        reps = {}
-        for layer in repr_layers:
-            # [batch, seq_len, hidden]
-            reps[layer] = _FakeTensor([[[float(layer), float(pos)] for pos in range(seq_len)]])
-        return {"representations": reps}
+    def __call__(self, **kwargs: Any) -> _FakeHfOutput:
+        token_rows = kwargs["input_ids"].tolist()
+        seq_len = len(token_rows[0])
+        hidden_states = []
+        for layer in range(4):
+            hidden_states.append(
+                _FakeTensor(
+                    [
+                        [[float(layer), float(row_index * 100 + pos)] for pos in range(seq_len)]
+                        for row_index, _row in enumerate(token_rows)
+                    ]
+                )
+            )
+        return _FakeHfOutput(hidden_states)
+
+
+class _FakeTokenizer:
+    def __call__(
+        self,
+        sequences: list[str],
+        *,
+        add_special_tokens: bool,
+        padding: bool,
+        return_tensors: str,
+    ) -> dict[str, _FakeTensor]:
+        assert add_special_tokens is True
+        assert padding is True
+        assert return_tensors == "pt"
+        max_len = max(len(sequence) for sequence in sequences) + 2
+        input_ids = []
+        attention_mask = []
+        for sequence in sequences:
+            row = [0] + list(range(5, 5 + len(sequence))) + [2]
+            mask = [1] * len(row)
+            row.extend([1] * (max_len - len(row)))
+            mask.extend([0] * (max_len - len(mask)))
+            input_ids.append(row)
+            attention_mask.append(mask)
+        return {"input_ids": _FakeTensor(input_ids), "attention_mask": _FakeTensor(attention_mask)}
 
 
 def test_esm2_preprocessor_normalizes_sequence() -> None:
@@ -98,52 +101,76 @@ def test_esm2_preprocessor_normalizes_sequence() -> None:
     assert pre.preprocess("acduzob") == "ACDXXXX"
 
 
-def test_esm2_native_tokenizer_moves_tokens_and_lens_to_device() -> None:
-    def _convert(data: Any) -> Any:
-        _ = data
-        return (["query"], ["ACDE"], _FakeTensor([[1, 2, 3, 4, 5, 1, 0]]))
-
-    tokenizer = Esm2TokenizerAdapter(
-        batch_converter=_convert,
-        padding_idx=0,
-        device="cuda:0",
-    )
+def test_esm2_tokenizer_moves_inputs_to_device() -> None:
+    tokenizer = Esm2TokenizerAdapter(_FakeTokenizer(), device="cuda:0")
 
     result = tokenizer.tokenize_many(["ACDE"])
 
-    assert result["tokens"].device == "cuda:0"
-    assert result["lens"].device == "cuda:0"
+    assert result["input_ids"].device == "cuda:0"
+    assert result["attention_mask"].device == "cuda:0"
 
 
-def test_esm2_generator_raises_dependency_error_when_esm_missing(
+def test_esm2_generator_raises_dependency_error_when_transformers_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     original_import = builtins.__import__
 
     def _raising_import(name: str, globals: Any = None, locals: Any = None, fromlist: Any = (), level: int = 0) -> Any:
-        if name == "esm" or name.startswith("esm."):
-            raise ModuleNotFoundError("No module named 'esm'")
+        if name == "transformers" or name.startswith("transformers."):
+            raise ModuleNotFoundError("No module named 'transformers'")
         return original_import(name, globals, locals, fromlist, level)
 
     monkeypatch.setattr(builtins, "__import__", _raising_import)
-    monkeypatch.delitem(sys.modules, "esm", raising=False)
+    monkeypatch.delitem(sys.modules, "transformers", raising=False)
 
     with pytest.raises(EmbeddingDependencyError):
         Esm2EmbeddingGenerator()
 
 
 def test_esm2_generate_returns_per_residue_matrices_without_pooling() -> None:
-    generator = Esm2EmbeddingGenerator(
-        model=_FakeModel(),
-        alphabet=_FakeAlphabet(),
-    )
+    generator = Esm2EmbeddingGenerator(model_name="facebook/test-esm2", model=_FakeHfModel(), tokenizer=_FakeTokenizer())
     result = generator.generate([GenerationInput(id="P1", sequence="ACDE")], layer_index=[3], fail_fast=True)
 
     assert result.errors == []
     assert [record.layer_index for record in result.records] == [3]
-    # residues are 4 after removing BOS/EOS
     assert result.records[0].shape == (4, 2)
-    assert isinstance(result.records[0].embedding[0], list)
+    assert result.records[0].embedding == [[3.0, 1.0], [3.0, 2.0], [3.0, 3.0], [3.0, 4.0]]
+
+
+def test_esm2_generate_slices_variable_length_batches_to_residues() -> None:
+    generator = Esm2EmbeddingGenerator(model_name="facebook/test-esm2", model=_FakeHfModel(), tokenizer=_FakeTokenizer())
+    result = generator.generate(
+        [
+            GenerationInput(id="P1", sequence="ACDE"),
+            GenerationInput(id="P2", sequence="AC"),
+        ],
+        layer_index=[3],
+        fail_fast=True,
+    )
+
+    assert [record.id for record in result.records] == ["P1", "P2"]
+    assert [record.shape for record in result.records] == [(4, 2), (2, 2)]
+    assert result.records[1].embedding == [[3.0, 101.0], [3.0, 102.0]]
+
+
+def test_esm2_mean_and_cls_poolers_use_expected_tokens() -> None:
+    generator = Esm2EmbeddingGenerator(model_name="facebook/test-esm2", model=_FakeHfModel(), tokenizer=_FakeTokenizer())
+
+    mean = generator.generate([GenerationInput(id="P1", sequence="ACDE")], layer_index=[3], pooler="mean", fail_fast=True)
+    cls = generator.generate([GenerationInput(id="P1", sequence="ACDE")], layer_index=[3], pooler="cls", fail_fast=True)
+
+    assert mean.records[0].embedding == [3.0, 2.5]
+    assert cls.records[0].embedding == [3.0, 0.0]
+
+
+def test_esm2_layer_none_and_negative_indices() -> None:
+    generator = Esm2EmbeddingGenerator(model_name="facebook/test-esm2", model=_FakeHfModel(), tokenizer=_FakeTokenizer())
+
+    all_layers = generator.generate([GenerationInput(id="P1", sequence="AC")], layer_index=None, pooler="cls", fail_fast=True)
+    last = generator.generate([GenerationInput(id="P1", sequence="AC")], layer_index=[-1], pooler="cls", fail_fast=True)
+
+    assert [record.layer_index for record in all_layers.records] == [0, 1, 2, 3]
+    assert [record.layer_index for record in last.records] == [3]
 
 
 def test_esm2_generator_records_requested_dtype(
@@ -156,10 +183,10 @@ def test_esm2_generator_records_requested_dtype(
     )
     monkeypatch.setitem(sys.modules, "torch", fake_torch)
 
-    model = _FakeModel()
+    model = _FakeHfModel()
     generator = Esm2EmbeddingGenerator(
         model=model,
-        alphabet=_FakeAlphabet(),
+        tokenizer=_FakeTokenizer(),
         device="cuda:0",
         dtype="float16",
     )
@@ -170,45 +197,39 @@ def test_esm2_generator_records_requested_dtype(
 
 
 def test_esm2_available_layers_and_count() -> None:
-    generator = Esm2EmbeddingGenerator(
-        model=_FakeModel(),
-        alphabet=_FakeAlphabet(),
-    )
+    generator = Esm2EmbeddingGenerator(model_name="facebook/test-esm2", model=_FakeHfModel(), tokenizer=_FakeTokenizer())
     assert generator.available_layers() == [0, 1, 2, 3]
     assert generator.num_layers() == 4
 
 
-def test_esm2_generator_falls_back_to_transformers_when_pretrained_loader_missing(
+def test_esm2_generator_loads_hf_model_and_tokenizer_for_all_aliases(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class _FakeAutoModel:
-        observed_name: str | None = None
+    observed_models: list[str] = []
+    observed_tokenizers: list[str] = []
 
+    class _FakeAutoModel:
         @staticmethod
-        def from_pretrained(name: str) -> _FakeModel:
-            _FakeAutoModel.observed_name = name
-            return _FakeModel()
+        def from_pretrained(name: str, **kwargs: Any) -> _FakeHfModel:
+            _ = kwargs
+            observed_models.append(name)
+            return _FakeHfModel()
 
     class _FakeAutoTokenizer:
-        observed_name: str | None = None
-
         @staticmethod
-        def from_pretrained(name: str) -> _FakeAlphabet:
-            _FakeAutoTokenizer.observed_name = name
-            return _FakeAlphabet()
+        def from_pretrained(name: str) -> _FakeTokenizer:
+            observed_tokenizers.append(name)
+            return _FakeTokenizer()
 
     fake_transformers = types.SimpleNamespace(
         AutoModel=_FakeAutoModel,
         AutoTokenizer=_FakeAutoTokenizer,
     )
-    fake_esm = types.SimpleNamespace()
-
     monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
-    monkeypatch.setitem(sys.modules, "esm", fake_esm)
-    monkeypatch.setitem(sys.modules, "esm.pretrained", types.SimpleNamespace())
 
-    generator = Esm2EmbeddingGenerator(model_name="esm2_t33_650M_UR50D", device="cpu")
+    for alias, reference in ESM2_HF_MODEL_NAMES.items():
+        generator = Esm2EmbeddingGenerator(model_name=alias, device="cpu")
+        assert generator.model_metadata.model_reference == reference
 
-    assert generator.model_metadata.model_name == "esm2_t33_650M_UR50D"
-    assert _FakeAutoModel.observed_name == "facebook/esm2_t33_650M_UR50D"
-    assert _FakeAutoTokenizer.observed_name == "facebook/esm2_t33_650M_UR50D"
+    assert observed_models == list(ESM2_HF_MODEL_NAMES.values())
+    assert observed_tokenizers == list(ESM2_HF_MODEL_NAMES.values())

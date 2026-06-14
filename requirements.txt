@@ -12,4 +12,3 @@ torch
 transformers
 sentencepiece
 protobuf
-esm

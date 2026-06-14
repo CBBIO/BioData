@@ -258,7 +258,7 @@ def test_factory_catalog_reports_available_classes_and_models() -> None:
 
     catalog = cast(Dict[str, List[str]], available_generator_models())
     assert set(catalog.keys()) == set(classes)
-    assert "esm2_t33_650m_ur50d" in [name.lower() for name in catalog["esm2"]]
+    assert "facebook/esm2_t33_650m_ur50d" in [name.lower() for name in catalog["esm2"]]
 
     esm1b_models = cast(List[str], available_generator_models("esm1b"))
     assert "esm1b_t33_650M_UR50S" in esm1b_models
@@ -275,62 +275,32 @@ def test_generator_factory_builds_ankh3_with_prefix() -> None:
     assert isinstance(obj, Ankh3EmbeddingGenerator)
 
 
-def test_generator_factory_builds_esmc_with_flash_attention_option() -> None:
+def test_generator_factory_builds_esmc() -> None:
     obj = Generator(
         model_class="esmc",
         name="esmc_300m",
-        use_flash_attention=True,
-        client=object(),
+        model=object(),
+        tokenizer=object(),
     )
     assert isinstance(obj, EsmcEmbeddingGenerator)
 
 
 def test_generator_factory_builds_esm2() -> None:
-    class _Model:
-        num_layers = 33
-
-        def to(self, _device: str) -> Self:
-            return self
-
-        def eval(self) -> None:
-            return None
-
-    class _Alphabet:
-        padding_idx = 0
-
-        def get_batch_converter(self) -> Any:
-            return lambda _data: ([], [], [])
-
     obj = Generator(
         model_class="esm2",
         name="esm2_t33_650M_UR50D",
-        model=_Model(),
-        alphabet=_Alphabet(),
-        batch_converter=lambda _data: ([], [], []),
+        model=object(),
+        tokenizer=object(),
     )
     assert isinstance(obj, Esm2EmbeddingGenerator)
 
 
 def test_generator_factory_builds_esm1b() -> None:
-    class _Model:
-        def to(self, _device: str) -> Self:
-            return self
-
-        def eval(self) -> None:
-            return None
-
-    class _Alphabet:
-        padding_idx = 0
-
-        def get_batch_converter(self) -> Any:
-            return lambda _data: ([], [], [])
-
     obj = Generator(
         model_class="esm1b",
         name="esm1b_t33_650M_UR50S",
-        model=_Model(),
-        alphabet=_Alphabet(),
-        batch_converter=lambda _data: ([], [], []),
+        model=object(),
+        tokenizer=object(),
     )
     assert isinstance(obj, Esm1bEmbeddingGenerator)
 
