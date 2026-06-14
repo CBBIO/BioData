@@ -10,7 +10,7 @@ from CBBIO.embeddings import EmbeddingInputError
 from .datasets import ObjectiveName
 from .dtu import DTU_PROBING_CATALOG
 from .peer import PEER_CITATION, PEER_TASKS, PeerTaskLevel
-from .residue_sources import DBPTM_BENCHMARKS, DISPROT_CURRENT_TSV_URL, RESIDUE_SOURCE_SPECS
+from .residue_sources import DBPTM_BENCHMARKS, DISPROT_CURRENT_JSON_URL, RESIDUE_SOURCE_SPECS
 
 
 DatasetCatalogLevel = PeerTaskLevel
@@ -167,7 +167,8 @@ def _residue_source_entries() -> List[DatasetCatalogEntry]:
     for spec in RESIDUE_SOURCE_SPECS.values():
         download_url = spec.download_urls[0] if spec.download_urls else None
         if spec.name == "disprot":
-            download_url = DISPROT_CURRENT_TSV_URL
+            download_url = DISPROT_CURRENT_JSON_URL
+        status: DatasetCatalogStatus = "ready" if spec.name == "disprot" else "adapter"
         entries.append(
             DatasetCatalogEntry(
                 id=f"source:{spec.name}",
@@ -179,7 +180,7 @@ def _residue_source_entries() -> List[DatasetCatalogEntry]:
                 level="residue",
                 objective=spec.objective,
                 target=spec.target,
-                status="adapter",
+                status=status,
                 homepage=spec.homepage,
                 download_url=download_url,
                 download_adapter="download_residue_source" if download_url is not None or spec.name == "disprot" else None,

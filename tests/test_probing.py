@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import tarfile
 
 import pytest
@@ -15,6 +16,7 @@ from CBBIO import (
     Task,
     get_dataset_catalog_entry,
     download_dbptm_benchmark,
+    download_disprot_current_json,
     download_disprot_current_tsv,
     download_musitedeep_testdata,
     download_residue_source,
@@ -48,6 +50,7 @@ from CBBIO import (
     train_and_evaluate_residue_probe,
 )
 import CBBIO.probing.peer as peer_module
+from CBBIO.probing.metrics import binary_metrics
 from CBBIO.probing.metrics import spearmanr
 import CBBIO.probing.residue_sources as residue_sources_module
 from CBBIO.embeddings import EmbeddingInputError
@@ -103,6 +106,24 @@ def test_binary_task_uses_dataset_target_and_probe_objective() -> None:
     assert result.test_count == 2
     assert result.metrics["accuracy"] == 1.0
     assert result.metrics["f1"] == 1.0
+
+
+def test_binary_metrics_include_imbalance_aware_scores() -> None:
+    metrics = binary_metrics(
+        y_true=[1, 1, 0, 0],
+        y_pred=[1, 0, 0, 0],
+        y_score=[0.9, 0.8, 0.4, 0.1],
+    )
+
+    assert metrics["accuracy"] == 0.75
+    assert metrics["precision"] == 1.0
+    assert metrics["recall"] == 0.5
+    assert metrics["f1"] == pytest.approx(2 / 3)
+    assert metrics["macro_f1"] == pytest.approx((0.8 + 2 / 3) / 2)
+    assert metrics["balanced_accuracy"] == 0.75
+    assert metrics["mcc"] == pytest.approx(1 / 3**0.5)
+    assert metrics["auroc"] == 1.0
+    assert metrics["auprc"] == 1.0
     assert result.predictions == {"nt": 0, "pt": 1}
 
 
@@ -403,6 +424,8 @@ def test_unified_dataset_catalog_is_filterable_and_searchable() -> None:
     search_results = search_dataset_catalog("phosphorylation cdk residue", status="ready")
 
     assert get_dataset_catalog_entry("dbptm:phosphorylation_by_cdk").loader == "load_dbptm_benchmark_dataset"
+    assert get_dataset_catalog_entry("source:disprot").status == "ready"
+    assert get_dataset_catalog_entry("source:disprot").loader == "load_residue_source_dataset"
     assert get_dataset_catalog_entry("secondary_structure").id == "peer:secondary_structure"
     assert "dbptm:phosphorylation_by_cdk" in {entry.id for entry in ready_residue_ptm}
     assert search_results[0].id == "dbptm:phosphorylation_by_cdk"
@@ -624,6 +647,24 @@ def test_download_disprot_current_tsv_uses_current_release_url(monkeypatch: pyte
     assert seen_urls == [
         "https://disprot.org/api/v2/download?format=tsv&release=current&term_ontology=IDPO&term_ontology=GO"
     ]
+
+
+def test_download_disprot_current_json_uses_current_release_url(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    seen_urls: list[str] = []
+
+    def fake_urlretrieve(url: str, filename):
+        seen_urls.append(url)
+        filename.write_text('{"data": []}', encoding="utf-8")
+        return filename, None
+
+    monkeypatch.setattr(residue_sources_module, "urlretrieve", fake_urlretrieve)
+
+    path = download_disprot_current_json(tmp_path)
+
+    assert path.name == "disprot_current.json"
+    assert seen_urls == [
+        "https://disprot.org/api/v2/download?format=json&release=current&term_ontology=IDPO&term_ontology=GO"
+    ]
     assert download_residue_source(tmp_path, name="disprot") == [path]
 
 
@@ -735,6 +776,142 @@ def test_load_disprot_json_expands_regions(tmp_path) -> None:
     dataset = load_disprot_json(path)
 
     assert dataset.target_values("disorder") == {"DP0001": [0, 1, 1, 0, 0, 1]}
+
+
+def test_load_disprot_json_groups_current_disorder_rows_and_ignores_other_states(tmp_path) -> None:
+    path = tmp_path / "disprot_current.json"
+    path.write_text(
+        """
+        {
+          "data": [
+            {
+              "acc": "P1",
+              "disprot_id": "DP1",
+              "sequence": "ABCDEFGH",
+              "dataset": ["demo"],
+              "regions": {
+                "region_id": "DP1r1",
+                "start": 2,
+                "end": 4,
+                "term_namespace": "Structural state",
+                "term_name": "disorder"
+              }
+            },
+            {
+              "acc": "P1",
+              "disprot_id": "DP1",
+              "sequence": "ABCDEFGH",
+              "dataset": ["demo", "extra"],
+              "regions": {
+                "region_id": "DP1r2",
+                "start": 7,
+                "end": 7,
+                "term_namespace": "Structural state",
+                "term_name": "disorder"
+              }
+            },
+            {
+              "acc": "P1",
+              "disprot_id": "DP1",
+              "sequence": "ABCDEFGH",
+              "regions": {
+                "region_id": "DP1r3",
+                "start": 5,
+                "end": 6,
+                "term_namespace": "Structural state",
+                "term_name": "order"
+              }
+            },
+            {
+              "acc": "P2",
+              "disprot_id": "DP2",
+              "sequence": "ABCDEFGH",
+              "regions": {
+                "region_id": "DP2r1",
+                "start": 1,
+                "end": 2,
+                "term_namespace": "Function",
+                "term_name": "disorder"
+              }
+            }
+          ]
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    dataset = load_disprot_json(path, split="train")
+
+    assert dataset.target_values("disorder") == {"P1": [0, 1, 1, 1, 0, 0, 1, 0]}
+    assert dataset.split_counts() == {"train": 1, "val": 0, "test": 0}
+    metadata = dataset.examples[0].metadata
+    assert metadata is not None
+    assert metadata["dataset_tags"] == ("demo", "extra")
+    assert metadata["disorder_interval_count"] == 2
+    assert metadata["disorder_content_bin"] == "30-60%"
+
+
+def test_load_disprot_json_assigns_stratified_splits_for_current_schema(tmp_path) -> None:
+    rows = []
+    for index in range(20):
+        rows.append(
+            {
+                "acc": f"P{index:02d}",
+                "disprot_id": f"DP{index:02d}",
+                "sequence": "A" * 20,
+                "dataset": ["demo"],
+                "regions": {
+                    "region_id": f"DP{index:02d}r1",
+                    "start": 1,
+                    "end": 1,
+                    "term_namespace": "Structural state",
+                    "term_name": "disorder",
+                },
+            }
+        )
+    path = tmp_path / "disprot_current.json"
+    path.write_text(json.dumps({"data": rows}), encoding="utf-8")
+
+    dataset = load_disprot_json(path)
+
+    assert dataset.split_counts() == {"train": 16, "val": 2, "test": 2}
+    assert {example.metadata["dataset_stratum"] for example in dataset.examples if example.metadata} == {"demo"}
+
+
+def test_load_disprot_json_rejects_conflicting_current_sequences(tmp_path) -> None:
+    path = tmp_path / "disprot_current.json"
+    path.write_text(
+        json.dumps(
+            {
+                "data": [
+                    {
+                        "acc": "P1",
+                        "sequence": "AAAA",
+                        "regions": {
+                            "start": 1,
+                            "end": 1,
+                            "term_namespace": "Structural state",
+                            "term_name": "disorder",
+                        },
+                    },
+                    {
+                        "acc": "P1",
+                        "sequence": "CCCC",
+                        "regions": {
+                            "start": 2,
+                            "end": 2,
+                            "term_namespace": "Structural state",
+                            "term_name": "disorder",
+                        },
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(EmbeddingInputError, match="Conflicting sequences"):
+        load_disprot_json(path)
 
 
 def test_load_disprot_tsv_region_mode_uses_matching_disorder_rows(tmp_path) -> None:

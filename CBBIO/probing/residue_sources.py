@@ -6,6 +6,7 @@ from collections.abc import Iterable, Mapping, Sequence
 import csv
 from dataclasses import dataclass
 import gzip
+import hashlib
 import json
 import re
 import tarfile
@@ -63,6 +64,10 @@ DBPTM_BENCHMARK_BASE_URL = "https://biomics.lab.nycu.edu.tw/dbPTM/download/bench
 DISPROT_CURRENT_TSV_URL = (
     "https://disprot.org/api/v2/download?format=tsv&release=current&term_ontology=IDPO&term_ontology=GO"
 )
+DISPROT_CURRENT_JSON_URL = (
+    "https://disprot.org/api/v2/download?format=json&release=current&term_ontology=IDPO&term_ontology=GO"
+)
+DISPROT_SPLIT_RATIOS: Tuple[Tuple[SplitName, float], ...] = (("train", 0.8), ("val", 0.1), ("test", 0.1))
 
 DBPTM_BENCHMARKS: Dict[str, DbptmBenchmarkSpec] = {
     "phosphorylation_by_cdk": DbptmBenchmarkSpec(
@@ -305,7 +310,7 @@ def download_residue_source(root: str | Path, *, name: str, force: bool = False)
 
     spec = get_residue_source(name)
     if spec.name == "disprot":
-        return [download_disprot_current_tsv(root, force=force)]
+        return [download_disprot_current_json(root, force=force)]
     if not spec.download_urls:
         raise EmbeddingInputError(
             f"Residue source {spec.name!r} does not expose stable direct-download URLs in this adapter. "
@@ -330,6 +335,17 @@ def download_disprot_current_tsv(root: str | Path, *, force: bool = False) -> Pa
     path = output_dir / "disprot_current.tsv"
     if force or not path.exists():
         urlretrieve(DISPROT_CURRENT_TSV_URL, path)
+    return path
+
+
+def download_disprot_current_json(root: str | Path, *, force: bool = False) -> Path:
+    """Download the current DisProt JSON export with IDPO and GO terms."""
+
+    output_dir = Path(root).expanduser() / "disprot"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    path = output_dir / "disprot_current.json"
+    if force or not path.exists():
+        urlretrieve(DISPROT_CURRENT_JSON_URL, path)
     return path
 
 
@@ -487,7 +503,7 @@ def load_residue_source_dataset(
     *,
     name: str,
     target: str | None = None,
-    split: SplitName = "train",
+    split: SplitName | None = None,
     download: bool = False,
 ) -> ResidueDataset:
     """Load a configured residue source when the adapter has enough native metadata."""
@@ -500,10 +516,18 @@ def load_residue_source_dataset(
             download_residue_source(root, name=spec.name)
         annotation = base / "BioLiP_nr.txt.gz"
         fasta = base / "protein_nr.fasta.gz"
-        return load_biolip_dataset(annotation, protein_fasta=fasta if fasta.exists() else None, target=resolved_target, split=split)
+        return load_biolip_dataset(
+            annotation,
+            protein_fasta=fasta if fasta.exists() else None,
+            target=resolved_target,
+            split=split or "train",
+        )
     if spec.name == "disprot":
-        path = download_disprot_current_tsv(root) if download else base / "disprot_current.tsv"
-        return load_disprot_tsv(path, target=resolved_target, split=split, region_mode=True)
+        json_path = download_disprot_current_json(root) if download else base / "disprot_current.json"
+        if json_path.exists():
+            return load_disprot_json(json_path, target=resolved_target, split=split)
+        tsv_path = base / "disprot_current.tsv"
+        return load_disprot_tsv(tsv_path, target=resolved_target, split=split or "train", region_mode=True)
     raise EmbeddingInputError(
         f"Residue source {spec.name!r} requires explicit input files. Use adapter {spec.import_adapter}."
     )
@@ -624,12 +648,15 @@ def load_disprot_json(
     path: str | Path,
     *,
     target: str = "disorder",
-    split: SplitName = "train",
+    split: SplitName | None = None,
 ) -> ResidueDataset:
     """Load DisProt-style JSON entries by expanding regions to residue labels."""
 
     payload = json.loads(Path(path).read_text(encoding="utf-8"))
     entries = _disprot_entries(payload)
+    if _has_current_disprot_region_schema(entries):
+        return _load_current_disprot_json_entries(entries, target=target, split=split)
+
     examples: List[ResidueExample] = []
     for index, entry in enumerate(entries):
         entry_map = cast(Mapping[str, Any], entry)
@@ -644,7 +671,7 @@ def load_disprot_json(
                 id=record_id,
                 sequence=sequence,
                 labels={target: labels},
-                split=split,
+                split=split or "train",
                 metadata={"source": "disprot"},
             )
         )
@@ -900,6 +927,185 @@ def _disprot_entries(payload: object) -> Sequence[object]:
     raise EmbeddingInputError("DisProt JSON must be a list or contain data/entries/results list.")
 
 
+def _has_current_disprot_region_schema(entries: Sequence[object]) -> bool:
+    for entry in entries:
+        if not isinstance(entry, Mapping):
+            continue
+        raw_regions = cast(Mapping[str, object], entry).get("regions")
+        if isinstance(raw_regions, Mapping) and (
+            "term_namespace" in raw_regions or "term_name" in raw_regions or "term_id" in raw_regions
+        ):
+            return True
+    return False
+
+
+def _load_current_disprot_json_entries(
+    entries: Sequence[object],
+    *,
+    target: str,
+    split: SplitName | None,
+) -> ResidueDataset:
+    grouped: Dict[str, Dict[str, Any]] = {}
+    for entry in entries:
+        if not isinstance(entry, Mapping):
+            continue
+        entry_map = cast(Mapping[str, Any], entry)
+        raw_region = entry_map.get("regions")
+        if not isinstance(raw_region, Mapping):
+            continue
+        region = cast(Mapping[str, Any], raw_region)
+        if not _is_disprot_disorder_region(region):
+            continue
+
+        sequence = _entry_sequence(entry_map)
+        record_id = str(entry_map.get("acc") or entry_map.get("disprot_id") or entry_map.get("id") or "").strip()
+        if not record_id:
+            raise EmbeddingInputError("Current DisProt JSON disorder rows require acc, disprot_id, or id.")
+        disprot_id = str(entry_map.get("disprot_id") or "").strip()
+        dataset_tags = tuple(str(tag) for tag in entry_map.get("dataset", ()) if str(tag).strip())
+        group = grouped.setdefault(
+            record_id,
+            {
+                "sequence": sequence,
+                "labels": [0] * len(sequence),
+                "metadata": {
+                    "source": "disprot",
+                    "uniprot_acc": str(entry_map.get("acc") or ""),
+                    "disprot_id": disprot_id,
+                    "dataset_tags": dataset_tags,
+                    "disorder_interval_count": 0,
+                },
+            },
+        )
+        if group["sequence"] != sequence:
+            raise EmbeddingInputError(f"Conflicting sequences for DisProt record {record_id!r}.")
+        metadata = cast(Dict[str, Any], group["metadata"])
+        metadata["dataset_tags"] = tuple(sorted(set(cast(Tuple[str, ...], metadata["dataset_tags"]) + dataset_tags)))
+        if disprot_id and not metadata.get("disprot_id"):
+            metadata["disprot_id"] = disprot_id
+
+        start, end = _region_bounds(region)
+        _mark_interval(cast(List[int], group["labels"]), start=start, end=end, one_based=True)
+        metadata["disorder_interval_count"] = int(metadata["disorder_interval_count"]) + 1
+
+    if not grouped:
+        raise EmbeddingInputError("No Structural state disorder rows found in DisProt JSON.")
+
+    examples: List[ResidueExample] = []
+    for record_id, group in grouped.items():
+        labels = cast(List[int], group["labels"])
+        sequence = str(group["sequence"])
+        metadata = dict(cast(Dict[str, Any], group["metadata"]))
+        metadata["disorder_fraction"] = sum(labels) / len(labels)
+        metadata["disorder_content_bin"] = _disprot_disorder_content_bin(float(metadata["disorder_fraction"]))
+        metadata["dataset_stratum"] = _disprot_dataset_stratum(cast(Sequence[str], metadata["dataset_tags"]))
+        examples.append(
+            ResidueExample(
+                id=record_id,
+                sequence=sequence,
+                labels={target: labels},
+                split=split or "train",
+                metadata=metadata,
+            )
+        )
+
+    if split is None:
+        examples = _assign_disprot_stratified_splits(examples)
+    return ResidueDataset(examples)
+
+
+def _is_disprot_disorder_region(region: Mapping[str, Any]) -> bool:
+    namespace = str(region.get("term_namespace") or "").strip().lower()
+    term_name = str(region.get("term_name") or "").strip().lower()
+    return namespace == "structural state" and term_name == "disorder"
+
+
+def _assign_disprot_stratified_splits(examples: Sequence[ResidueExample]) -> List[ResidueExample]:
+    primary_groups: Dict[Tuple[str, str], List[ResidueExample]] = {}
+    for example in examples:
+        metadata = example.metadata or {}
+        key = (
+            str(metadata.get("dataset_stratum") or "none"),
+            str(metadata.get("disorder_content_bin") or "unknown"),
+        )
+        primary_groups.setdefault(key, []).append(example)
+
+    assigned: List[ResidueExample] = []
+    rare_by_content: Dict[str, List[ResidueExample]] = {}
+    for key, group in primary_groups.items():
+        if len(group) >= 10:
+            assigned.extend(_split_disprot_group(group))
+        else:
+            rare_by_content.setdefault(key[1], []).extend(group)
+
+    rare_global: List[ResidueExample] = []
+    for group in rare_by_content.values():
+        if len(group) >= 10:
+            assigned.extend(_split_disprot_group(group))
+        else:
+            rare_global.extend(group)
+    if rare_global:
+        assigned.extend(_split_disprot_group(rare_global))
+
+    return sorted(assigned, key=lambda example: example.id)
+
+
+def _split_disprot_group(group: Sequence[ResidueExample]) -> List[ResidueExample]:
+    ordered = sorted(group, key=lambda example: _stable_disprot_hash(example.id))
+    counts = _disprot_split_counts(len(ordered))
+    split_names: List[SplitName] = [split_name for split_name, count in counts for _ in range(count)]
+    return [
+        ResidueExample(
+            id=example.id,
+            sequence=example.sequence,
+            labels=example.labels,
+            split=split_name,
+            mask=example.mask,
+            metadata=example.metadata,
+        )
+        for example, split_name in zip(ordered, split_names)
+    ]
+
+
+def _disprot_split_counts(total: int) -> List[Tuple[SplitName, int]]:
+    if total <= 0:
+        return [("train", 0), ("val", 0), ("test", 0)]
+    val = int(round(total * 0.1))
+    test = int(round(total * 0.1))
+    if total >= 10:
+        val = max(1, val)
+        test = max(1, test)
+    elif total >= 2:
+        test = max(1, test)
+    train = total - val - test
+    while train < 1 and val > 0:
+        val -= 1
+        train += 1
+    while train < 1 and test > 0:
+        test -= 1
+        train += 1
+    return [("train", train), ("val", val), ("test", test)]
+
+
+def _stable_disprot_hash(value: str) -> str:
+    return hashlib.sha256(f"disprot-split-v1:{value}".encode("utf-8")).hexdigest()
+
+
+def _disprot_disorder_content_bin(fraction: float) -> str:
+    if fraction < 0.1:
+        return "0-10%"
+    if fraction < 0.3:
+        return "10-30%"
+    if fraction < 0.6:
+        return "30-60%"
+    return "60-100%"
+
+
+def _disprot_dataset_stratum(dataset_tags: Sequence[str]) -> str:
+    values = sorted({str(tag).strip() for tag in dataset_tags if str(tag).strip()})
+    return "+".join(values) if values else "none"
+
+
 def _entry_sequence(entry: Mapping[str, Any]) -> str:
     sequence = entry.get("sequence")
     if isinstance(sequence, str):
@@ -1032,12 +1238,14 @@ def _local_musitedeep_fastas(root: Path, *, file_names: Sequence[str] | None) ->
 
 __all__ = [
     "DBPTM_BENCHMARKS",
+    "DISPROT_CURRENT_JSON_URL",
     "DISPROT_CURRENT_TSV_URL",
     "DbptmBenchmarkSpec",
     "RESIDUE_SOURCE_SPECS",
     "ResidueSourceName",
     "ResidueSourceSpec",
     "download_dbptm_benchmark",
+    "download_disprot_current_json",
     "download_disprot_current_tsv",
     "download_residue_source",
     "download_musitedeep_testdata",
