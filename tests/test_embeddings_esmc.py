@@ -8,102 +8,85 @@ from typing import Any, Sequence, cast
 import pytest
 
 from CBBIO.embeddings import EmbeddingDependencyError, GenerationInput
-from CBBIO.embeddings_esmc import EsmcEmbeddingGenerator, EsmcPreprocessor
-
-
-class _FakeScalar:
-    def __init__(self, value: float) -> None:
-        self.value = value
-
-    def item(self) -> float:
-        return self.value
+from CBBIO.embeddings_esmc import (
+    ESMC_HF_MODEL_NAMES,
+    EsmcEmbeddingGenerator,
+    EsmcPreprocessor,
+    register_hf_esmc_architecture,
+)
 
 
 class _FakeTensor:
-    def __init__(self, data: Any) -> None:
+    def __init__(self, data: Any, *, device: str = "cpu") -> None:
         self.data = data
-        self.shape = self._shape_of(data)
-
-    def _shape_of(self, value: Any) -> tuple[int, ...]:
-        if isinstance(value, list) and value:
-            inner = self._shape_of(value[0])
-            return (len(value),) + inner
-        if isinstance(value, list):
-            return (0,)
-        return ()
+        self.device = device
 
     def __getitem__(self, item: Any) -> "_FakeTensor":
         if isinstance(item, tuple):
             first = item[0]
             second = item[1] if len(item) > 1 else slice(None)
             base = self.data[first]
-            return _FakeTensor(base[second])
-        return _FakeTensor(self.data[item])
+            return _FakeTensor(base[second], device=self.device)
+        return _FakeTensor(self.data[item], device=self.device)
+
+    def __ne__(self, other: object) -> "_FakeTensor":
+        if isinstance(self.data, list):
+            return _FakeTensor([[value != other for value in row] for row in self.data], device=self.device)
+        return _FakeTensor(self.data != other, device=self.device)
+
+    def to(self, device: str) -> "_FakeTensor":
+        return _FakeTensor(self.data, device=str(device))
 
     def tolist(self) -> Any:
         return self.data
 
-    def sum(self) -> _FakeScalar:
-        if isinstance(self.data, list):
-            return _FakeScalar(float(sum(self.data)))
-        return _FakeScalar(float(self.data))
+
+class _FakeTokenizerState:
+    pad_token_id = 1
 
 
-class _FakeTokenizer:
-    def __call__(self, sequence: str, add_special_tokens: bool, return_tensors: str, is_split_into_words: bool) -> Any:
-        assert add_special_tokens is True
-        assert return_tensors == "pt"
-        assert is_split_into_words is False
-        assert sequence.isupper()
-        return {"input_ids": _FakeTensor([[1, 2, 3]]), "attention_mask": _FakeTensor([[1, 1, 1]])}
-
-
-class _FakeESMProtein:
-    def __init__(self, sequence: str) -> None:
-        self.sequence = sequence
-
-
-class _FakeLogitsConfig:
-    def __init__(
-        self,
-        sequence: bool,
-        return_embeddings: bool,
-        return_hidden_states: bool = False,
-        ith_hidden_layer: int | None = None,
-    ) -> None:
-        self.sequence = sequence
-        self.return_embeddings = return_embeddings
-        self.return_hidden_states = return_hidden_states
-        self.ith_hidden_layer = ith_hidden_layer
-
-
-class _FakeLogitsOutput:
-    def __init__(self, embeddings: Any = None, hidden_states: Any = None) -> None:
-        self.embeddings = embeddings
+class _FakeSdkOutput:
+    def __init__(self, hidden_states: Any) -> None:
         self.hidden_states = hidden_states
 
 
-class _FakeClient:
+class _FakeSdkModel:
     def __init__(self) -> None:
-        self.device = "cpu"
-        self.requested_layers: list[int | None] = []
+        self.tokenizer = _FakeTokenizerState()
+        self.to_args: tuple[Any, ...] | None = None
+        self.to_kwargs: dict[str, Any] | None = None
 
-    def to(self, device: str) -> "_FakeClient":
-        self.device = device
+    def to(self, *args: Any, **kwargs: Any) -> "_FakeSdkModel":
+        self.to_args = args
+        self.to_kwargs = kwargs
         return self
 
-    def encode(self, protein: _FakeESMProtein) -> Any:
-        return protein.sequence
+    def eval(self) -> None:
+        return None
 
-    def logits(self, protein_tensor: Any, config: _FakeLogitsConfig) -> _FakeLogitsOutput:
-        assert config.sequence is False
-        assert config.return_embeddings is True
-        assert config.return_hidden_states is True
-        self.requested_layers.append(config.ith_hidden_layer)
-        residues = len(str(protein_tensor))
-        layer = float(config.ith_hidden_layer or 0)
-        hidden = [[layer, float(i)] for i in range(residues)]
-        return _FakeLogitsOutput(hidden_states=_FakeTensor([hidden]))
+    def _tokenize(self, sequences: list[str]) -> _FakeTensor:
+        max_len = max(len(sequence) for sequence in sequences) + 2
+        token_rows = []
+        for sequence in sequences:
+            row = [0] + list(range(5, 5 + len(sequence))) + [2]
+            row.extend([1] * (max_len - len(row)))
+            token_rows.append(row)
+        return _FakeTensor(token_rows)
+
+    def forward(self, **kwargs: Any) -> _FakeSdkOutput:
+        token_rows = kwargs["sequence_tokens"].tolist()
+        seq_len = len(token_rows[0])
+        hidden_states = []
+        for layer in range(30):
+            hidden_states.append(
+                _FakeTensor(
+                    [
+                        [[float(layer), float(row_index * 100 + pos)] for pos in range(seq_len)]
+                        for row_index, _row in enumerate(token_rows)
+                    ]
+                )
+            )
+        return _FakeSdkOutput(hidden_states)
 
 
 def test_esmc_preprocessor_replaces_ambiguous_amino_acids() -> None:
@@ -125,19 +108,14 @@ def test_esmc_generator_raises_dependency_error_when_sdk_missing(
     monkeypatch.delitem(sys.modules, "esm.models.esmc", raising=False)
 
     with pytest.raises(EmbeddingDependencyError):
-        EsmcEmbeddingGenerator(client=None)
+        EsmcEmbeddingGenerator()
 
 
 def test_esmc_generate_returns_per_residue_matrix_without_pooling() -> None:
-    client = _FakeClient()
     generator = EsmcEmbeddingGenerator(
-        client=client,
+        model=_FakeSdkModel(),
         model_name="esmc_300m",
-        from_pretrained_kwargs={},
     )
-    # Inject fake SDK classes to avoid importing esm in tests.
-    cast(Any, generator.tokenizer).protein_cls = _FakeESMProtein
-    cast(Any, generator.model).logits_config_cls = _FakeLogitsConfig
 
     result = generator.generate([GenerationInput(id="Q1", sequence="ACDE")], layer_index=[0, 1], fail_fast=True)
     assert result.errors == []
@@ -146,39 +124,197 @@ def test_esmc_generate_returns_per_residue_matrix_without_pooling() -> None:
     second_embedding = cast(Sequence[Sequence[float]], result.records[1].embedding)
     assert second_embedding[0][0] == 1.0
     assert isinstance(result.records[0].embedding[0], list)
-    assert client.requested_layers == [0, 1]
 
 
-def test_esmc_singleton_batch_mean_pooling_removes_batch_axis() -> None:
-    client = _FakeClient()
-    generator = EsmcEmbeddingGenerator(
-        client=client,
-        model_name="esmc_300m",
-        from_pretrained_kwargs={},
-    )
-    cast(Any, generator.tokenizer).protein_cls = _FakeESMProtein
-    cast(Any, generator.model).logits_config_cls = _FakeLogitsConfig
+def test_esmc_mean_and_cls_poolers_use_expected_tokens() -> None:
+    generator = EsmcEmbeddingGenerator(model=_FakeSdkModel(), model_name="esmc_300m")
 
-    result = generator.generate([GenerationInput(id="Q1", sequence="ACDE")], layer_index=[1], pooler="mean", fail_fast=True)
+    mean = generator.generate([GenerationInput(id="Q1", sequence="ACDE")], layer_index=[1], pooler="mean", fail_fast=True)
+    cls = generator.generate([GenerationInput(id="Q1", sequence="ACDE")], layer_index=[1], pooler="cls", fail_fast=True)
 
-    assert result.errors == []
-    assert result.records[0].shape == (2,)
-    assert result.records[0].embedding == [1.0, 1.5]
+    assert mean.errors == []
+    assert mean.records[0].shape == (2,)
+    assert mean.records[0].embedding == [1.0, 2.5]
+    assert cls.records[0].shape == (2,)
+    assert cls.records[0].embedding == [1.0, 0.0]
 
 
 def test_esmc_available_layers_uses_family_hint() -> None:
-    generator = EsmcEmbeddingGenerator(client=_FakeClient(), model_name="esmc_300m")
+    generator = EsmcEmbeddingGenerator(model=_FakeSdkModel(), model_name="esmc_300m")
     assert generator.num_layers() == 30
     assert generator.available_layers()[:3] == [0, 1, 2]
 
 
 def test_esmc_layer_none_requests_all_known_layers() -> None:
-    client = _FakeClient()
-    generator = EsmcEmbeddingGenerator(client=client, model_name="esmc_300m")
-    cast(Any, generator.tokenizer).protein_cls = _FakeESMProtein
-    cast(Any, generator.model).logits_config_cls = _FakeLogitsConfig
+    generator = EsmcEmbeddingGenerator(model=_FakeSdkModel(), model_name="esmc_300m")
 
-    result = generator.generate([GenerationInput(id="Q1", sequence="AC")], layer_index=None, fail_fast=True)
+    result = generator.generate([GenerationInput(id="Q1", sequence="AC")], layer_index=None, pooler="cls", fail_fast=True)
 
-    assert len(result.records) == 30
-    assert client.requested_layers == list(range(30))
+    assert [record.layer_index for record in result.records] == list(range(30))
+
+
+def test_esmc_negative_layer_index_resolves_from_available_layers() -> None:
+    generator = EsmcEmbeddingGenerator(model=_FakeSdkModel(), model_name="esmc_300m")
+
+    result = generator.generate([GenerationInput(id="Q1", sequence="AC")], layer_index=[-1], pooler="cls", fail_fast=True)
+
+    assert [record.layer_index for record in result.records] == [29]
+
+
+def test_esmc_generator_loads_hf_model_and_tokenizer_for_aliases(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed_models: list[str] = []
+    observed_kwargs: list[dict[str, Any]] = []
+    observed_tokenizers: list[str] = []
+
+    class _FakeAutoModel:
+        @staticmethod
+        def register(config_class: type[object], model_class: type[object], exist_ok: bool = False) -> None:
+            _ = config_class, model_class, exist_ok
+
+        @staticmethod
+        def from_pretrained(name: str, **kwargs: Any) -> _FakeHfModel:
+            observed_models.append(name)
+            observed_kwargs.append(dict(kwargs))
+            return _FakeHfModel()
+
+    class _FakeAutoConfig:
+        @staticmethod
+        def register(model_type: str, config_class: type[object], exist_ok: bool = False) -> None:
+            _ = model_type, config_class, exist_ok
+
+    class _FakeEsmConfig:
+        def __init__(self, **kwargs: Any) -> None:
+            for key, value in kwargs.items():
+                setattr(self, key, value)
+
+    class _FakeEsmModel:
+        pass
+
+    class _FakeAutoTokenizer:
+        @staticmethod
+        def from_pretrained(name: str) -> _FakeTokenizer:
+            observed_tokenizers.append(name)
+            return _FakeTokenizer()
+
+    fake_transformers = types.SimpleNamespace(
+        AutoConfig=_FakeAutoConfig,
+        AutoModel=_FakeAutoModel,
+        AutoTokenizer=_FakeAutoTokenizer,
+        EsmConfig=_FakeEsmConfig,
+        EsmModel=_FakeEsmModel,
+    )
+    monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
+
+    for alias, reference in ESMC_HF_MODEL_NAMES.items():
+        generator = EsmcEmbeddingGenerator(model_name=alias, device="cpu")
+        assert generator.model_metadata.model_reference == reference
+
+    assert observed_models == list(ESMC_HF_MODEL_NAMES.values())
+    assert observed_kwargs == [{} for _ in ESMC_HF_MODEL_NAMES]
+    assert observed_tokenizers == list(ESMC_HF_MODEL_NAMES.values())
+
+
+def test_esmc_generator_forwards_explicit_from_pretrained_kwargs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed_kwargs: list[dict[str, Any]] = []
+
+    class _FakeAutoModel:
+        @staticmethod
+        def register(config_class: type[object], model_class: type[object], exist_ok: bool = False) -> None:
+            _ = config_class, model_class, exist_ok
+
+        @staticmethod
+        def from_pretrained(name: str, **kwargs: Any) -> _FakeHfModel:
+            _ = name
+            observed_kwargs.append(dict(kwargs))
+            return _FakeHfModel()
+
+    class _FakeAutoConfig:
+        @staticmethod
+        def register(model_type: str, config_class: type[object], exist_ok: bool = False) -> None:
+            _ = model_type, config_class, exist_ok
+
+    class _FakeEsmConfig:
+        def __init__(self, **kwargs: Any) -> None:
+            for key, value in kwargs.items():
+                setattr(self, key, value)
+
+    class _FakeEsmModel:
+        pass
+
+    class _FakeAutoTokenizer:
+        @staticmethod
+        def from_pretrained(name: str) -> _FakeTokenizer:
+            _ = name
+            return _FakeTokenizer()
+
+    fake_transformers = types.SimpleNamespace(
+        AutoConfig=_FakeAutoConfig,
+        AutoModel=_FakeAutoModel,
+        AutoTokenizer=_FakeAutoTokenizer,
+        EsmConfig=_FakeEsmConfig,
+        EsmModel=_FakeEsmModel,
+    )
+    monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
+
+    EsmcEmbeddingGenerator(
+        model_name="esmc_300m",
+        device="cpu",
+        from_pretrained_kwargs={"low_cpu_mem_usage": True},
+    )
+
+    assert observed_kwargs == [{"low_cpu_mem_usage": True}]
+
+
+def test_register_hf_esmc_architecture_uses_matching_model_config_class(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registrations: list[tuple[type[object], type[object]]] = []
+
+    class _FakeAutoModel:
+        @staticmethod
+        def register(config_class: type[object], model_class: type[object], exist_ok: bool = False) -> None:
+            _ = exist_ok
+            if getattr(model_class, "config_class", None) is not config_class:
+                raise ValueError("model config_class must match registered config_class")
+            registrations.append((config_class, model_class))
+
+    class _FakeAutoConfig:
+        @staticmethod
+        def register(model_type: str, config_class: type[object], exist_ok: bool = False) -> None:
+            _ = model_type, config_class, exist_ok
+
+    class _FakeEsmConfig:
+        pass
+
+    class _FakeEsmModel:
+        config_class = _FakeEsmConfig
+
+    fake_transformers = types.SimpleNamespace(
+        AutoConfig=_FakeAutoConfig,
+        AutoModel=_FakeAutoModel,
+        EsmConfig=_FakeEsmConfig,
+        EsmModel=_FakeEsmModel,
+    )
+    monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
+
+    register_hf_esmc_architecture()
+    register_hf_esmc_architecture()
+
+    assert len(registrations) == 2
+    assert registrations[0] == registrations[1]
+
+
+def test_register_hf_esmc_architecture_resolves_cached_config() -> None:
+    from transformers import AutoConfig
+
+    register_hf_esmc_architecture()
+    config = AutoConfig.from_pretrained("biohub/ESMC-300M", local_files_only=True)
+
+    assert config.model_type == "esmc"
+    assert config.hidden_size == 960
+    assert config.num_hidden_layers == 30
+    assert config.num_attention_heads == 15

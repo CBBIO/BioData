@@ -1,9 +1,8 @@
-"""ESM-C specific embedding adapters and generator (protein -> embedding)."""
+"""ESM-C-specific embedding generator backed by the ESM SDK."""
 
 from __future__ import annotations
 
 from typing import Any, Dict, List, Sequence, cast
-import warnings
 
 from .. import (
     EmbeddingBackendError,
@@ -12,27 +11,64 @@ from .. import (
     EmbeddingInputError,
     GenerationInput,
     GenerationResult,
-    ModelMetadata,
     ModelAdapter,
+    ModelMetadata,
     TokenizerAdapter,
 )
 from ..utils.pooler import PoolerInput
-from ..utils.torch import (
-    BasePreprocessor,
-    DefaultPostprocessor,
-    framework_versions,
-    normalize_requested_layers,
-)
+from ..utils.torch import BasePreprocessor, DefaultPostprocessor, framework_versions, normalize_requested_layers
 
+
+ESMC_HF_MODEL_NAMES: Dict[str, str] = {
+    "esmc_300m": "biohub/ESMC-300M",
+    "esmc-300m": "biohub/ESMC-300M",
+    "esmc-300m-2024-12": "biohub/ESMC-300M",
+    "biohub/esmc-300m-2024-12": "biohub/ESMC-300M",
+    "biohub/esmc-300m": "biohub/ESMC-300M",
+    "esmc_600m": "biohub/ESMC-600M",
+    "esmc-600m": "biohub/ESMC-600M",
+    "esmc-600m-2024-12": "biohub/ESMC-600M",
+    "biohub/esmc-600m-2024-12": "biohub/ESMC-600M",
+    "biohub/esmc-600m": "biohub/ESMC-600M",
+    "esmc_6b": "biohub/ESMC-6B",
+    "esmc-6b": "biohub/ESMC-6B",
+    "esmc-6b-2024-12": "biohub/ESMC-6B",
+    "biohub/esmc-6b-2024-12": "biohub/ESMC-6B",
+    "biohub/esmc-6b": "biohub/ESMC-6B",
+}
+
+ESMC_SDK_MODEL_NAMES: Dict[str, str] = {
+    "esmc_300m": "esmc_300m",
+    "esmc-300m": "esmc_300m",
+    "esmc-300m-2024-12": "esmc_300m",
+    "biohub/esmc-300m-2024-12": "esmc_300m",
+    "biohub/esmc-300m": "esmc_300m",
+    "biohub/ESMC-300M": "esmc_300m",
+    "esmc_600m": "esmc_600m",
+    "esmc-600m": "esmc_600m",
+    "esmc-600m-2024-12": "esmc_600m",
+    "biohub/esmc-600m-2024-12": "esmc_600m",
+    "biohub/esmc-600m": "esmc_600m",
+    "biohub/ESMC-600M": "esmc_600m",
+    "esmc_6b": "esmc_6b",
+    "esmc-6b": "esmc_6b",
+    "esmc-6b-2024-12": "esmc_6b",
+    "biohub/esmc-6b-2024-12": "esmc_6b",
+    "biohub/esmc-6b": "esmc_6b",
+    "biohub/ESMC-6B": "esmc_6b",
+}
 
 ESMC_LAYER_SPECS: Dict[str, int] = {
-    "esmc-6b-2024-12": 80,
-    "esmc-600m-2024-12": 36,
-    "esmc-300m-2024-12": 30,
-    "esmc_6b": 80,
-    "esmc_600m": 36,
+    "biohub/ESMC-300M": 30,
+    "biohub/ESMC-600M": 36,
+    "biohub/ESMC-6B": 80,
     "esmc_300m": 30,
+    "esmc_600m": 36,
+    "esmc_6b": 80,
 }
+
+_EsmcArchitectureCache = tuple[type[Any], type[Any], type[Any], type[Any]]
+_esmc_architecture_cache: _EsmcArchitectureCache | None = None
 
 
 class EsmcPreprocessor(BasePreprocessor):
@@ -43,12 +79,11 @@ class EsmcPreprocessor(BasePreprocessor):
 
 
 class EsmcTokenizerAdapter(TokenizerAdapter):
-    """Tokenizer adapter for ESM-C SDK encode path."""
+    """Tokenizer adapter for the ESM SDK ESM-C model."""
 
-    def __init__(self, client: Any, *, protein_cls: Any | None = None) -> None:
+    def __init__(self, client: Any, *, device: str = "cpu") -> None:
         self.client = client
-        self.protein_cls = protein_cls
-        self._warned_about_batched_sdk = False
+        self.device = str(device)
 
     def tokenize(self, sequence: str) -> Any:
         return self.tokenize_many([sequence])
@@ -56,86 +91,65 @@ class EsmcTokenizerAdapter(TokenizerAdapter):
     def tokenize_many(self, sequences: Sequence[str]) -> Any:
         if not sequences:
             raise EmbeddingInputError("ESM-C tokenization requires at least one sequence.")
-        if len(sequences) > 1 and not self._warned_about_batched_sdk:
-            warnings.warn(
-                "ESM-C batched generation passes multiple encoded proteins to the ESM SDK client. "
-                "If your installed SDK does not support batched logits, use batch_size=1 for ESM-C.",
-                RuntimeWarning,
-                stacklevel=3,
-            )
-            self._warned_about_batched_sdk = True
-        protein_cls = self.protein_cls
-        if protein_cls is None:
-            try:
-                from esm.sdk.api import ESMProtein  # type: ignore
-            except ModuleNotFoundError as exc:
-                raise EmbeddingDependencyError(
-                    "ESM SDK is required for ESM-C tokenization. Install package providing esm.sdk.api."
-                ) from exc
-            protein_cls = ESMProtein
-
-        tokens = [self.client.encode(protein_cls(sequence=sequence)) for sequence in sequences]
-        return {"tokens": tokens[0] if len(tokens) == 1 else tokens, "residue_lens": [len(sequence) for sequence in sequences]}
+        tokenize_fn = getattr(self.client, "_tokenize", None)
+        if not callable(tokenize_fn):
+            raise EmbeddingBackendError("ESM-C SDK model does not expose the expected _tokenize method.")
+        sequence_tokens = tokenize_fn(list(sequences))
+        sequence_tokens = _maybe_to_device(sequence_tokens, self.device)
+        pad_token_id = _pad_token_id(self.client)
+        attention_mask = sequence_tokens != pad_token_id
+        return {"sequence_tokens": sequence_tokens, "attention_mask": attention_mask}
 
 
 class EsmcModelAdapter(ModelAdapter):
-    """Model adapter for ESM-C SDK logits path."""
+    """Model adapter for the ESM SDK ESM-C forward path."""
 
-    def __init__(
-        self,
-        client: Any,
-        *,
-        logits_config_cls: Any | None = None,
-        available_layer_count: int | None = None,
-    ) -> None:
+    def __init__(self, client: Any, *, available_layer_count: int | None = None) -> None:
         self.client = client
-        self.logits_config_cls = logits_config_cls
         self.available_layer_count = available_layer_count
 
     def infer(self, tokens: Any, *, layer_index: int | Sequence[int] | None = None) -> Any:
-        token_payload = tokens
-        residue_lens: List[int] | None = None
-        batch_size = 1
-        if isinstance(tokens, dict):
-            token_map = cast(Dict[str, Any], tokens)
-            token_payload = token_map.get("tokens")
-            residue_lens_raw = token_map.get("residue_lens")
-            if isinstance(residue_lens_raw, Sequence) and not isinstance(residue_lens_raw, (str, bytes, bytearray)):
-                residue_lens = [int(cast(Any, value)) for value in cast(Sequence[object], residue_lens_raw)]
-                batch_size = len(residue_lens)
+        if not isinstance(tokens, dict):
+            raise EmbeddingInputError("EsmcModelAdapter expects tokenized input as a dict.")
+        token_map = cast(Dict[str, Any], tokens)
+        if "sequence_tokens" not in token_map or "attention_mask" not in token_map:
+            raise EmbeddingInputError("Token dict must contain sequence_tokens and attention_mask.")
 
-        logits_config_cls = self.logits_config_cls
-        if logits_config_cls is None:
-            try:
-                from esm.sdk.api import LogitsConfig  # type: ignore
-            except ModuleNotFoundError as exc:
-                raise EmbeddingDependencyError(
-                    "ESM SDK is required for ESM-C logits config. Install package providing esm.sdk.api."
-                ) from exc
-            logits_config_cls = LogitsConfig
+        try:
+            import torch  # type: ignore
+        except ModuleNotFoundError as exc:
+            raise EmbeddingDependencyError("PyTorch is required for ESM-C inference. Install with: pip install torch") from exc
 
-        requested_layers = _resolve_requested_layers(layer_index, available_layer_count=self.available_layer_count)
-        selected: Dict[int, Any] = {}
-        for requested_layer in requested_layers:
-            output = self.client.logits(
-                token_payload,
-                logits_config_cls(
-                    sequence=False,
-                    return_embeddings=True,
-                    return_hidden_states=True,
-                    ith_hidden_layer=requested_layer,
-                ),
-            )
-            layer_tensor = _layer_tensor_from_logits_output(output, batch_size=batch_size)
-            selected[int(requested_layer)] = layer_tensor
-        if residue_lens is None:
-            residue_lens = [_infer_residue_length_from_layers(selected)]
-        return {"layers": selected, "residue_lens": residue_lens}
+        total = self._total_layers()
+        requested = _resolve_requested_layers(layer_index, available_layer_count=total)
+        forward_fn = getattr(self.client, "forward", None)
+        if not callable(forward_fn):
+            forward_fn = self.client
+        with torch.inference_mode():
+            output = forward_fn(sequence_tokens=token_map["sequence_tokens"])
+        hidden_states = getattr(output, "hidden_states", None)
+        if hidden_states is None:
+            raise EmbeddingBackendError("ESM-C output missing hidden_states.")
+        if len(hidden_states) < total:
+            raise EmbeddingBackendError(f"ESM-C returned {len(hidden_states)} hidden states; expected at least {total}.")
+        return {
+            "layers": {idx: hidden_states[idx] for idx in requested},
+            "sample_spans": _sample_spans_from_attention_mask(token_map["attention_mask"]),
+        }
 
     def available_layers(self) -> List[int] | None:
         if self.available_layer_count is None:
             return None
         return list(range(int(self.available_layer_count)))
+
+    def _total_layers(self) -> int:
+        if self.available_layer_count is not None:
+            return int(self.available_layer_count)
+        transformer = getattr(self.client, "transformer", None)
+        blocks = getattr(transformer, "blocks", None)
+        if isinstance(blocks, Sequence):
+            return len(blocks)
+        raise EmbeddingBackendError("Could not infer ESM-C layer count from SDK model.")
 
 
 class EsmcPostprocessor(DefaultPostprocessor):
@@ -146,55 +160,70 @@ class EsmcEmbeddingGenerator(EmbeddingGenerator):
     """Concrete embedding generator for ESM-C family models."""
 
     GENERATOR_CLASS = "esmc"
-    GENERATOR_ALIASES = ("esm-c", "esmc3", "esm3c","ESM3c")
+    GENERATOR_ALIASES = ("esm-c", "esmc3", "esm3c", "ESM3c")
     DEFAULT_MODEL_NAME = "esmc_600m"
-    FAMILY_MODELS = sorted(str(value) for value in ESMC_LAYER_SPECS.keys())
-    SUPPORTED_POOLERS = ("none", "mean")
+    FAMILY_MODELS = ["esmc_300m", "esmc_600m", "biohub/ESMC-300M", "biohub/ESMC-600M", "biohub/ESMC-6B"]
+    SUPPORTED_POOLERS = ("none", "mean", "cls")
 
     def __init__(
         self,
         *,
         model_name: str = DEFAULT_MODEL_NAME,
         device: str = "cpu",
-        use_flash_attention: bool | None = None,
+        dtype: str | None = None,
+        model: Any | None = None,
+        tokenizer: Any | None = None,
         client: Any | None = None,
+        use_flash_attention: bool | None = None,
         from_pretrained_kwargs: Dict[str, Any] | None = None,
     ) -> None:
-        resolved_client = client
-        kwargs = dict(from_pretrained_kwargs or {})
-        if use_flash_attention is not None:
-            kwargs.setdefault("use_flash_attention", bool(use_flash_attention))
+        _ = dtype, tokenizer
+        model_reference = _resolve_model_reference(model_name)
+        sdk_model_name = _resolve_sdk_model_name(model_name)
+        resolved_client = client if client is not None else model
 
         if resolved_client is None:
             try:
                 from esm.models.esmc import ESMC  # type: ignore
+                import torch  # type: ignore
             except ModuleNotFoundError as exc:
                 raise EmbeddingDependencyError(
                     "ESM SDK is required for ESM-C loading. Install package providing esm.models.esmc."
                 ) from exc
 
-            resolved_client = ESMC.from_pretrained(model_name, **kwargs).to(device)
+            kwargs = dict(from_pretrained_kwargs or {})
+            if use_flash_attention is not None:
+                kwargs.setdefault("use_flash_attention", bool(use_flash_attention))
+            if kwargs:
+                try:
+                    resolved_client = ESMC.from_pretrained(sdk_model_name, device=torch.device(device), **kwargs)
+                except TypeError:
+                    resolved_client = ESMC.from_pretrained(sdk_model_name, device=torch.device(device))
+            else:
+                resolved_client = ESMC.from_pretrained(sdk_model_name, device=torch.device(device))
+            resolved_client = _maybe_to_device(resolved_client, device)
 
-        layer_count = _resolve_layer_count(model_name)
+        layer_count = ESMC_LAYER_SPECS.get(model_reference) or ESMC_LAYER_SPECS.get(sdk_model_name)
         super().__init__(
-            model_reference=model_name,
+            model_reference=model_reference,
             preprocessor=EsmcPreprocessor(),
-            tokenizer=EsmcTokenizerAdapter(resolved_client),
+            tokenizer=EsmcTokenizerAdapter(resolved_client, device=device),
             model=EsmcModelAdapter(resolved_client, available_layer_count=layer_count),
             postprocessor=EsmcPostprocessor(),
         )
         self.model_metadata = ModelMetadata(
             provider="esm-sdk",
             model_name=model_name,
-            model_reference=model_name,
-            tokenizer_name="esm.sdk.api.ESMProtein",
+            model_reference=model_reference,
+            tokenizer_name="esm.tokenization.EsmSequenceTokenizer",
             device=str(device),
             framework_versions=framework_versions("esm", "torch"),
             parameters={
                 "mode": "protein_to_embedding_only",
                 "representation": "per-residue",
                 "pooling": "none",
-                "layer_indexing": "hf_native_0_is_first_hidden",
+                "layer_indexing": "esm_sdk_hidden_states_0_is_first_transformer_layer",
+                "sdk_model_name": sdk_model_name,
                 "use_flash_attention": use_flash_attention,
                 "available_layer_count_hint": layer_count,
             },
@@ -222,100 +251,81 @@ class EsmcEmbeddingGenerator(EmbeddingGenerator):
         )
 
 
-def _layer_tensor_from_logits_output(output: Any, *, batch_size: int = 1) -> Any:
-    hidden_states = getattr(output, "hidden_states", None)
-    if hidden_states is not None:
-        return _single_layer_tensor(hidden_states, batch_size=batch_size)
-    embeddings = getattr(output, "embeddings", None)
-    if embeddings is not None:
-        return _single_layer_tensor(embeddings, batch_size=batch_size)
-    raise EmbeddingBackendError("ESM-C logits output did not include hidden_states or embeddings.")
+def register_hf_esmc_architecture() -> None:
+    """Register Biohub ESM-C config metadata with Transformers' built-in ESM config."""
+
+    global _esmc_architecture_cache
+
+    try:
+        from transformers import AutoConfig, AutoModel, EsmConfig, EsmModel  # type: ignore
+    except ModuleNotFoundError:
+        raise
+
+    if (
+        _esmc_architecture_cache is not None
+        and _esmc_architecture_cache[0] is EsmConfig
+        and _esmc_architecture_cache[1] is EsmModel
+    ):
+        EsmcConfig = _esmc_architecture_cache[2]
+        EsmcModel = _esmc_architecture_cache[3]
+    else:
+
+        class EsmcConfig(EsmConfig):  # type: ignore[misc]
+            model_type = "esmc"
+
+            def __init__(
+                self,
+                *,
+                d_model: int | None = None,
+                n_layers: int | None = None,
+                n_heads: int | None = None,
+                dtype: str | None = None,
+                classifier_dropout: float | None = None,
+                **kwargs: Any,
+            ) -> None:
+                if d_model is not None:
+                    kwargs.setdefault("hidden_size", int(d_model))
+                    kwargs.setdefault("intermediate_size", int(d_model) * 4)
+                if n_layers is not None:
+                    kwargs.setdefault("num_hidden_layers", int(n_layers))
+                if n_heads is not None:
+                    kwargs.setdefault("num_attention_heads", int(n_heads))
+                super().__init__(**kwargs)  # pyright: ignore[reportUnknownMemberType]
+                self.d_model = int(d_model) if d_model is not None else self.hidden_size
+                self.n_layers = int(n_layers) if n_layers is not None else self.num_hidden_layers
+                self.n_heads = int(n_heads) if n_heads is not None else self.num_attention_heads
+                self.dtype = dtype
+                self.classifier_dropout = classifier_dropout
+
+        class EsmcModel(EsmModel):  # type: ignore[misc]
+            config_class = EsmcConfig
+
+        _esmc_architecture_cache = (EsmConfig, EsmModel, EsmcConfig, EsmcModel)
+
+    cast(Any, AutoConfig).register("esmc", EsmcConfig, exist_ok=True)
+    cast(Any, AutoModel).register(EsmcConfig, EsmcModel, exist_ok=True)
 
 
-def _single_layer_tensor(embeddings: Any, *, batch_size: int = 1) -> Any:
-    """Normalize ESM-C hidden state output to [batch, residues, hidden] or [residues, hidden]."""
-
-    shape = getattr(embeddings, "shape", None)
-    shape_seq = cast(Sequence[Any], shape) if shape is not None else None
-    ndim = len(shape_seq) if shape_seq is not None else None
-
-    if ndim == 4:
-        assert shape_seq is not None
-        # Common SDK shapes for a requested single layer include
-        # [1, batch, residues, hidden] or [batch, 1, residues, hidden].
-        if int(shape_seq[0]) == 1:
-            return embeddings[0]
-        if int(shape_seq[1]) == 1:
-            return embeddings[:, 0]
-        raise EmbeddingBackendError(f"ESM-C hidden_states has ambiguous 4D shape: {tuple(shape_seq)!r}.")
-    if ndim == 3:
-        assert shape_seq is not None
-        first_dim = int(shape_seq[0])
-        if first_dim == 1 and batch_size == 1:
-            return embeddings[0]
-        if first_dim == batch_size:
-            return embeddings
-        if first_dim == 1:
-            return embeddings[0]
-        # Some SDK versions return [layers, residues, hidden] even with a
-        # requested layer. In that case the requested layer is the first item.
-        return embeddings[0]
-    if ndim == 2:
-        return embeddings
-
-    tolist = getattr(embeddings, "tolist", None)
-    values = tolist() if callable(tolist) else embeddings
-    if isinstance(values, list):
-        list_values = cast(List[Any], values)
-        return _single_layer_list(list_values, batch_size=batch_size)
-    raise EmbeddingBackendError("Could not normalize ESM-C embeddings output.")
+def _resolve_model_reference(model_name: str) -> str:
+    key = str(model_name).strip()
+    if not key:
+        raise EmbeddingInputError("ESM-C model_name must be non-empty.")
+    return ESMC_HF_MODEL_NAMES.get(key.lower(), key)
 
 
-def _single_layer_list(values: List[Any], *, batch_size: int) -> Any:
-    if not values:
-        return values
-    first = values[0]
-    if isinstance(first, list) and first and isinstance(first[0], list):
-        first_row = cast(List[Any], first)
-        if first_row and isinstance(first_row[0], list):
-            if len(values) == batch_size:
-                return values
-            return values[0]
-        return values
-    return values
-
-
-def _infer_residue_length_from_layers(layers: Dict[int, Any]) -> int:
-    if not layers:
-        return 0
-    first = next(iter(layers.values()))
-    shape = getattr(first, "shape", None)
-    if shape is not None:
-        shape_seq = cast(Sequence[Any], shape)
-        if len(shape_seq) >= 2:
-            return int(shape_seq[-2])
-    tolist = getattr(first, "tolist", None)
-    values = tolist() if callable(tolist) else first
-    if isinstance(values, list):
-        values_list = cast(List[Any], values)
-        if values_list and isinstance(values_list[0], list):
-            first_row = cast(List[Any], values_list[0])
-            if first_row and isinstance(first_row[0], list):
-                return len(first_row)
-        return len(values_list)
-    return 0
+def _resolve_sdk_model_name(model_name: str) -> str:
+    key = str(model_name).strip()
+    if not key:
+        raise EmbeddingInputError("ESM-C model_name must be non-empty.")
+    return ESMC_SDK_MODEL_NAMES.get(key, ESMC_SDK_MODEL_NAMES.get(key.lower(), key))
 
 
 def _resolve_requested_layers(
     layer_index: int | Sequence[int] | None,
     *,
-    available_layer_count: int | None,
+    available_layer_count: int,
 ) -> List[int]:
     if layer_index is None:
-        if available_layer_count is None:
-            raise EmbeddingInputError(
-                "ESM-C layer_index=None requires a known available_layer_count for this model name."
-            )
         return list(range(int(available_layer_count)))
     if isinstance(layer_index, int):
         requested = [int(layer_index)]
@@ -325,31 +335,54 @@ def _resolve_requested_layers(
             raise EmbeddingInputError("layer_index sequence cannot be empty.")
 
     resolved: List[int] = []
-    upper = int(available_layer_count) if available_layer_count is not None else None
+    upper = int(available_layer_count)
     for index in requested:
+        original = index
         if index < 0:
-            if upper is None:
-                raise EmbeddingInputError("Negative ESM-C layer indices require a known available_layer_count.")
             index = upper + index
-        if index < 0 or (upper is not None and index >= upper):
-            limit = f"0..{upper - 1}" if upper is not None else ">=0"
-            raise EmbeddingInputError(f"Requested ESM-C layer index {index} out of range; expected {limit}.")
+        if index < 0 or index >= upper:
+            raise EmbeddingInputError(f"Requested ESM-C layer index {original} out of range; expected 0..{upper - 1}.")
         resolved.append(index)
     return sorted(set(resolved))
 
 
-def _resolve_layer_count(model_name: str) -> int | None:
-    key = str(model_name).strip()
-    if key in ESMC_LAYER_SPECS:
-        return int(ESMC_LAYER_SPECS[key])
-    return None
+def _sample_spans_from_attention_mask(attention_mask: Any) -> List[tuple[int, int]]:
+    try:
+        rows = attention_mask.tolist()
+    except Exception:
+        rows = [attention_mask[0].tolist()]
+    if rows and isinstance(rows[0], (int, float, bool)):
+        rows = [rows]
+    spans: List[tuple[int, int]] = []
+    for row in cast(Sequence[Sequence[object]], rows):
+        valid_len = int(sum(int(cast(Any, value)) for value in row))
+        spans.append((1, max(valid_len - 1, 1)))
+    return spans
+
+
+def _pad_token_id(client: Any) -> int:
+    tokenizer = getattr(client, "tokenizer", None)
+    pad_token_id = getattr(tokenizer, "pad_token_id", None)
+    if isinstance(pad_token_id, int):
+        return int(pad_token_id)
+    return 1
+
+
+def _maybe_to_device(value: Any, device: str) -> Any:
+    to_fn = getattr(value, "to", None)
+    if callable(to_fn):
+        return to_fn(device)
+    return value
 
 
 __all__ = [
+    "ESMC_HF_MODEL_NAMES",
     "ESMC_LAYER_SPECS",
+    "ESMC_SDK_MODEL_NAMES",
     "EsmcPreprocessor",
     "EsmcTokenizerAdapter",
     "EsmcModelAdapter",
     "EsmcPostprocessor",
     "EsmcEmbeddingGenerator",
+    "register_hf_esmc_architecture",
 ]

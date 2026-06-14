@@ -4,11 +4,13 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import logging
-from typing import Any, Iterator, cast
+from collections.abc import Generator
+from typing import Any, cast
 
 
 _ESM_TOKENIZER_CLASS_WARNING = "The tokenizer class you load from this checkpoint is not the same type"
-_ESM_TOKENIZER_CLASS_NAMES = ("'ESMTokenizer'", "'EsmTokenizer'")
+_ESM_CHECKPOINT_TOKENIZER_CLASS_NAMES = ("'ESMTokenizer'", "'ESMCTokenizer'")
+_ESM_TRANSFORMERS_TOKENIZER_CLASS_NAME = "'EsmTokenizer'"
 
 
 class _EsmTokenizerClassWarningFilter(logging.Filter):
@@ -16,11 +18,13 @@ class _EsmTokenizerClassWarningFilter(logging.Filter):
         message = record.getMessage()
         if _ESM_TOKENIZER_CLASS_WARNING not in message:
             return True
-        return not all(name in message for name in _ESM_TOKENIZER_CLASS_NAMES)
+        has_checkpoint_class = any(name in message for name in _ESM_CHECKPOINT_TOKENIZER_CLASS_NAMES)
+        has_transformers_class = _ESM_TRANSFORMERS_TOKENIZER_CLASS_NAME in message
+        return not (has_checkpoint_class and has_transformers_class)
 
 
 @contextmanager
-def suppress_esm_tokenizer_class_warning() -> Iterator[None]:
+def suppress_esm_tokenizer_class_warning() -> Generator[None]:
     """Suppress the harmless ESMTokenizer/EsmTokenizer checkpoint metadata warning."""
 
     logger = logging.getLogger("transformers.tokenization_utils_base")
@@ -45,6 +49,8 @@ def load_esm_tokenizer(model_name: str) -> Any:
             return cast(Any, AutoTokenizer).from_pretrained(model_name)
         except ValueError as exc:
             message = str(exc)
+            if "Tokenizer class ESMCTokenizer" in message:
+                return _load_esmc_sequence_tokenizer()
             if "Tokenizer class ESMTokenizer" not in message:
                 raise
 
@@ -57,6 +63,17 @@ def load_esm_tokenizer(model_name: str) -> Any:
         ) from exc
 
     return cast(Any, EsmTokenizer).from_pretrained(model_name)
+
+
+def _load_esmc_sequence_tokenizer() -> Any:
+    try:
+        from esm.tokenization.sequence_tokenizer import EsmSequenceTokenizer  # type: ignore
+    except Exception as exc:
+        raise RuntimeError(
+            "Failed to load tokenizer via AutoTokenizer and ESM-C tokenizer fallback is unavailable"
+        ) from exc
+
+    return EsmSequenceTokenizer()
 
 
 __all__ = ["load_esm_tokenizer", "suppress_esm_tokenizer_class_warning"]
