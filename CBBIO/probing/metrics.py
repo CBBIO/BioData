@@ -38,8 +38,30 @@ def binary_metrics(y_true: Sequence[int], y_pred: Sequence[int], y_score: Sequen
     accuracy = float(tp + tn) / float(len(y_true))
     precision = float(tp) / float(tp + fp) if tp + fp else 0.0
     recall = float(tp) / float(tp + fn) if tp + fn else 0.0
+    specificity = float(tn) / float(tn + fp) if tn + fp else 0.0
+    balanced_accuracy = (recall + specificity) / 2.0
     f1 = 2.0 * precision * recall / (precision + recall) if precision + recall else 0.0
-    return {"accuracy": accuracy, "precision": precision, "recall": recall, "f1": f1, "auroc": _binary_auroc(y_true, y_score)}
+    negative_precision = float(tn) / float(tn + fn) if tn + fn else 0.0
+    negative_recall = specificity
+    negative_f1 = (
+        2.0 * negative_precision * negative_recall / (negative_precision + negative_recall)
+        if negative_precision + negative_recall
+        else 0.0
+    )
+    macro_f1 = (negative_f1 + f1) / 2.0
+    mcc_denominator = math.sqrt(float(tp + fp) * float(tp + fn) * float(tn + fp) * float(tn + fn))
+    mcc = float(tp * tn - fp * fn) / mcc_denominator if mcc_denominator else 0.0
+    return {
+        "accuracy": accuracy,
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+        "macro_f1": macro_f1,
+        "balanced_accuracy": balanced_accuracy,
+        "mcc": mcc,
+        "auroc": _binary_auroc(y_true, y_score),
+        "auprc": _binary_auprc(y_true, y_score),
+    }
 
 
 def multiclass_metrics(y_true: Sequence[int], y_pred: Sequence[int], *, class_count: int) -> Dict[str, float]:
@@ -82,6 +104,38 @@ def _binary_auroc(y_true: Sequence[int], y_score: Sequence[float]) -> float:
         rank_sum += average_rank * sum(1 for _score, label in pairs[index:end] if label == 1)
         index = end
     return (rank_sum - positives * (positives + 1) / 2.0) / float(positives * negatives)
+
+
+def _binary_auprc(y_true: Sequence[int], y_score: Sequence[float]) -> float:
+    positives = sum(1 for value in y_true if int(value) == 1)
+    if positives == 0:
+        return 0.0
+
+    pairs = sorted(
+        ((float(score), int(label)) for label, score in zip(y_true, y_score)),
+        key=lambda item: item[0],
+        reverse=True,
+    )
+    area = 0.0
+    tp = 0
+    fp = 0
+    previous_recall = 0.0
+    index = 0
+    while index < len(pairs):
+        end = index + 1
+        while end < len(pairs) and pairs[end][0] == pairs[index][0]:
+            end += 1
+        for _score, label in pairs[index:end]:
+            if label == 1:
+                tp += 1
+            else:
+                fp += 1
+        recall = float(tp) / float(positives)
+        precision = float(tp) / float(tp + fp) if tp + fp else 1.0
+        area += (recall - previous_recall) * precision
+        previous_recall = recall
+        index = end
+    return area
 
 
 def _average_ranks(values: Sequence[float]) -> List[float]:
