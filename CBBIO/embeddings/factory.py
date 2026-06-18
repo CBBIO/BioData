@@ -141,6 +141,7 @@ def _load_generator_classes() -> tuple[Type[EmbeddingGenerator], ...]:
     from .models.prott5 import ProtT5EmbeddingGenerator
     from .models.prostt5 import ProstT5EmbeddingGenerator
     from .models.ankh3 import Ankh3EmbeddingGenerator
+    from .models.amplify import AmplifyEmbeddingGenerator
     from .models.esmc import EsmcEmbeddingGenerator
     from .models.esm2 import Esm2EmbeddingGenerator
     from .models.esm1b import Esm1bEmbeddingGenerator
@@ -149,6 +150,7 @@ def _load_generator_classes() -> tuple[Type[EmbeddingGenerator], ...]:
         ProtT5EmbeddingGenerator,
         ProstT5EmbeddingGenerator,
         Ankh3EmbeddingGenerator,
+        AmplifyEmbeddingGenerator,
         EsmcEmbeddingGenerator,
         Esm2EmbeddingGenerator,
         Esm1bEmbeddingGenerator,

@@ -254,10 +254,20 @@ def test_generator_factory_rejects_unknown_class() -> None:
 
 def test_factory_catalog_reports_available_classes_and_models() -> None:
     classes = available_generator_classes()
-    assert classes == ["protT5", "prostT5", "ankh3", "esmc", "esm2", "esm1b"]
+    assert classes == ["protT5", "prostT5", "ankh3", "amplify", "esmc", "esm2", "esm1b"]
 
     catalog = cast(Dict[str, List[str]], available_generator_models())
     assert set(catalog.keys()) == set(classes)
+    assert catalog["amplify"] == [
+        "amplify_120m",
+        "amplify_350m",
+        "nvidia/AMPLIFY_120M",
+        "nvidia/AMPLIFY_350M",
+        "amplify_120m_chandar",
+        "amplify_350m_chandar",
+        "chandar-lab/AMPLIFY_120M",
+        "chandar-lab/AMPLIFY_350M",
+    ]
     assert "facebook/esm2_t33_650m_ur50d" in [name.lower() for name in catalog["esm2"]]
 
     esm1b_models = cast(List[str], available_generator_models("esm1b"))

@@ -9,6 +9,13 @@ from .ankh3 import (
     Ankh3Preprocessor,
     Ankh3TokenizerAdapter,
 )
+from .amplify import (
+    AmplifyEmbeddingGenerator,
+    AmplifyModelAdapter,
+    AmplifyPostprocessor,
+    AmplifyPreprocessor,
+    AmplifyTokenizerAdapter,
+)
 from .esm1b import (
     Esm1bEmbeddingGenerator,
     Esm1bModelAdapter,
@@ -51,6 +58,11 @@ __all__ = [
     "Ankh3Postprocessor",
     "Ankh3Preprocessor",
     "Ankh3TokenizerAdapter",
+    "AmplifyEmbeddingGenerator",
+    "AmplifyModelAdapter",
+    "AmplifyPostprocessor",
+    "AmplifyPreprocessor",
+    "AmplifyTokenizerAdapter",
     "Esm1bEmbeddingGenerator",
     "Esm1bModelAdapter",
     "Esm1bPostprocessor",

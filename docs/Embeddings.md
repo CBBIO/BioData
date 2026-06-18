@@ -231,6 +231,7 @@ Factory for model-specific generators:
 Generator(model_class="protT5", device="cuda:0", dtype="float16")
 Generator(model_class="esm2", name="esm2_t6_8M_UR50D", device="cuda:0")
 Generator(model_class="ankh3", name="ElnaggarLab/ankh3-large", prefix="[S2S]")
+Generator(model_class="amplify", name="nvidia/AMPLIFY_120M", device="cuda:0")
 ```
 
 Catalog helpers:
@@ -348,6 +349,7 @@ FASTA helpers also remain:
 - `protT5`: Hugging Face ProtT5; native hidden-state layer indexing.
 - `prostT5`: ProstT5 protein-to-embedding path; native hidden-state layer indexing.
 - `ankh3`: ANKH3 via `T5Tokenizer` and `T5EncoderModel`.
+- `amplify`: AMPLIFY 120M and 350M via Transformers `AutoModel`/`AutoTokenizer` with `trust_remote_code=True`; max context length 2048 residues. On CUDA, AMPLIFY defaults to `bfloat16` because its xFormers attention kernels do not support `float32`; pass `dtype="float16"` explicitly if preferred. Short aliases `amplify_120m` and `amplify_350m` select NVIDIA's TransformerEngine-optimized checkpoints and require `transformer_engine.pytorch`, not the bare `transformer-engine` meta package. For CUDA 13 environments, install with `poetry run pip install --no-build-isolation 'transformer-engine[pytorch,core-cu13]==2.16.0'`. Use `amplify_120m_chandar` or `amplify_350m_chandar` for the upstream Chandar Research Lab checkpoints.
 - `esm2`: ESM2 via `esm.pretrained` or Transformers fallback; native ESM2 layer indexing.
 - `esm1b`: ESM-1b via `esm.pretrained` or Transformers fallback; native ESM1b layer indexing.
 - `esmc`: ESM-C SDK path. Multi-sequence batches require SDK support for batched logits; use `batch_size=1` if the installed SDK rejects batched inputs.

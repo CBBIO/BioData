@@ -191,6 +191,13 @@ from .embeddings.models.ankh3 import (
     Ankh3Preprocessor,
     Ankh3TokenizerAdapter,
 )
+from .embeddings.models.amplify import (
+    AmplifyEmbeddingGenerator,
+    AmplifyModelAdapter,
+    AmplifyPostprocessor,
+    AmplifyPreprocessor,
+    AmplifyTokenizerAdapter,
+)
 from .embeddings.models.esmc import (
     EsmcEmbeddingGenerator,
     EsmcModelAdapter,
@@ -413,6 +420,11 @@ __all__ = [
     "Ankh3ModelAdapter",
     "Ankh3Postprocessor",
     "Ankh3EmbeddingGenerator",
+    "AmplifyPreprocessor",
+    "AmplifyTokenizerAdapter",
+    "AmplifyModelAdapter",
+    "AmplifyPostprocessor",
+    "AmplifyEmbeddingGenerator",
     "EsmcPreprocessor",
     "EsmcTokenizerAdapter",
     "EsmcModelAdapter",

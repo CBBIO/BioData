@@ -4987,6 +4987,24 @@ docs = ["myst-parser", "pydata-sphinx-theme", "sphinx"]
 test = ["argcomplete (>=3.0.3)", "mypy (>=1.7.0)", "mypy (>=1.7.0,<1.19) ; platform_python_implementation == \"PyPy\"", "pre-commit", "pytest (>=7.0,<8.2)", "pytest-mock", "pytest-mypy-testing"]
 
 [[package]]
+name = "transformer-engine"
+version = "2.16.0"
+description = "Transformer acceleration library"
+optional = false
+python-versions = ">=3.10.0"
+groups = ["main"]
+files = [
+    {file = "transformer_engine-2.16.0-py3-none-any.whl", hash = "sha256:ac2bb54d5217c574410079d99204b5634eb3a1137b0324f4a6dd3358982aa4f5"},
+]
+
+[package.extras]
+core = ["transformer_engine_cu12 (==2.16.0)"]
+core-cu12 = ["transformer_engine_cu12 (==2.16.0)"]
+core-cu13 = ["transformer_engine_cu13 (==2.16.0)"]
+jax = ["transformer_engine_jax (==2.16.0)"]
+pytorch = ["transformer_engine_torch (==2.16.0)"]
+
+[[package]]
 name = "transformers"
 version = "4.57.6"
 description = "State-of-the-art Machine Learning for JAX, PyTorch and TensorFlow"
@@ -5238,4 +5256,4 @@ notebooks = ["biopython", "ipykernel", "ipywidgets", "jupyter", "matplotlib", "p
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.13,<4.0"
-content-hash = "4801f99360962773cf7be293a998a658660b203fbd9a39c66463bfbe6bb1b6ba"
+content-hash = "fa8fc91ebe31fe95bda5270f31794d99aadc8e14f337f288788fb83026ff9be3"
