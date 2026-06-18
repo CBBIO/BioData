@@ -19,6 +19,8 @@ from ..utils.pooler import PoolerInput
 from ..utils.torch import (
     BasePreprocessor,
     DefaultPostprocessor,
+    extract_name_or_path,
+    extract_revision,
     framework_versions,
     move_model_to_device,
     normalize_requested_layers,
@@ -138,9 +140,16 @@ class HfEsmEmbeddingGenerator(EmbeddingGenerator):
         dtype: str | None = None,
         model: Any | None = None,
         tokenizer: Any | None = None,
+        tokenizer_trust_remote_code: bool = False,
         from_pretrained_kwargs: Dict[str, Any] | None = None,
+        auto_model_class: str = "AutoModel",
+        tokenizer_from_pretrained_kwargs: Dict[str, Any] | None = None,
         layer_count_hint: int | None = None,
         max_sequence_length: int | None = None,
+        preprocessor_adapter_cls: Any | None = None,
+        tokenizer_adapter_cls: Any | None = None,
+        model_adapter_cls: Any | None = None,
+        postprocessor_adapter_cls: Any | None = None,
     ) -> None:
         resolved_dtype_name = normalize_torch_dtype_name(dtype)
         resolved_torch_dtype = resolve_torch_dtype(resolved_dtype_name) if resolved_dtype_name is not None else None
@@ -152,18 +161,46 @@ class HfEsmEmbeddingGenerator(EmbeddingGenerator):
 
         if resolved_model is None:
             try:
-                from transformers import AutoModel  # type: ignore
+                import transformers  # type: ignore
             except ModuleNotFoundError as exc:
                 raise EmbeddingDependencyError(
                     "transformers is required for ESM loading. Install with: pip install transformers"
                 ) from exc
-            resolved_model = cast(Any, AutoModel).from_pretrained(model_reference, **model_kwargs)
+            auto_model = getattr(transformers, auto_model_class, None)
+            if auto_model is None:
+                raise EmbeddingDependencyError(
+                    f"transformers does not expose {auto_model_class}; install a compatible transformers version."
+                )
+            try:
+                resolved_model = auto_model.from_pretrained(model_reference, **model_kwargs)
+            except (ImportError, RuntimeError) as exc:
+                raise EmbeddingDependencyError(
+                    f"Failed to load Hugging Face model {model_reference!r}. This checkpoint may require "
+                    f"optional model-specific dependencies that are not installed or not usable: {exc}"
+                ) from exc
 
         if resolved_tokenizer is None:
-            try:
-                resolved_tokenizer = load_esm_tokenizer(model_reference)
-            except Exception as exc:
-                raise EmbeddingBackendError(f"Failed to load ESM tokenizer from transformers: {exc}") from exc
+            if tokenizer_trust_remote_code:
+                try:
+                    from transformers import AutoTokenizer  # type: ignore
+                except ModuleNotFoundError as exc:
+                    raise EmbeddingDependencyError(
+                        "transformers is required for ESM tokenization. Install with: pip install transformers"
+                    ) from exc
+                try:
+                    tokenizer_kwargs = {"trust_remote_code": True}
+                    tokenizer_kwargs.update(tokenizer_from_pretrained_kwargs or {})
+                    resolved_tokenizer = cast(Any, AutoTokenizer).from_pretrained(
+                        model_reference,
+                        **tokenizer_kwargs,
+                    )
+                except Exception as exc:
+                    raise EmbeddingBackendError(f"Failed to load ESM tokenizer from transformers: {exc}") from exc
+            else:
+                try:
+                    resolved_tokenizer = load_esm_tokenizer(model_reference)
+                except Exception as exc:
+                    raise EmbeddingBackendError(f"Failed to load ESM tokenizer from transformers: {exc}") from exc
 
         move_model_to_device(
             resolved_model,
@@ -179,12 +216,16 @@ class HfEsmEmbeddingGenerator(EmbeddingGenerator):
         if available_layer_count is None:
             available_layer_count = infer_hf_esm_transformer_layers(resolved_model)
 
+        preprocessor_cls = preprocessor_adapter_cls or HfEsmPreprocessor
+        tokenizer_cls = tokenizer_adapter_cls or HfEsmTokenizerAdapter
+        model_cls = model_adapter_cls or HfEsmModelAdapter
+        postprocessor_cls = postprocessor_adapter_cls or HfEsmPostprocessor
         super().__init__(
             model_reference=model_reference,
-            preprocessor=HfEsmPreprocessor(context=context),
-            tokenizer=HfEsmTokenizerAdapter(resolved_tokenizer, device=device),
-            model=HfEsmModelAdapter(resolved_model, available_layer_count=available_layer_count),
-            postprocessor=HfEsmPostprocessor(),
+            preprocessor=preprocessor_cls(context=context),
+            tokenizer=tokenizer_cls(resolved_tokenizer, device=device),
+            model=model_cls(resolved_model, available_layer_count=available_layer_count),
+            postprocessor=postprocessor_cls(),
         )
         parameters: Dict[str, Any] = {
             "mode": "protein_to_embedding_only",
@@ -202,7 +243,9 @@ class HfEsmEmbeddingGenerator(EmbeddingGenerator):
             provider=provider,
             model_name=model_name,
             model_reference=model_reference,
-            tokenizer_name=model_reference,
+            model_revision=extract_revision(resolved_model),
+            tokenizer_name=extract_name_or_path(resolved_tokenizer) or model_reference,
+            tokenizer_revision=extract_revision(resolved_tokenizer),
             device=str(device),
             framework_versions=framework_versions("transformers", "torch"),
             parameters=parameters,
