@@ -9,11 +9,12 @@ import gzip
 import hashlib
 import json
 import re
+import shutil
 import tarfile
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Tuple, cast
 from urllib.parse import urlparse
-from urllib.request import urlretrieve
+from urllib.request import Request, urlopen, urlretrieve
 
 from CBBIO.embeddings import EmbeddingInputError
 
@@ -25,10 +26,17 @@ ResidueSourceName = Literal[
     "musitedeep",
     "disprot",
     "biolip",
+    "biolip_all",
+    "biolip_dna",
+    "biolip_rna",
+    "biolip_pep",
+    "biolip_other",
     "metalpdb",
     "scannet_binding",
     "netsurfp",
 ]
+
+BioLipLigandClass = Literal["all", "dna", "rna", "pep", "other"]
 
 
 @dataclass(frozen=True)
@@ -68,6 +76,10 @@ DISPROT_CURRENT_JSON_URL = (
     "https://disprot.org/api/v2/download?format=json&release=current&term_ontology=IDPO&term_ontology=GO"
 )
 DISPROT_SPLIT_RATIOS: Tuple[Tuple[SplitName, float], ...] = (("train", 0.8), ("val", 0.1), ("test", 0.1))
+BIOLIP_DOWNLOAD_URLS = (
+    "https://zhanggroup.org/BioLiP/download/BioLiP_nr.txt.gz",
+    "https://zhanggroup.org/BioLiP/data/protein_nr.fasta.gz",
+)
 
 DBPTM_BENCHMARKS: Dict[str, DbptmBenchmarkSpec] = {
     "phosphorylation_by_cdk": DbptmBenchmarkSpec(
@@ -232,11 +244,63 @@ RESIDUE_SOURCE_SPECS: Dict[str, ResidueSourceSpec] = {
         source="BioLiP",
         homepage="https://zhanggroup.org/BioLiP/download.html",
         import_adapter="load_biolip_dataset",
-        download_urls=(
-            "https://zhanggroup.org/BioLiP/download/BioLiP_nr.txt.gz",
-            "https://zhanggroup.org/BioLiP/data/protein_nr.fasta.gz",
-        ),
+        download_urls=BIOLIP_DOWNLOAD_URLS,
         notes="BioLiP annotation column 9 provides binding residues renumbered from 1; column 21 contains receptor sequence.",
+    ),
+    "biolip_all": ResidueSourceSpec(
+        name="biolip_all",
+        category="binding",
+        objective="binary",
+        target="ligand_binding_site",
+        source="BioLiP",
+        homepage="https://zhanggroup.org/BioLiP/download.html",
+        import_adapter="load_biolip_dataset",
+        download_urls=BIOLIP_DOWNLOAD_URLS,
+        notes="All BioLiP ligand classes merged into one residue-level binding-site target.",
+    ),
+    "biolip_dna": ResidueSourceSpec(
+        name="biolip_dna",
+        category="binding",
+        objective="binary",
+        target="dna_binding_site",
+        source="BioLiP",
+        homepage="https://zhanggroup.org/BioLiP/download.html",
+        import_adapter="load_biolip_dataset",
+        download_urls=BIOLIP_DOWNLOAD_URLS,
+        notes="BioLiP rows whose ligand type is DNA, converted to residue-level binding-site labels.",
+    ),
+    "biolip_rna": ResidueSourceSpec(
+        name="biolip_rna",
+        category="binding",
+        objective="binary",
+        target="rna_binding_site",
+        source="BioLiP",
+        homepage="https://zhanggroup.org/BioLiP/download.html",
+        import_adapter="load_biolip_dataset",
+        download_urls=BIOLIP_DOWNLOAD_URLS,
+        notes="BioLiP rows whose ligand type is RNA, converted to residue-level binding-site labels.",
+    ),
+    "biolip_pep": ResidueSourceSpec(
+        name="biolip_pep",
+        category="binding",
+        objective="binary",
+        target="peptide_binding_site",
+        source="BioLiP",
+        homepage="https://zhanggroup.org/BioLiP/download.html",
+        import_adapter="load_biolip_dataset",
+        download_urls=BIOLIP_DOWNLOAD_URLS,
+        notes="BioLiP rows whose ligand type is peptide, converted to residue-level binding-site labels.",
+    ),
+    "biolip_other": ResidueSourceSpec(
+        name="biolip_other",
+        category="binding",
+        objective="binary",
+        target="other_ligand_binding_site",
+        source="BioLiP",
+        homepage="https://zhanggroup.org/BioLiP/download.html",
+        import_adapter="load_biolip_dataset",
+        download_urls=BIOLIP_DOWNLOAD_URLS,
+        notes="BioLiP ligand rows excluding DNA, RNA, and peptide classes.",
     ),
     "metalpdb": ResidueSourceSpec(
         name="metalpdb",
@@ -276,12 +340,25 @@ MUSITEDEEP_TESTDATA_API_URL = (
 
 
 def get_residue_source(name: str) -> ResidueSourceSpec:
-    key = str(name).strip().lower()
+    key = _normalize_residue_source_name(name)
     spec = RESIDUE_SOURCE_SPECS.get(key)
     if spec is None:
         supported = ", ".join(sorted(RESIDUE_SOURCE_SPECS))
         raise EmbeddingInputError(f"Unknown residue source {name!r}. Supported values: {supported}.")
     return spec
+
+
+def _normalize_residue_source_name(name: str) -> str:
+    text = str(name).strip().lower().replace("-", "_")
+    aliases = {
+        "biolip:all": "biolip_all",
+        "biolip:dna": "biolip_dna",
+        "biolip:rna": "biolip_rna",
+        "biolip:pep": "biolip_pep",
+        "biolip:peptide": "biolip_pep",
+        "biolip:other": "biolip_other",
+    }
+    return aliases.get(text, text)
 
 
 def list_residue_sources(*, category: str | None = None) -> List[ResidueSourceSpec]:
@@ -316,13 +393,13 @@ def download_residue_source(root: str | Path, *, name: str, force: bool = False)
             f"Residue source {spec.name!r} does not expose stable direct-download URLs in this adapter. "
             f"Download from {spec.homepage} and use {spec.import_adapter}."
         )
-    output_dir = Path(root).expanduser() / spec.name
+    output_dir = Path(root).expanduser() / _residue_source_storage_name(spec.name)
     output_dir.mkdir(parents=True, exist_ok=True)
     paths: List[Path] = []
     for url in spec.download_urls:
         path = output_dir / _download_filename(url)
         if force or not path.exists():
-            urlretrieve(url, path)
+            _download_url(url, path)
         paths.append(path)
     return paths
 
@@ -510,8 +587,9 @@ def load_residue_source_dataset(
 
     spec = get_residue_source(name)
     resolved_target = target or spec.target
-    base = Path(root).expanduser() / spec.name
-    if spec.name == "biolip":
+    base = Path(root).expanduser() / _residue_source_storage_name(spec.name)
+    biolip_ligand_class = _biolip_ligand_class_for_source(spec.name)
+    if biolip_ligand_class is not None:
         if download:
             download_residue_source(root, name=spec.name)
         annotation = base / "BioLiP_nr.txt.gz"
@@ -520,7 +598,8 @@ def load_residue_source_dataset(
             annotation,
             protein_fasta=fasta if fasta.exists() else None,
             target=resolved_target,
-            split=split or "train",
+            split=split,
+            ligand_class=biolip_ligand_class,
         )
     if spec.name == "disprot":
         json_path = download_disprot_current_json(root) if download else base / "disprot_current.json"
@@ -768,11 +847,14 @@ def load_biolip_dataset(
     annotation_path: str | Path,
     *,
     protein_fasta: str | Path | None = None,
-    target: str = "ligand_binding_site",
-    split: SplitName = "train",
+    target: str | None = None,
+    split: SplitName | None = "train",
+    ligand_class: BioLipLigandClass = "all",
 ) -> ResidueDataset:
     """Load BioLiP annotation rows into residue-level ligand-binding labels."""
 
+    resolved_ligand_class = _normalize_biolip_ligand_class(ligand_class)
+    resolved_target = target or _biolip_target_for_ligand_class(resolved_ligand_class)
     fasta_sequences = dict(_iter_fasta(protein_fasta)) if protein_fasta is not None and Path(protein_fasta).exists() else {}
     grouped: Dict[str, Dict[str, Any]] = {}
     opener = gzip.open if str(annotation_path).endswith(".gz") else open
@@ -784,6 +866,8 @@ def load_biolip_dataset(
             columns = line.split("\t") if "\t" in line else line.split()
             if len(columns) < 21:
                 raise EmbeddingInputError(f"BioLiP row {line_index} has {len(columns)} columns; expected at least 21.")
+            if not _biolip_ligand_matches(columns[4], resolved_ligand_class):
+                continue
             record_id = f"{columns[0]}{columns[1]}"
             sequence = fasta_sequences.get(record_id, columns[20])
             entry = grouped.setdefault(record_id, {"sequence": sequence, "labels": [0] * len(sequence)})
@@ -791,16 +875,19 @@ def load_biolip_dataset(
                 raise EmbeddingInputError(f"Conflicting BioLiP sequences for receptor {record_id!r}.")
             for position in _biolip_positions(columns[8]):
                 _mark_interval(cast(List[int], entry["labels"]), start=position, end=position, one_based=True)
-    return ResidueDataset(
+    examples = [
         ResidueExample(
             id=record_id,
             sequence=str(entry["sequence"]),
-            labels={target: cast(List[int], entry["labels"])},
-            split=split,
-            metadata={"source": "biolip"},
+            labels={resolved_target: cast(List[int], entry["labels"])},
+            split=split or "train",
+            metadata={"source": "biolip", "ligand_class": resolved_ligand_class},
         )
         for record_id, entry in grouped.items()
-    )
+    ]
+    if split is None:
+        examples = _split_biolip_examples(examples)
+    return ResidueDataset(examples)
 
 
 def _iter_fasta(path: str | Path | None) -> Iterable[Tuple[str, str]]:
@@ -1106,6 +1193,78 @@ def _disprot_dataset_stratum(dataset_tags: Sequence[str]) -> str:
     return "+".join(values) if values else "none"
 
 
+def _split_biolip_examples(examples: Sequence[ResidueExample]) -> List[ResidueExample]:
+    ordered = sorted(examples, key=lambda example: _stable_biolip_hash(example.id))
+    counts = _disprot_split_counts(len(ordered))
+    split_names: List[SplitName] = [split_name for split_name, count in counts for _ in range(count)]
+    return [
+        ResidueExample(
+            id=example.id,
+            sequence=example.sequence,
+            labels=example.labels,
+            split=split_name,
+            mask=example.mask,
+            metadata=example.metadata,
+        )
+        for example, split_name in zip(ordered, split_names)
+    ]
+
+
+def _stable_biolip_hash(value: str) -> str:
+    return hashlib.sha256(f"biolip-split-v1:{value}".encode("utf-8")).hexdigest()
+
+
+def _residue_source_storage_name(name: str) -> str:
+    return "biolip" if str(name).startswith("biolip") else str(name)
+
+
+def _biolip_ligand_class_for_source(name: str) -> BioLipLigandClass | None:
+    normalized = str(name).strip().lower()
+    if normalized in {"biolip", "biolip_all"}:
+        return "all"
+    if normalized == "biolip_dna":
+        return "dna"
+    if normalized == "biolip_rna":
+        return "rna"
+    if normalized == "biolip_pep":
+        return "pep"
+    if normalized == "biolip_other":
+        return "other"
+    return None
+
+
+def _normalize_biolip_ligand_class(value: str) -> BioLipLigandClass:
+    normalized = str(value).strip().lower()
+    if normalized in {"all", "dna", "rna", "other"}:
+        return cast(BioLipLigandClass, normalized)
+    if normalized in {"pep", "peptide"}:
+        return "pep"
+    raise EmbeddingInputError("BioLiP ligand_class must be one of: all, dna, rna, pep, other.")
+
+
+def _biolip_target_for_ligand_class(ligand_class: BioLipLigandClass) -> str:
+    if ligand_class == "dna":
+        return "dna_binding_site"
+    if ligand_class == "rna":
+        return "rna_binding_site"
+    if ligand_class == "pep":
+        return "peptide_binding_site"
+    if ligand_class == "other":
+        return "other_ligand_binding_site"
+    return "ligand_binding_site"
+
+
+def _biolip_ligand_matches(value: str, ligand_class: BioLipLigandClass) -> bool:
+    ligand = str(value).strip().lower()
+    if ligand_class == "all":
+        return True
+    if ligand_class == "pep":
+        return ligand == "peptide"
+    if ligand_class == "other":
+        return ligand not in {"dna", "rna", "peptide"}
+    return ligand == ligand_class
+
+
 def _entry_sequence(entry: Mapping[str, Any]) -> str:
     sequence = entry.get("sequence")
     if isinstance(sequence, str):
@@ -1180,6 +1339,12 @@ def _download_filename(url: str) -> str:
     return name
 
 
+def _download_url(url: str, path: Path) -> None:
+    request = Request(url, headers={"User-Agent": "Mozilla/5.0 CBBIO/0.1"})
+    with urlopen(request) as response, path.open("wb") as handle:
+        shutil.copyfileobj(response, handle)
+
+
 def _normalize_dbptm_benchmark_name(name: str) -> str:
     text = str(name).strip().lower()
     text = text.replace("-", "_").replace(" ", "_")
@@ -1238,6 +1403,7 @@ def _local_musitedeep_fastas(root: Path, *, file_names: Sequence[str] | None) ->
 
 __all__ = [
     "DBPTM_BENCHMARKS",
+    "BioLipLigandClass",
     "DISPROT_CURRENT_JSON_URL",
     "DISPROT_CURRENT_TSV_URL",
     "DbptmBenchmarkSpec",

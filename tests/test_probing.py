@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import gzip
 import json
 import tarfile
 
@@ -557,8 +558,22 @@ def test_load_peer_dataset_rejects_pair_tasks_without_torchdrug(tmp_path) -> Non
 def test_residue_source_registry_covers_requested_sources() -> None:
     names = {source.name for source in list_residue_sources()}
 
-    assert {"dbptm", "musitedeep", "disprot", "biolip", "metalpdb", "scannet_binding", "netsurfp"} == names
+    assert {
+        "dbptm",
+        "musitedeep",
+        "disprot",
+        "biolip",
+        "biolip_all",
+        "biolip_dna",
+        "biolip_rna",
+        "biolip_pep",
+        "biolip_other",
+        "metalpdb",
+        "scannet_binding",
+        "netsurfp",
+    } == names
     assert get_residue_source("biolip").import_adapter == "load_biolip_dataset"
+    assert get_residue_source("biolip:dna").name == "biolip_dna"
 
 
 def test_dbptm_benchmark_registry_contains_requested_archive() -> None:
@@ -629,6 +644,32 @@ def test_download_dbptm_benchmark_uses_direct_url(monkeypatch: pytest.MonkeyPatc
 def test_download_residue_source_rejects_sources_without_direct_urls(tmp_path) -> None:
     with pytest.raises(EmbeddingInputError, match="does not expose stable direct-download URLs"):
         download_residue_source(tmp_path, name="musitedeep")
+
+
+def test_download_biolip_variant_uses_browser_user_agent(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    seen_requests = []
+
+    class FakeResponse:
+        def __enter__(self):
+            return io.BytesIO(b"payload")
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return False
+
+    def fake_urlopen(request):
+        seen_requests.append(request)
+        return FakeResponse()
+
+    monkeypatch.setattr(residue_sources_module, "urlopen", fake_urlopen)
+
+    paths = download_residue_source(tmp_path, name="biolip_dna")
+
+    assert [path.relative_to(tmp_path).as_posix() for path in paths] == [
+        "biolip/BioLiP_nr.txt.gz",
+        "biolip/protein_nr.fasta.gz",
+    ]
+    assert [path.read_bytes() for path in paths] == [b"payload", b"payload"]
+    assert all(request.headers["User-agent"].startswith("Mozilla/5.0") for request in seen_requests)
 
 
 def test_download_disprot_current_tsv_uses_current_release_url(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
@@ -1001,3 +1042,167 @@ def test_load_biolip_dataset_uses_renumbered_binding_positions(tmp_path) -> None
     dataset = load_biolip_dataset(annotation)
 
     assert dataset.target_values("ligand_binding_site") == {"1abcA": [1, 0, 1, 0]}
+
+
+def test_load_biolip_dataset_filters_ligand_classes(tmp_path) -> None:
+    annotation = tmp_path / "BioLiP_nr.txt"
+
+    def row(pdb_id: str, ligand: str, renumbered_positions: str) -> str:
+        columns = [
+            pdb_id,
+            "A",
+            "1.0",
+            "BS01",
+            ligand,
+            "B",
+            "1",
+            "-",
+            renumbered_positions,
+            "-",
+            "-",
+            "-",
+            "-",
+            "-",
+            "-",
+            "-",
+            "-",
+            "P12345",
+            "123",
+            "1",
+            "ACDE",
+        ]
+        return "\t".join(columns)
+
+    annotation.write_text(
+        "\n".join(
+            [
+                row("1dna", "dna", "A1"),
+                row("1rna", "rna", "C2"),
+                row("1pep", "peptide", "D3"),
+                row("1oth", "ZN", "E4"),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    dna = load_biolip_dataset(annotation, ligand_class="dna")
+    rna = load_biolip_dataset(annotation, ligand_class="rna")
+    peptide = load_biolip_dataset(annotation, ligand_class="pep")
+    other = load_biolip_dataset(annotation, ligand_class="other")
+
+    assert dna.target_values("dna_binding_site") == {"1dnaA": [1, 0, 0, 0]}
+    assert rna.target_values("rna_binding_site") == {"1rnaA": [0, 1, 0, 0]}
+    assert peptide.target_values("peptide_binding_site") == {"1pepA": [0, 0, 1, 0]}
+    assert other.target_values("other_ligand_binding_site") == {"1othA": [0, 0, 0, 1]}
+
+
+def test_load_biolip_dataset_can_assign_deterministic_splits(tmp_path) -> None:
+    annotation = tmp_path / "BioLiP_nr.txt"
+    rows = []
+    for index in range(12):
+        rows.append(
+            "\t".join(
+                [
+                    f"{index:04d}",
+                    "A",
+                    "1.0",
+                    "BS01",
+                    "LIG",
+                    "B",
+                    "1",
+                    "A100",
+                    "A1",
+                    "-",
+                    "-",
+                    "-",
+                    "-",
+                    "-",
+                    "-",
+                    "-",
+                    "-",
+                    f"P{index:05d}",
+                    "123",
+                    "1",
+                    "ACDE",
+                ]
+            )
+        )
+    annotation.write_text("\n".join(rows) + "\n", encoding="utf-8")
+
+    dataset = load_biolip_dataset(annotation, split=None)
+
+    assert dataset.split_counts() == {"train": 10, "val": 1, "test": 1}
+    assert dataset.target_values("ligand_binding_site")["0000A"] == [1, 0, 0, 0]
+
+
+def test_load_residue_source_dataset_imports_biolip_layout(tmp_path) -> None:
+    data_dir = tmp_path / "biolip"
+    data_dir.mkdir()
+    columns = [
+        "1abc",
+        "A",
+        "1.0",
+        "BS01",
+        "LIG",
+        "B",
+        "1",
+        "A100 C102",
+        "A1 C3",
+        "-",
+        "-",
+        "-",
+        "-",
+        "-",
+        "-",
+        "-",
+        "-",
+        "P12345",
+        "123",
+        "1",
+        "ACDE",
+    ]
+    (data_dir / "BioLiP_nr.txt.gz").write_bytes(gzip.compress(("\t".join(columns) + "\n").encode("utf-8")))
+
+    dataset = load_residue_source_dataset(tmp_path, name="biolip", split="test")
+
+    assert dataset.split_counts() == {"train": 0, "val": 0, "test": 1}
+    assert dataset.target_values("ligand_binding_site") == {"1abcA": [1, 0, 1, 0]}
+
+
+def test_load_residue_source_dataset_imports_biolip_variant_from_shared_layout(tmp_path) -> None:
+    data_dir = tmp_path / "biolip"
+    data_dir.mkdir()
+    rows = []
+    for ligand, position in [("dna", "A1"), ("peptide", "C3")]:
+        columns = [
+            f"1{ligand[:2]}",
+            "A",
+            "1.0",
+            "BS01",
+            ligand,
+            "B",
+            "1",
+            "-",
+            position,
+            "-",
+            "-",
+            "-",
+            "-",
+            "-",
+            "-",
+            "-",
+            "-",
+            "P12345",
+            "123",
+            "1",
+            "ACDE",
+        ]
+        rows.append("\t".join(columns))
+    (data_dir / "BioLiP_nr.txt.gz").write_bytes(gzip.compress(("\n".join(rows) + "\n").encode("utf-8")))
+
+    dataset = load_residue_source_dataset(tmp_path, name="biolip_pep")
+
+    assert dataset.ids() == ["1peA"]
+    assert dataset.target_values("peptide_binding_site") == {"1peA": [0, 0, 1, 0]}
+
