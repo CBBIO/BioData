@@ -16,6 +16,13 @@ from .amplify import (
     AmplifyPreprocessor,
     AmplifyTokenizerAdapter,
 )
+from .proteinglm import (
+    ProteinGlmEmbeddingGenerator,
+    ProteinGlmModelAdapter,
+    ProteinGlmPostprocessor,
+    ProteinGlmPreprocessor,
+    ProteinGlmTokenizerAdapter,
+)
 from .esm1b import (
     Esm1bEmbeddingGenerator,
     Esm1bModelAdapter,
@@ -63,6 +70,11 @@ __all__ = [
     "AmplifyPostprocessor",
     "AmplifyPreprocessor",
     "AmplifyTokenizerAdapter",
+    "ProteinGlmEmbeddingGenerator",
+    "ProteinGlmModelAdapter",
+    "ProteinGlmPostprocessor",
+    "ProteinGlmPreprocessor",
+    "ProteinGlmTokenizerAdapter",
     "Esm1bEmbeddingGenerator",
     "Esm1bModelAdapter",
     "Esm1bPostprocessor",

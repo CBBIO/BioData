@@ -56,6 +56,7 @@ from CBBIO import (
 from CBBIO.embeddings_prott5 import ProtT5EmbeddingGenerator, ProtT5Preprocessor
 from CBBIO.embeddings_prostt5 import ProstT5EmbeddingGenerator
 from CBBIO.embeddings_ankh3 import Ankh3EmbeddingGenerator
+from CBBIO.embeddings_proteinglm import ProteinGlmEmbeddingGenerator
 from CBBIO.embeddings_esmc import EsmcEmbeddingGenerator
 from CBBIO.embeddings_esm2 import Esm2EmbeddingGenerator
 from CBBIO.embeddings_esm1b import Esm1bEmbeddingGenerator
@@ -254,7 +255,7 @@ def test_generator_factory_rejects_unknown_class() -> None:
 
 def test_factory_catalog_reports_available_classes_and_models() -> None:
     classes = available_generator_classes()
-    assert classes == ["protT5", "prostT5", "ankh3", "amplify", "esmc", "esm2", "esm1b"]
+    assert classes == ["protT5", "prostT5", "ankh3", "amplify", "proteinglm", "esmc", "esm2", "esm1b"]
 
     catalog = cast(Dict[str, List[str]], available_generator_models())
     assert set(catalog.keys()) == set(classes)
@@ -269,6 +270,7 @@ def test_factory_catalog_reports_available_classes_and_models() -> None:
         "chandar-lab/AMPLIFY_350M",
     ]
     assert "facebook/esm2_t33_650m_ur50d" in [name.lower() for name in catalog["esm2"]]
+    assert catalog["proteinglm"][:3] == ["proteinglm_1b_mlm", "proteinglm_3b_mlm", "proteinglm_10b_mlm"]
 
     esm1b_models = cast(List[str], available_generator_models("esm1b"))
     assert "esm1b_t33_650M_UR50S" in esm1b_models
@@ -293,6 +295,16 @@ def test_generator_factory_builds_esmc() -> None:
         tokenizer=object(),
     )
     assert isinstance(obj, EsmcEmbeddingGenerator)
+
+
+def test_generator_factory_builds_proteinglm() -> None:
+    obj = Generator(
+        model_class="proteinglm",
+        name="proteinglm_1b_mlm",
+        model=object(),
+        tokenizer=object(),
+    )
+    assert isinstance(obj, ProteinGlmEmbeddingGenerator)
 
 
 def test_generator_factory_builds_esm2() -> None:

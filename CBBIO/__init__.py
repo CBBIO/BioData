@@ -198,6 +198,13 @@ from .embeddings.models.amplify import (
     AmplifyPreprocessor,
     AmplifyTokenizerAdapter,
 )
+from .embeddings.models.proteinglm import (
+    ProteinGlmEmbeddingGenerator,
+    ProteinGlmModelAdapter,
+    ProteinGlmPostprocessor,
+    ProteinGlmPreprocessor,
+    ProteinGlmTokenizerAdapter,
+)
 from .embeddings.models.esmc import (
     EsmcEmbeddingGenerator,
     EsmcModelAdapter,
@@ -425,6 +432,11 @@ __all__ = [
     "AmplifyModelAdapter",
     "AmplifyPostprocessor",
     "AmplifyEmbeddingGenerator",
+    "ProteinGlmPreprocessor",
+    "ProteinGlmTokenizerAdapter",
+    "ProteinGlmModelAdapter",
+    "ProteinGlmPostprocessor",
+    "ProteinGlmEmbeddingGenerator",
     "EsmcPreprocessor",
     "EsmcTokenizerAdapter",
     "EsmcModelAdapter",

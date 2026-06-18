@@ -350,6 +350,7 @@ FASTA helpers also remain:
 - `prostT5`: ProstT5 protein-to-embedding path; native hidden-state layer indexing.
 - `ankh3`: ANKH3 via `T5Tokenizer` and `T5EncoderModel`.
 - `amplify`: AMPLIFY 120M and 350M via Transformers `AutoModel`/`AutoTokenizer` with `trust_remote_code=True`; max context length 2048 residues. On CUDA, AMPLIFY defaults to `bfloat16` because its xFormers attention kernels do not support `float32`; pass `dtype="float16"` explicitly if preferred. Short aliases `amplify_120m` and `amplify_350m` select NVIDIA's TransformerEngine-optimized checkpoints and require `transformer_engine.pytorch`, not the bare `transformer-engine` meta package. For CUDA 13 environments, install with `poetry run pip install --no-build-isolation 'transformer-engine[pytorch,core-cu13]==2.16.0'`. Use `amplify_120m_chandar` or `amplify_350m_chandar` for the upstream Chandar Research Lab checkpoints.
+- `proteinglm`: ProteinGLM MLM 1B, 3B, and 10B via Transformers `AutoModelForMaskedLM`/`AutoTokenizer` with `trust_remote_code=True`. Short aliases `proteinglm_1b_mlm`, `proteinglm_3b_mlm`, and `proteinglm_10b_mlm` resolve to the Biomap checkpoints. Outputs trim the trailing EOS token and default to the final hidden layer.
 - `esm2`: ESM2 via `esm.pretrained` or Transformers fallback; native ESM2 layer indexing.
 - `esm1b`: ESM-1b via `esm.pretrained` or Transformers fallback; native ESM1b layer indexing.
 - `esmc`: ESM-C SDK path. Multi-sequence batches require SDK support for batched logits; use `batch_size=1` if the installed SDK rejects batched inputs.
