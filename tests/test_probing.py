@@ -114,6 +114,7 @@ def test_binary_task_uses_dataset_target_and_probe_objective() -> None:
     assert result.test_count == 2
     assert result.metrics["accuracy"] == 1.0
     assert result.metrics["f1"] == 1.0
+    assert result.predictions == {"nt": 0, "pt": 1}
     assert result.scores is not None
     assert set(result.scores) == {"nt", "pt"}
 
@@ -134,7 +135,6 @@ def test_binary_metrics_include_imbalance_aware_scores() -> None:
     assert metrics["mcc"] == pytest.approx(1 / 3**0.5)
     assert metrics["auroc"] == 1.0
     assert metrics["auprc"] == 1.0
-    assert result.predictions == {"nt": 0, "pt": 1}
 
 
 def test_probe_standardizes_embedding_features_from_train_split() -> None:
