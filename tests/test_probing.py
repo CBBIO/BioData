@@ -423,15 +423,38 @@ def test_dtu_catalog_lists_relevant_residue_services() -> None:
 
 def test_unified_dataset_catalog_is_filterable_and_searchable() -> None:
     ready_residue_ptm = list_dataset_catalog(level="residue", category="ptm", status="ready")
+    structure_tasks = list_dataset_catalog(task_class="structure")
+    f1_tasks = list_dataset_catalog(preferred_metric="f1")
     search_results = search_dataset_catalog("phosphorylation cdk residue", status="ready")
 
     assert get_dataset_catalog_entry("dbptm:phosphorylation_by_cdk").loader == "load_dbptm_benchmark_dataset"
-    assert get_dataset_catalog_entry("source:disprot").status == "ready"
-    assert get_dataset_catalog_entry("source:disprot").loader == "load_residue_source_dataset"
+    assert get_dataset_catalog_entry("disprot:all").status == "ready"
+    assert get_dataset_catalog_entry("disprot:all").loader == "load_residue_source_dataset"
+    assert get_dataset_catalog_entry("biolip:dna").status == "ready"
+    assert get_dataset_catalog_entry("biolip:dna").target == "dna_binding_site"
+    assert get_dataset_catalog_entry("phosphoelm:all").status == "ready"
+    assert get_dataset_catalog_entry("phosphoelm:ltp").loader == "load_residue_source_dataset"
+    assert get_dataset_catalog_entry("phosphoelm:htp").target == "phosphorylation_site"
+    assert get_dataset_catalog_entry("phosphoelm:ltp").task_class == "ptms"
+    assert get_dataset_catalog_entry("phosphoelm:ltp").preferred_metric == "f1"
+    assert get_dataset_catalog_entry("peer:fold").task_class == "structure"
+    assert get_dataset_catalog_entry("peer:fold").preferred_metric == "accuracy"
+    assert get_dataset_catalog_entry("source:phosphoelm_ltp").id == "phosphoelm:ltp"
     assert get_dataset_catalog_entry("secondary_structure").id == "peer:secondary_structure"
+    for entry in list_dataset_catalog():
+        description = entry.description.lower()
+        assert entry.task_class
+        assert entry.preferred_metric
+        assert "source:" in description
+        assert "class:" in description
+        assert "split system:" in description
     assert "dbptm:phosphorylation_by_cdk" in {entry.id for entry in ready_residue_ptm}
+    assert "phosphoelm:all" in {entry.id for entry in ready_residue_ptm}
+    assert "peer:fold" in {entry.id for entry in structure_tasks}
+    assert "phosphoelm:ltp" in {entry.id for entry in f1_tasks}
     assert search_results[0].id == "dbptm:phosphorylation_by_cdk"
     assert "peer:secondary_structure" in {entry.id for entry in search_dataset_catalog("secondary structure")}
+    assert "phosphoelm:ltp" in {entry.id for entry in search_dataset_catalog("ptms f1 ltp")}
 
 
 def test_native_peer_registry_lists_sequence_importable_datasets() -> None:
