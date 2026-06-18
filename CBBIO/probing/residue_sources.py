@@ -385,12 +385,18 @@ def get_residue_source(name: str) -> ResidueSourceSpec:
 def _normalize_residue_source_name(name: str) -> str:
     text = str(name).strip().lower().replace("-", "_")
     aliases = {
+        "dbptm:all": "dbptm",
+        "musitedeep:all": "musitedeep",
+        "disprot:all": "disprot",
         "biolip:all": "biolip_all",
         "biolip:dna": "biolip_dna",
         "biolip:rna": "biolip_rna",
         "biolip:pep": "biolip_pep",
         "biolip:peptide": "biolip_pep",
         "biolip:other": "biolip_other",
+        "metalpdb:all": "metalpdb",
+        "scannet:binding": "scannet_binding",
+        "netsurfp:secondary_structure": "netsurfp",
         "phosphoelm:all": "phosphoelm_all",
         "phosphoelm:ltp": "phosphoelm_ltp",
         "phosphoelm:htp": "phosphoelm_htp",
