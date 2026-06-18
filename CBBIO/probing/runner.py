@@ -21,6 +21,7 @@ class TaskLayerResult:
     layer_index: int
     metrics: Dict[str, float]
     predictions: Dict[str, float | int | str]
+    scores: Dict[str, float] | None
     train_count: int
     val_count: int
     test_count: int
@@ -80,6 +81,7 @@ def run_task_on_layer(
         layer_index=int(layer_index),
         metrics=evaluation.metrics,
         predictions=evaluation.predictions,
+        scores=evaluation.scores,
         train_count=split_counts["train"],
         val_count=split_counts["val"],
         test_count=split_counts["test"],
