@@ -34,9 +34,13 @@ ResidueSourceName = Literal[
     "metalpdb",
     "scannet_binding",
     "netsurfp",
+    "phosphoelm_all",
+    "phosphoelm_ltp",
+    "phosphoelm_htp",
 ]
 
 BioLipLigandClass = Literal["all", "dna", "rna", "pep", "other"]
+PhosphoElmSourceFilter = Literal["all", "LTP", "HTP"]
 
 
 @dataclass(frozen=True)
@@ -332,6 +336,36 @@ RESIDUE_SOURCE_SPECS: Dict[str, ResidueSourceSpec] = {
         import_adapter="load_residue_label_table",
         notes="Use NetSurfP tabular predictions/annotations with one label per residue.",
     ),
+    "phosphoelm_all": ResidueSourceSpec(
+        name="phosphoelm_all",
+        category="ptm",
+        objective="binary",
+        target="phosphorylation_site",
+        source="Phospho.ELM",
+        homepage="http://phospho.elm.eu.org/",
+        import_adapter="load_phosphoelm_dataset",
+        notes="Full-protein phosphorylation labels from Phospho.ELM HTP and LTP evidence; unannotated S/T/Y residues are treated as negatives.",
+    ),
+    "phosphoelm_ltp": ResidueSourceSpec(
+        name="phosphoelm_ltp",
+        category="ptm",
+        objective="binary",
+        target="phosphorylation_site",
+        source="Phospho.ELM",
+        homepage="http://phospho.elm.eu.org/",
+        import_adapter="load_phosphoelm_dataset",
+        notes="Full-protein phosphorylation labels from Phospho.ELM low-throughput evidence only.",
+    ),
+    "phosphoelm_htp": ResidueSourceSpec(
+        name="phosphoelm_htp",
+        category="ptm",
+        objective="binary",
+        target="phosphorylation_site",
+        source="Phospho.ELM",
+        homepage="http://phospho.elm.eu.org/",
+        import_adapter="load_phosphoelm_dataset",
+        notes="Full-protein phosphorylation labels from Phospho.ELM high-throughput evidence only.",
+    ),
 }
 
 MUSITEDEEP_TESTDATA_API_URL = (
@@ -357,6 +391,9 @@ def _normalize_residue_source_name(name: str) -> str:
         "biolip:pep": "biolip_pep",
         "biolip:peptide": "biolip_pep",
         "biolip:other": "biolip_other",
+        "phosphoelm:all": "phosphoelm_all",
+        "phosphoelm:ltp": "phosphoelm_ltp",
+        "phosphoelm:htp": "phosphoelm_htp",
     }
     return aliases.get(text, text)
 
@@ -607,9 +644,111 @@ def load_residue_source_dataset(
             return load_disprot_json(json_path, target=resolved_target, split=split)
         tsv_path = base / "disprot_current.tsv"
         return load_disprot_tsv(tsv_path, target=resolved_target, split=split or "train", region_mode=True)
+    phosphoelm_filter = _phosphoelm_source_filter_for_source(spec.name)
+    if phosphoelm_filter is not None:
+        return load_phosphoelm_dataset(
+            _local_phosphoelm_dump(base),
+            target=resolved_target,
+            split=split,
+            source_filter=phosphoelm_filter,
+        )
     raise EmbeddingInputError(
         f"Residue source {spec.name!r} requires explicit input files. Use adapter {spec.import_adapter}."
     )
+
+
+def load_phosphoelm_dataset(
+    path: str | Path,
+    *,
+    target: str = "phosphorylation_site",
+    split: SplitName | None = None,
+    source_filter: PhosphoElmSourceFilter = "all",
+    residue_codes: Sequence[str] = ("S", "T", "Y"),
+) -> ResidueDataset:
+    """Load a Phospho.ELM dump as full-protein phosphorylation labels.
+
+    Positive labels are experimentally annotated sites in the dump. Other S/T/Y
+    residues are left as 0 and included in the mask; non-S/T/Y residues are
+    masked out because they are not phosphorylation-site candidates for NetPhos.
+    """
+
+    resolved_filter = _normalize_phosphoelm_source_filter(source_filter)
+    candidate_codes = _normalize_phosphoelm_residue_codes(residue_codes)
+    grouped: Dict[str, Dict[str, Any]] = {}
+    evidence_counts: Dict[str, Dict[str, int]] = {}
+    for row_index, row in enumerate(_iter_phosphoelm_rows(path)):
+        row_source = str(row.get("source", "")).strip().upper()
+        if resolved_filter != "all" and row_source != resolved_filter:
+            continue
+        acc = str(row.get("acc", "")).strip()
+        sequence = str(row.get("sequence", "")).strip()
+        code = str(row.get("code", "")).strip().upper()
+        if code not in candidate_codes:
+            continue
+        if not acc or not sequence:
+            raise EmbeddingInputError(f"Phospho.ELM row {row_index} requires non-empty acc and sequence fields.")
+        try:
+            position = int(str(row.get("position", "")).strip())
+        except ValueError as exc:
+            raise EmbeddingInputError(f"Phospho.ELM row {row_index} has invalid position {row.get('position')!r}.") from exc
+        if position < 1 or position > len(sequence):
+            raise EmbeddingInputError(
+                f"Phospho.ELM row {row_index} position {position} is outside sequence length {len(sequence)}."
+            )
+        observed = sequence[position - 1].upper()
+        if code != observed:
+            raise EmbeddingInputError(
+                f"Phospho.ELM row {row_index} code {code!r} does not match sequence residue {observed!r}."
+            )
+        entry = grouped.setdefault(
+            acc,
+            {
+                "sequence": sequence,
+                "labels": [0] * len(sequence),
+                "mask": [aa.upper() in candidate_codes for aa in sequence],
+                "metadata": {
+                    "source": "phosphoelm",
+                    "evidence_filter": resolved_filter,
+                    "residue_codes": tuple(candidate_codes),
+                    "species": row.get("species", ""),
+                },
+            },
+        )
+        if entry["sequence"] != sequence:
+            raise EmbeddingInputError(f"Conflicting Phospho.ELM sequences for accession {acc!r}.")
+        cast(List[int], entry["labels"])[position - 1] = 1
+        counts = evidence_counts.setdefault(acc, {"HTP": 0, "LTP": 0, "other": 0})
+        counts[row_source if row_source in {"HTP", "LTP"} else "other"] += 1
+
+    if not grouped:
+        raise EmbeddingInputError(f"No Phospho.ELM rows matched source_filter={resolved_filter!r}.")
+
+    examples: List[ResidueExample] = []
+    for acc, entry in grouped.items():
+        labels = cast(List[int], entry["labels"])
+        mask = cast(List[bool], entry["mask"])
+        metadata = dict(cast(Dict[str, Any], entry["metadata"]))
+        metadata["positive_site_count"] = sum(labels)
+        metadata["positive_residue_counts"] = _phosphoelm_positive_residue_counts(str(entry["sequence"]), labels)
+        metadata["positive_residue_stratum"] = _phosphoelm_positive_residue_stratum(
+            cast(Mapping[str, int], metadata["positive_residue_counts"])
+        )
+        metadata["candidate_site_count"] = sum(mask)
+        metadata["evidence_row_counts"] = evidence_counts[acc]
+        examples.append(
+            ResidueExample(
+                id=acc,
+                sequence=str(entry["sequence"]),
+                labels={target: labels},
+                split=split or "train",
+                mask=mask,
+                metadata=metadata,
+            )
+        )
+
+    if split is None:
+        examples = _split_phosphoelm_examples(examples)
+    return ResidueDataset(examples)
 
 
 def load_musitedeep_fasta(
@@ -1215,7 +1354,145 @@ def _stable_biolip_hash(value: str) -> str:
 
 
 def _residue_source_storage_name(name: str) -> str:
-    return "biolip" if str(name).startswith("biolip") else str(name)
+    normalized = str(name)
+    if normalized.startswith("biolip"):
+        return "biolip"
+    if normalized.startswith("phosphoelm"):
+        return "phosphoelm"
+    return normalized
+
+
+def _phosphoelm_source_filter_for_source(name: str) -> PhosphoElmSourceFilter | None:
+    normalized = str(name).strip().lower()
+    if normalized == "phosphoelm_all":
+        return "all"
+    if normalized == "phosphoelm_ltp":
+        return "LTP"
+    if normalized == "phosphoelm_htp":
+        return "HTP"
+    return None
+
+
+def _normalize_phosphoelm_source_filter(value: str) -> PhosphoElmSourceFilter:
+    normalized = str(value).strip().upper()
+    if normalized in {"", "ALL"}:
+        return "all"
+    if normalized in {"LTP", "HTP"}:
+        return cast(PhosphoElmSourceFilter, normalized)
+    raise EmbeddingInputError("Phospho.ELM source_filter must be one of: all, LTP, HTP.")
+
+
+def _normalize_phosphoelm_residue_codes(values: Sequence[str]) -> Tuple[str, ...]:
+    codes = tuple(dict.fromkeys(str(value).strip().upper() for value in values if str(value).strip()))
+    if not codes:
+        raise EmbeddingInputError("Phospho.ELM residue_codes must contain at least one residue code.")
+    invalid = [code for code in codes if code not in {"S", "T", "Y"}]
+    if invalid:
+        raise EmbeddingInputError("Phospho.ELM residue_codes must be drawn from: S, T, Y.")
+    return codes
+
+
+def _local_phosphoelm_dump(root: Path) -> Path:
+    candidates: List[Path] = []
+    for directory in (root, *root.parents):
+        candidates.extend(
+            [
+                directory / "phosphoELM_all_latest.dump.tgz",
+                directory / "phosphoELM_all_2015-04.dump",
+            ]
+        )
+    for path in candidates:
+        if path.exists():
+            return path
+    raise EmbeddingInputError(
+        f"No Phospho.ELM dump found under {root}. Expected phosphoELM_all_latest.dump.tgz "
+        "or phosphoELM_all_2015-04.dump."
+    )
+
+
+def _iter_phosphoelm_rows(path: str | Path) -> Iterable[Dict[str, str]]:
+    source = Path(path).expanduser()
+    if not source.exists():
+        raise EmbeddingInputError(f"Phospho.ELM dump does not exist: {source}.")
+    if source.suffixes[-2:] == [".dump", ".tgz"] or source.name.endswith(".tgz"):
+        with tarfile.open(source, "r:gz") as archive:
+            members = [member for member in archive.getmembers() if member.isfile() and member.name.endswith(".dump")]
+            if not members:
+                raise EmbeddingInputError(f"No .dump member found in Phospho.ELM archive {source}.")
+            handle = archive.extractfile(members[0])
+            if handle is None:
+                raise EmbeddingInputError(f"Could not read Phospho.ELM archive member {members[0].name}.")
+            with handle:
+                text = (line.decode("utf-8") for line in handle)
+                yield from csv.DictReader(text, delimiter="\t")
+        return
+    with source.open("r", encoding="utf-8", newline="") as handle:
+        yield from csv.DictReader(handle, delimiter="\t")
+
+
+def _split_phosphoelm_examples(examples: Sequence[ResidueExample]) -> List[ResidueExample]:
+    primary_groups: Dict[Tuple[str, str], List[ResidueExample]] = {}
+    for example in examples:
+        metadata = example.metadata or {}
+        key = (
+            str(metadata.get("species") or "unknown"),
+            str(metadata.get("positive_residue_stratum") or "none"),
+        )
+        primary_groups.setdefault(key, []).append(example)
+
+    assigned: List[ResidueExample] = []
+    rare_by_species: Dict[str, List[ResidueExample]] = {}
+    for key, group in primary_groups.items():
+        if len(group) >= 10:
+            assigned.extend(_split_phosphoelm_group(group))
+        else:
+            rare_by_species.setdefault(key[0], []).extend(group)
+
+    rare_global: List[ResidueExample] = []
+    for group in rare_by_species.values():
+        if len(group) >= 10:
+            assigned.extend(_split_phosphoelm_group(group))
+        else:
+            rare_global.extend(group)
+    if rare_global:
+        assigned.extend(_split_phosphoelm_group(rare_global))
+
+    return sorted(assigned, key=lambda example: example.id)
+
+
+def _split_phosphoelm_group(group: Sequence[ResidueExample]) -> List[ResidueExample]:
+    ordered = sorted(group, key=lambda example: _stable_phosphoelm_hash(example.id))
+    counts = _disprot_split_counts(len(ordered))
+    split_names: List[SplitName] = [split_name for split_name, count in counts for _ in range(count)]
+    return [
+        ResidueExample(
+            id=example.id,
+            sequence=example.sequence,
+            labels=example.labels,
+            split=split_name,
+            mask=example.mask,
+            metadata=example.metadata,
+        )
+        for example, split_name in zip(ordered, split_names)
+    ]
+
+
+def _stable_phosphoelm_hash(value: str) -> str:
+    return hashlib.sha256(f"phosphoelm-split-v1:{value}".encode("utf-8")).hexdigest()
+
+
+def _phosphoelm_positive_residue_counts(sequence: str, labels: Sequence[int]) -> Dict[str, int]:
+    counts = {"S": 0, "T": 0, "Y": 0}
+    for residue, label in zip(sequence, labels):
+        code = residue.upper()
+        if label and code in counts:
+            counts[code] += 1
+    return counts
+
+
+def _phosphoelm_positive_residue_stratum(counts: Mapping[str, int]) -> str:
+    codes = [code for code in ("S", "T", "Y") if int(counts.get(code, 0)) > 0]
+    return "+".join(codes) if codes else "none"
 
 
 def _biolip_ligand_class_for_source(name: str) -> BioLipLigandClass | None:
@@ -1407,6 +1684,7 @@ __all__ = [
     "DISPROT_CURRENT_JSON_URL",
     "DISPROT_CURRENT_TSV_URL",
     "DbptmBenchmarkSpec",
+    "PhosphoElmSourceFilter",
     "RESIDUE_SOURCE_SPECS",
     "ResidueSourceName",
     "ResidueSourceSpec",
@@ -1427,6 +1705,7 @@ __all__ = [
     "load_interval_residue_tsv",
     "load_musitedeep_fasta",
     "load_musitedeep_testdata_dataset",
+    "load_phosphoelm_dataset",
     "load_residue_label_table",
     "load_residue_source_dataset",
 ]

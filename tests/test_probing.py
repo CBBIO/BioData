@@ -43,6 +43,7 @@ from CBBIO import (
     load_musitedeep_fasta,
     load_musitedeep_testdata_dataset,
     load_peer_dataset,
+    load_phosphoelm_dataset,
     load_residue_label_table,
     load_residue_label_csv,
     load_residue_source_dataset,
@@ -571,8 +572,13 @@ def test_residue_source_registry_covers_requested_sources() -> None:
         "metalpdb",
         "scannet_binding",
         "netsurfp",
+        "phosphoelm_all",
+        "phosphoelm_ltp",
+        "phosphoelm_htp",
     } == names
     assert get_residue_source("biolip").import_adapter == "load_biolip_dataset"
+    assert get_residue_source("phosphoelm_all").import_adapter == "load_phosphoelm_dataset"
+    assert get_residue_source("phosphoelm:ltp").name == "phosphoelm_ltp"
     assert get_residue_source("biolip:dna").name == "biolip_dna"
 
 
@@ -1206,3 +1212,109 @@ def test_load_residue_source_dataset_imports_biolip_variant_from_shared_layout(t
     assert dataset.ids() == ["1peA"]
     assert dataset.target_values("peptide_binding_site") == {"1peA": [0, 0, 1, 0]}
 
+
+def test_load_phosphoelm_dataset_collapses_full_protein_sites_and_filters_evidence(tmp_path) -> None:
+    dump = tmp_path / "phosphoELM_all_2015-04.dump"
+    dump.write_text(
+        "\n".join(
+            [
+                "acc\tsequence\tposition\tcode\tpmids\tkinases\tsource\tspecies\tentry_date",
+                "P1\tMSTYAS\t2\tS\t1\t\tLTP\tHomo sapiens\t2015-01-01",
+                "P1\tMSTYAS\t3\tT\t2\t\tHTP\tHomo sapiens\t2015-01-02",
+                "P1\tMSTYAS\t3\tT\t3\t\tHTP\tHomo sapiens\t2015-01-03",
+                "P2\tAAAY\t4\tY\t4\tSRC\tHTP\tMus musculus\t2015-01-04",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    all_dataset = load_phosphoelm_dataset(dump, split="train")
+    ltp_dataset = load_phosphoelm_dataset(dump, split="train", source_filter="LTP")
+    htp_dataset = load_phosphoelm_dataset(dump, split="train", source_filter="HTP")
+    serine_dataset = load_phosphoelm_dataset(dump, split="train", residue_codes=("S",))
+
+    assert all_dataset.target_values("phosphorylation_site") == {
+        "P1": [0, 1, 1, 0, 0, 0],
+        "P2": [0, 0, 0, 1],
+    }
+    assert all_dataset.examples[0].mask == [False, True, True, True, False, True]
+    assert ltp_dataset.target_values("phosphorylation_site") == {"P1": [0, 1, 0, 0, 0, 0]}
+    assert htp_dataset.target_values("phosphorylation_site") == {
+        "P1": [0, 0, 1, 0, 0, 0],
+        "P2": [0, 0, 0, 1],
+    }
+    assert serine_dataset.target_values("phosphorylation_site") == {"P1": [0, 1, 0, 0, 0, 0]}
+    assert serine_dataset.examples[0].mask == [False, True, False, False, False, True]
+    assert htp_dataset.examples[0].metadata is not None
+    assert htp_dataset.examples[0].metadata["positive_site_count"] == 1
+    assert htp_dataset.examples[0].metadata["positive_residue_counts"] == {"S": 0, "T": 1, "Y": 0}
+    assert htp_dataset.examples[0].metadata["positive_residue_stratum"] == "T"
+
+
+def test_load_phosphoelm_dataset_stratifies_default_splits_by_species_and_residue(tmp_path) -> None:
+    dump = tmp_path / "phosphoELM_all_2015-04.dump"
+    rows = ["acc\tsequence\tposition\tcode\tpmids\tkinases\tsource\tspecies\tentry_date"]
+    for index in range(10):
+        rows.append(f"HS{index}\tMSTYAS\t2\tS\t1\t\tLTP\tHomo sapiens\t2015-01-01")
+    for index in range(10):
+        rows.append(f"MM{index}\tMSTYAS\t3\tT\t1\t\tLTP\tMus musculus\t2015-01-01")
+    dump.write_text("\n".join(rows) + "\n", encoding="utf-8")
+
+    dataset = load_phosphoelm_dataset(dump)
+    species_by_split: dict[str, set[str]] = {"train": set(), "val": set(), "test": set()}
+    residues_by_split: dict[str, set[str]] = {"train": set(), "val": set(), "test": set()}
+    for example in dataset.examples:
+        assert example.metadata is not None
+        species_by_split[example.split].add(str(example.metadata["species"]))
+        residues_by_split[example.split].add(str(example.metadata["positive_residue_stratum"]))
+
+    assert dataset.split_counts() == {"train": 16, "val": 2, "test": 2}
+    assert species_by_split == {
+        "train": {"Homo sapiens", "Mus musculus"},
+        "val": {"Homo sapiens", "Mus musculus"},
+        "test": {"Homo sapiens", "Mus musculus"},
+    }
+    assert residues_by_split == {"train": {"S", "T"}, "val": {"S", "T"}, "test": {"S", "T"}}
+
+
+def test_load_residue_source_dataset_imports_phosphoelm_variants_from_shared_layout(tmp_path) -> None:
+    data_dir = tmp_path / "phosphoelm"
+    data_dir.mkdir()
+    payload = (
+        "acc\tsequence\tposition\tcode\tpmids\tkinases\tsource\tspecies\tentry_date\n"
+        "P1\tMSTYAS\t2\tS\t1\t\tLTP\tHomo sapiens\t2015-01-01\n"
+        "P1\tMSTYAS\t3\tT\t2\t\tHTP\tHomo sapiens\t2015-01-02\n"
+    ).encode("utf-8")
+    archive_path = data_dir / "phosphoELM_all_latest.dump.tgz"
+    with tarfile.open(archive_path, "w:gz") as archive:
+        info = tarfile.TarInfo("phosphoELM_all_2015-04.dump")
+        info.size = len(payload)
+        archive.addfile(info, io.BytesIO(payload))
+
+    all_dataset = load_residue_source_dataset(tmp_path, name="phosphoelm:all", split="test")
+    ltp_dataset = load_residue_source_dataset(tmp_path, name="phosphoelm:ltp", split="test")
+    htp_dataset = load_residue_source_dataset(tmp_path, name="phosphoelm:htp", split="test")
+
+    assert all_dataset.split_counts() == {"train": 0, "val": 0, "test": 1}
+    assert all_dataset.target_values("phosphorylation_site") == {"P1": [0, 1, 1, 0, 0, 0]}
+    assert ltp_dataset.target_values("phosphorylation_site") == {"P1": [0, 1, 0, 0, 0, 0]}
+    assert htp_dataset.target_values("phosphorylation_site") == {"P1": [0, 0, 1, 0, 0, 0]}
+
+
+def test_load_residue_source_dataset_finds_phosphoelm_archive_from_nested_data_root(tmp_path) -> None:
+    data_root = tmp_path / "data" / "probing"
+    (data_root / "phosphoelm").mkdir(parents=True)
+    payload = (
+        "acc\tsequence\tposition\tcode\tpmids\tkinases\tsource\tspecies\tentry_date\n"
+        "P1\tMSTYAS\t2\tS\t1\t\tLTP\tHomo sapiens\t2015-01-01\n"
+    ).encode("utf-8")
+    archive_path = tmp_path / "phosphoELM_all_latest.dump.tgz"
+    with tarfile.open(archive_path, "w:gz") as archive:
+        info = tarfile.TarInfo("phosphoELM_all_2015-04.dump")
+        info.size = len(payload)
+        archive.addfile(info, io.BytesIO(payload))
+
+    dataset = load_residue_source_dataset(data_root, name="phosphoelm_all", split="train")
+
+    assert dataset.target_values("phosphorylation_site") == {"P1": [0, 1, 0, 0, 0, 0]}
