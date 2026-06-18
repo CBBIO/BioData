@@ -100,7 +100,7 @@ Aligns two sequences and returns pairwise similarity statistics.
 ### Local alignment (default)
 
 ```python
-from CBBIO.similarity import align_sequences
+from CBBIO import align_sequences
 
 result = align_sequences("ACDEFGHIKLMNPQRSTVWY", "ACDEFHIKLMNPQRSTVWY")
 print(f"Score:            {result.score}")
@@ -118,6 +118,8 @@ print(result.ref_aligned)
 ### Global alignment
 
 ```python
+from CBBIO import align_sequences
+
 result = align_sequences(seq1, seq2, mode="global")
 ```
 
@@ -127,17 +129,45 @@ result = align_sequences(seq1, seq2, mode="global")
 result = align_sequences(seq1, seq2, gap_open=5, gap_extend=2, matrix="blosum50")
 ```
 
+### Reading the alignment strings
+
+`query_aligned` and `ref_aligned` are the two aligned sequences (with `-` for gaps).
+`midline` shows `|` for identical positions, `.` for conservative substitutions, and ` ` for gaps:
+
+```
+ACDEFGHIKLMNPQRSTVWY
+|||||-||||||||||||||
+ACDEF-HIKLMNPQRSTVWY
+```
+
 ### Using with BioDataClient sequences
 
 ```python
-from CBBIO.BioData import BioDataClient
-from CBBIO.similarity import align_sequences
+from CBBIO import connect, align_sequences
 
-with BioDataClient() as client:
-    seq1 = client.get_protein_sequence("protein_id_1")
-    seq2 = client.get_protein_sequence("protein_id_2")
+with connect() as client:
+    seq1 = client.get_protein_sequence("P12345")
+    seq2 = client.get_protein_sequence("Q67890")
 
 if seq1 and seq2:
     result = align_sequences(seq1, seq2)
     print(f"Identity: {result.identity:.2f}%")
+    print(f"Positives: {result.positives:.2f}%")
+    print(f"Score: {result.score}")
+```
+
+### Screening a set of proteins for similarity
+
+```python
+from CBBIO import connect, align_sequences
+
+with connect() as client:
+    sequences = client.get_protein_sequences(["P12345", "Q67890", "A11111"])
+
+query_seq = sequences["P12345"]
+for pid, seq in sequences.items():
+    if pid == "P12345":
+        continue
+    result = align_sequences(query_seq, seq)
+    print(f"{pid}  identity={result.identity:.1f}%  score={result.score}")
 ```

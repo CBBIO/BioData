@@ -2,6 +2,59 @@
 
 `CBBIO.embeddings` provides model-agnostic protein embedding generation. Use the job API for file-backed and production workflows: choose a generator, stream inputs through a batcher, shape the output with a pooler, and persist records with an `EmbeddingWriter`.
 
+---
+
+## Concepts
+
+### EmbeddingRecord
+
+Every generated embedding is returned as an `EmbeddingRecord`:
+
+| Field | Type | Description |
+|---|---|---|
+| `id` | `str` | Protein identifier (from FASTA header or GenerationInput) |
+| `embedding` | `Sequence[float]` or `Sequence[Sequence[float]]` | A 1-D vector (pooled) or 2-D matrix (per-residue) |
+| `layer_index` | `int` | Which model layer this came from |
+| `model_reference` | `str` | HuggingFace repo or model identifier |
+| `shape` | `tuple[int, ...]` | Shape of the embedding array |
+| `metadata` | `dict \| None` | Optional extras (e.g. `{"pooling": "mean"}`) |
+
+### Per-residue vs. pooled
+
+By default, models return one embedding vector per amino acid — a matrix of shape `(sequence_length, hidden_dim)`. This is useful for residue-level tasks (PTM site prediction, disorder, binding).
+
+For protein-level tasks, you want a single vector per protein. Use a **pooler** to collapse the matrix:
+
+| Pooler | Description | Use when |
+|---|---|---|
+| `None` / `"none"` | Keep the raw model output shape | Residue-level tasks, custom pooling |
+| `"mean"` | Average across the sequence length axis | Most protein-level tasks |
+| `"cls"` | Use the CLS / BOS token position | Models that encode global context in the first token |
+
+Pass a pooler to `run_embedding_generation` or `generator.generate`:
+
+```python
+from CBBIO import pooler_factory, run_embedding_generation
+
+result = run_embedding_generation(
+    generator, batcher, writer,
+    layer_index=33,
+    pooler=pooler_factory("mean"),   # → one (D,) vector per protein
+)
+```
+
+### Layers
+
+`layer_index=0` is the embedding layer (input representations). Higher indices are transformer layers. To extract multiple layers in a single forward pass:
+
+```python
+run_embedding_generation(generator, batcher, writer, layer_index=[0, 16, 33])
+```
+
+This produces one `EmbeddingRecord` per `(protein, layer)` pair in the output.
+
+---
+
 ```python
 from CBBIO import (
     EmbeddingWriter,
@@ -346,14 +399,37 @@ FASTA helpers also remain:
 
 ## Model Families
 
-- `protT5`: Hugging Face ProtT5; native hidden-state layer indexing.
-- `prostT5`: ProstT5 protein-to-embedding path; native hidden-state layer indexing.
-- `ankh3`: ANKH3 via `T5Tokenizer` and `T5EncoderModel`.
-- `amplify`: AMPLIFY 120M and 350M via Transformers `AutoModel`/`AutoTokenizer` with `trust_remote_code=True`; max context length 2048 residues. On CUDA, AMPLIFY defaults to `bfloat16` because its xFormers attention kernels do not support `float32`; pass `dtype="float16"` explicitly if preferred. Short aliases `amplify_120m` and `amplify_350m` select NVIDIA's TransformerEngine-optimized checkpoints and require `transformer_engine.pytorch`, not the bare `transformer-engine` meta package. For CUDA 13 environments, install with `poetry run pip install --no-build-isolation 'transformer-engine[pytorch,core-cu13]==2.16.0'`. Use `amplify_120m_chandar` or `amplify_350m_chandar` for the upstream Chandar Research Lab checkpoints.
-- `proteinglm`: ProteinGLM MLM 1B, 3B, and 10B via Transformers `AutoModelForMaskedLM`/`AutoTokenizer` with `trust_remote_code=True`. Short aliases `proteinglm_1b_mlm`, `proteinglm_3b_mlm`, and `proteinglm_10b_mlm` resolve to the Biomap checkpoints. Outputs trim the trailing EOS token and default to the final hidden layer.
-- `esm2`: ESM2 via `esm.pretrained` or Transformers fallback; native ESM2 layer indexing.
-- `esm1b`: ESM-1b via `esm.pretrained` or Transformers fallback; native ESM1b layer indexing.
-- `esmc`: ESM-C SDK path. Multi-sequence batches require SDK support for batched logits; use `batch_size=1` if the installed SDK rejects batched inputs.
+### Quick reference
+
+| `model_class` | Default checkpoint | Layers | Poolers | Notes |
+|---|---|---|---|---|
+| `protT5` | `Rostlab/prot_t5_xl_uniref50` | 24 | `none`, `mean` | Whitespace-separated input; U/Z/O/B → X |
+| `prostT5` | `Rostlab/ProstT5` | 24 | `none`, `mean` | Structure-aware ProtT5 variant |
+| `ankh3` | `ElnaggarLab/ankh3-large` | varies | `none`, `mean` | T5EncoderModel backbone |
+| `amplify` | `nvidia/AMPLIFY_120M` | varies | `none`, `mean`, `cls` | Max 2048 residues; bfloat16 on CUDA |
+| `proteinglm` | `biomap-research/proteinglm-1b-mlm` | varies | `none`, `mean` | 1B / 3B / 10B variants |
+| `esm2` | `facebook/esm2_t33_650M_UR50D` | 6–48 (by size) | `none`, `mean`, `cls` | ESM2 family: 8M to 15B |
+| `esm1b` | `facebook/esm-1b` | 33 | `none`, `mean`, `cls` | Load via torch.hub (HF weights have pre/post-norm mismatch) |
+| `esmc` | `esmc_600m` | varies | `none`, `mean`, `cls` | ESM-C SDK; use `batch_size=1` if SDK rejects batched input |
+
+### ESM-2 model sizes
+
+| Model name | Layers | Parameters |
+|---|---|---|
+| `facebook/esm2_t6_8M_UR50D` | 6 | 8 M |
+| `facebook/esm2_t12_35M_UR50D` | 12 | 35 M |
+| `facebook/esm2_t30_150M_UR50D` | 30 | 150 M |
+| `facebook/esm2_t33_650M_UR50D` | 33 | 650 M |
+| `facebook/esm2_t36_3B_UR50D` | 36 | 3 B |
+| `facebook/esm2_t48_15B_UR50D` | 48 | 15 B |
+
+### Model-specific notes
+
+- **protT5 / prostT5**: Input sequences are whitespace-joined (`M K V L ...`); non-standard amino acids U, Z, O, B are replaced with X automatically.
+- **AMPLIFY**: On CUDA, defaults to `bfloat16` because its xFormers attention kernels do not support `float32`. Pass `dtype="float16"` explicitly if preferred. Short aliases `amplify_120m` and `amplify_350m` use NVIDIA TransformerEngine-optimized checkpoints (requires `transformer_engine.pytorch`). For CUDA 13: `pip install --no-build-isolation 'transformer-engine[pytorch,core-cu13]==2.16.0'`. For the upstream Chandar Lab checkpoints use `amplify_120m_chandar` / `amplify_350m_chandar`.
+- **ProteinGLM**: Short aliases `proteinglm_1b_mlm`, `proteinglm_3b_mlm`, `proteinglm_10b_mlm` resolve to Biomap checkpoints. Trailing EOS token is trimmed automatically.
+- **ESM-1b**: The HuggingFace checkpoint (`facebook/esm-1b`) was trained with post-norm but the HF model code uses pre-norm, which degrades accuracy. The generator loads via `torch.hub` by default to avoid this mismatch.
+- **ESM-C**: Multi-sequence batches require SDK support for batched logits. If the installed SDK rejects them, set `batch_size=1`.
 
 ## Deprecated
 
@@ -370,9 +446,43 @@ These wrappers remain compatible but emit `DeprecationWarning` and will be remov
 
 The old pooled-generation wrappers were experimental and have been removed. Use `generate(..., pooler=...)`, `generate_batches(..., pooler=...)`, or `run_embedding_generation(..., pooler=...)`.
 
+## Error Handling
+
+By default, errors on individual proteins are collected and the run continues. Check `result.errors` and `result.skipped` after the run:
+
+```python
+result = run_embedding_generation(generator, batcher, writer)
+
+if result.error_count > 0:
+    for err in result.errors:
+        print(f"ERROR {err['id']}: {err['error']}")
+
+if result.skipped_count > 0:
+    for skip in result.skipped:
+        print(f"SKIPPED {skip['id']}: {skip['reason']}")
+```
+
+To stop immediately on the first error instead:
+
+```python
+result = run_embedding_generation(generator, batcher, writer, fail_fast=True)
+```
+
+`FastaBatcher` also tracks sequences that were filtered out before inference (e.g. too long, invalid characters):
+
+```python
+batcher = FastaBatcher(
+    "proteins.fasta",
+    max_sequence_length=4_000,
+    skipped_path="skipped.tsv",  # optionally write skip log to file
+)
+# after run:
+print(f"{batcher.skipped_count} sequences were filtered before batching")
+```
+
 ## Exceptions
 
 - `EmbeddingGenerationError`: base embedding exception.
 - `EmbeddingInputError`: invalid input records, sequences, or file payloads.
-- `EmbeddingDependencyError`: missing optional runtime dependency.
-- `EmbeddingBackendError`: backend/model inference failure.
+- `EmbeddingDependencyError`: missing optional runtime dependency (e.g. `torch`, `transformers`).
+- `EmbeddingBackendError`: backend/model inference failure or unknown model class.
