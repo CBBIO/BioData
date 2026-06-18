@@ -1,6 +1,8 @@
 """Supervised probing helpers for evaluating embedding layers."""
 
 from .datasets import (
+    MmseqsRedundancyHit,
+    MmseqsRedundancyReport,
     ObjectiveName,
     ProteinDataset,
     ProteinExample,
@@ -8,6 +10,7 @@ from .datasets import (
     ResidueExample,
     SplitName,
     TaskLevel,
+    filter_redundant_to_test_mmseqs,
     load_residue_label_csv,
 )
 from .catalog import (
@@ -82,6 +85,8 @@ from .tasks import PredictionSpec, ProbeKind, ProbeSpec, Task
 
 __all__ = [
     "ObjectiveName",
+    "MmseqsRedundancyHit",
+    "MmseqsRedundancyReport",
     "DATASET_CATALOG",
     "DatasetCatalogEntry",
     "DatasetCatalogLevel",
@@ -129,6 +134,7 @@ __all__ = [
     "download_musitedeep_testdata",
     "download_peer_dataset",
     "download_residue_source",
+    "filter_redundant_to_test_mmseqs",
     "get_dataset_catalog_entry",
     "get_dbptm_benchmark",
     "get_dtu_service",

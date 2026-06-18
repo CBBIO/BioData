@@ -3,11 +3,16 @@ from __future__ import annotations
 import io
 import gzip
 import json
+from pathlib import Path
+import subprocess
 import tarfile
 
 import pytest
 
 from CBBIO import (
+    EmbeddingDependencyError,
+    MmseqsRedundancyHit,
+    MmseqsRedundancyReport,
     PredictionSpec,
     ProbeSpec,
     ProteinDataset,
@@ -21,6 +26,7 @@ from CBBIO import (
     download_disprot_current_tsv,
     download_musitedeep_testdata,
     download_residue_source,
+    filter_redundant_to_test_mmseqs,
     get_dbptm_benchmark,
     get_dtu_service,
     list_dbptm_benchmarks,
@@ -281,6 +287,133 @@ def test_residue_level_task_trains_probe_over_valid_positions() -> None:
     assert result.test_count == 1
     assert result.metrics["accuracy"] == 1.0
     assert result.predictions == {"rt:1": 0, "rt:2": 1, "rt:3": 1, "rt:4": 0}
+
+
+def test_filter_redundant_to_test_mmseqs_removes_train_and_val_hits(monkeypatch: pytest.MonkeyPatch) -> None:
+    dataset = ProteinDataset(
+        [
+            ProteinExample("train_high", "ACDEFG", {"target": 1}, "train"),
+            ProteinExample("val_boundary", "ACDEYY", {"target": 0}, "val"),
+            ProteinExample("train_keep", "YYYYYY", {"target": 0}, "train"),
+            ProteinExample("test_ref", "ACDEFG", {"target": 1}, "test"),
+        ]
+    )
+    commands: list[list[str]] = []
+
+    def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        Path(command[4]).write_text(
+            "\n".join(
+                [
+                    "train_high\ttest_ref\t100.0\t1.0\t1.0\t6\t6\t6\t1e-20\t99",
+                    "val_boundary\ttest_ref\t30.0\t0.8\t0.8\t5\t6\t6\t1e-5\t30",
+                    "train_keep\ttest_ref\t29.9\t1.0\t1.0\t6\t6\t6\t1e-4\t20",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr("CBBIO.probing.datasets.shutil.which", lambda name: "/usr/bin/mmseqs" if name == "mmseqs" else None)
+    monkeypatch.setattr("CBBIO.probing.datasets.subprocess.run", fake_run)
+
+    filtered, report = filter_redundant_to_test_mmseqs(dataset, cutoff=30.0, min_coverage=0.8, threads=2)
+
+    assert isinstance(report, MmseqsRedundancyReport)
+    assert [example.id for example in filtered.examples] == ["train_keep", "test_ref"]
+    assert report.removed_count == 2
+    assert report.retained_count == 2
+    assert report.reference_count == 1
+    assert [(hit.removed_id, hit.reference_id, hit.percent_identity) for hit in report.removed] == [
+        ("train_high", "test_ref", 100.0),
+        ("val_boundary", "test_ref", 30.0),
+    ]
+    assert isinstance(report.removed[0], MmseqsRedundancyHit)
+    command = commands[0]
+    assert command[:2] == ["/usr/bin/mmseqs", "easy-search"]
+    assert "--min-seq-id" in command
+    assert command[command.index("--min-seq-id") + 1] == "0.3"
+    assert "-c" in command
+    assert command[command.index("-c") + 1] == "0.8"
+    assert "--cov-mode" in command
+    assert command[command.index("--cov-mode") + 1] == "0"
+    assert "--threads" in command
+    assert command[command.index("--threads") + 1] == "2"
+
+
+def test_filter_redundant_to_test_mmseqs_keeps_hits_below_coverage(monkeypatch: pytest.MonkeyPatch) -> None:
+    dataset = ProteinDataset(
+        [
+            ProteinExample("train_short_hit", "ACDEFG", {"target": 1}, "train"),
+            ProteinExample("test_ref", "ACDEFG", {"target": 1}, "test"),
+        ]
+    )
+
+    def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        Path(command[4]).write_text(
+            "train_short_hit\ttest_ref\t100.0\t0.79\t1.0\t4\t6\t6\t1e-10\t42\n",
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr("CBBIO.probing.datasets.shutil.which", lambda name: "/usr/bin/mmseqs" if name == "mmseqs" else None)
+    monkeypatch.setattr("CBBIO.probing.datasets.subprocess.run", fake_run)
+
+    filtered, report = filter_redundant_to_test_mmseqs(dataset, cutoff=30.0, min_coverage=0.8)
+
+    assert [example.id for example in filtered.examples] == ["train_short_hit", "test_ref"]
+    assert report.removed_count == 0
+    assert report.removed == ()
+
+
+def test_filter_redundant_to_test_mmseqs_preserves_residue_examples(monkeypatch: pytest.MonkeyPatch) -> None:
+    dataset = ResidueDataset(
+        [
+            ResidueExample("remove_me", "STYK", {"site": [1, 0, 0, 1]}, "train", mask=[True, True, True, True]),
+            ResidueExample("keep_me", "AAAA", {"site": [0, 0, 0, 0]}, "train", mask=[True, False, True, True]),
+            ResidueExample("test_ref", "STYK", {"site": [1, 0, 0, 1]}, "test", mask=[True, True, True, True]),
+        ]
+    )
+
+    def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        Path(command[4]).write_text(
+            "remove_me\ttest_ref\t100.0\t1.0\t1.0\t4\t4\t4\t1e-12\t80\n",
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr("CBBIO.probing.datasets.shutil.which", lambda name: "/usr/bin/mmseqs" if name == "mmseqs" else None)
+    monkeypatch.setattr("CBBIO.probing.datasets.subprocess.run", fake_run)
+
+    filtered, report = filter_redundant_to_test_mmseqs(dataset, cutoff=30.0, min_coverage=0.8)
+
+    assert isinstance(filtered, ResidueDataset)
+    assert [example.id for example in filtered.examples] == ["keep_me", "test_ref"]
+    assert filtered.target_values("site") == {"keep_me": [0, 0, 0, 0], "test_ref": [1, 0, 0, 1]}
+    assert filtered.examples[0].mask == [True, False, True, True]
+    assert report.removed_count == 1
+
+
+def test_filter_redundant_to_test_mmseqs_requires_mmseqs(monkeypatch: pytest.MonkeyPatch) -> None:
+    dataset = ProteinDataset(
+        [
+            ProteinExample("train", "ACDE", {"target": 0}, "train"),
+            ProteinExample("test", "ACDE", {"target": 1}, "test"),
+        ]
+    )
+    monkeypatch.setattr("CBBIO.probing.datasets.shutil.which", lambda _name: None)
+
+    with pytest.raises(EmbeddingDependencyError, match="MMseqs2"):
+        filter_redundant_to_test_mmseqs(dataset)
+
+
+def test_filter_redundant_to_test_mmseqs_requires_reference_split(monkeypatch: pytest.MonkeyPatch) -> None:
+    dataset = ProteinDataset([ProteinExample("train", "ACDE", {"target": 0}, "train")])
+    monkeypatch.setattr("CBBIO.probing.datasets.shutil.which", lambda name: "/usr/bin/mmseqs" if name == "mmseqs" else None)
+
+    with pytest.raises(EmbeddingInputError, match="no examples in reference split"):
+        filter_redundant_to_test_mmseqs(dataset)
 
 
 def test_load_flip_csv_translates_peer_splits(tmp_path) -> None:
