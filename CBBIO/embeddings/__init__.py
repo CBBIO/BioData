@@ -46,6 +46,7 @@ class EmbeddingBackendError(EmbeddingGenerationError):
 
 @dataclass(frozen=True)
 class GenerationInput:
+    """Input sequence record for embedding generation."""
     id: str
     sequence: str
     description: str | None = None
@@ -54,6 +55,7 @@ class GenerationInput:
 
 @dataclass(frozen=True)
 class EmbeddingRecord:
+    """Generated embedding payload with layer and model metadata."""
     id: str
     embedding: EmbeddingPayload
     layer_index: int
@@ -64,6 +66,7 @@ class EmbeddingRecord:
 
 @dataclass(frozen=True)
 class ModelMetadata:
+    """Metadata describing the embedding model and runtime."""
     provider: str
     model_name: str
     model_reference: str
@@ -77,6 +80,7 @@ class ModelMetadata:
 
 @dataclass(frozen=True)
 class RunMetadata:
+    """Metadata describing one embedding generation run."""
     run_id: str
     created_at_utc: str
     sequence_count: int
@@ -96,6 +100,7 @@ def _error_dict_list() -> List[Dict[str, Any]]:
 
 @dataclass(frozen=True)
 class GenerationResult:
+    """Embedding generation records, errors, skips, and metadata."""
     records: List[EmbeddingRecord] = field(default_factory=_embedding_record_list)
     errors: List[Dict[str, Any]] = field(default_factory=_error_dict_list)
     skipped: List[Dict[str, Any]] = field(default_factory=_error_dict_list)
@@ -105,12 +110,14 @@ class GenerationResult:
 
 @dataclass(frozen=True)
 class PickleShardWriteResult:
+    """Result metadata for writing pickle embedding shards."""
     paths: List[Path]
     record_count: int
 
 
 @dataclass(frozen=True)
 class NpyShardWriteResult:
+    """Result metadata for writing NumPy embedding shards."""
     paths: List[Path]
     id_paths: List[Path]
     record_count: int
@@ -118,12 +125,14 @@ class NpyShardWriteResult:
 
 @dataclass(frozen=True)
 class H5WriteResult:
+    """Result metadata for writing one HDF5 embedding file."""
     path: Path
     record_count: int
 
 
 @dataclass(frozen=True)
 class FastaEmbeddingPickleShardResult:
+    """Result metadata for FASTA-to-pickle embedding generation."""
     paths: List[Path]
     record_count: int
     error_count: int = 0
@@ -134,6 +143,7 @@ class FastaEmbeddingPickleShardResult:
 
 @dataclass(frozen=True)
 class FastaEmbeddingNpyShardResult:
+    """Result metadata for FASTA-to-NumPy embedding generation."""
     paths: List[Path]
     id_paths: List[Path]
     record_count: int
@@ -145,6 +155,7 @@ class FastaEmbeddingNpyShardResult:
 
 @dataclass(frozen=True)
 class FastaEmbeddingH5Result:
+    """Result metadata for FASTA-to-HDF5 embedding generation."""
     path: Path
     record_count: int
     error_count: int = 0
@@ -154,14 +165,20 @@ class FastaEmbeddingH5Result:
 
 
 class PreprocessorAdapter(ABC):
+    """Sequence preprocessing interface for embedding generators."""
     @abstractmethod
-    def preprocess(self, raw_sequence: str) -> str: ...
+    def preprocess(self, raw_sequence: str) -> str:
+        """Normalize one raw sequence before tokenization."""
 
+        ...
 
 class TokenizerAdapter(ABC):
+    """Tokenization interface for embedding generators."""
     @abstractmethod
-    def tokenize(self, sequence: str) -> Any: ...
+    def tokenize(self, sequence: str) -> Any:
+        """Tokenize one preprocessed sequence."""
 
+        ...
     def tokenize_many(self, sequences: Sequence[str]) -> Any:
         """Tokenize a batch of preprocessed sequences.
 
@@ -172,18 +189,24 @@ class TokenizerAdapter(ABC):
 
 
 class ModelAdapter(ABC):
+    """Model inference interface for embedding generators."""
     @abstractmethod
-    def infer(self, tokens: Any, *, layer_index: int | Sequence[int] | None = 0) -> Any: ...
+    def infer(self, tokens: Any, *, layer_index: int | Sequence[int] | None = 0) -> Any:
+        """Run model inference for tokenized inputs."""
 
+        ...
     def available_layers(self) -> List[int] | None:
         """Return available layer indices when discoverable by this adapter."""
         return None
 
 
 class PostprocessorAdapter(ABC):
+    """Model-output conversion interface for embedding generators."""
     @abstractmethod
-    def postprocess(self, model_output: Any) -> EmbeddingPayload: ...
+    def postprocess(self, model_output: Any) -> EmbeddingPayload:
+        """Convert raw model output into an embedding payload."""
 
+        ...
 
 class EmbeddingGenerator:
     """Adapter-orchestrated embedding generator without persistence side effects."""
@@ -239,6 +262,7 @@ class EmbeddingGenerator:
         pooler: Any | None = None,
         fail_fast: bool = False,
     ) -> GenerationResult:
+        """Generate embeddings for input sequence records."""
         self._validate_pooler_selection(pooler)
         if not isinstance(layer_index, int):
             raise EmbeddingInputError("Base EmbeddingGenerator.generate requires an integer layer_index.")
@@ -913,6 +937,7 @@ def _normalize_generation_exception(exc: Exception) -> EmbeddingGenerationError:
 
 
 def utc_now_iso() -> str:
+    """Return the current UTC time as an ISO-8601 string."""
     return datetime.now(timezone.utc).isoformat()
 
 

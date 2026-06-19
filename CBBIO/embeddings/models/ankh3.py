@@ -45,6 +45,7 @@ class Ankh3Preprocessor(BasePreprocessor):
 
     @property
     def prefix(self) -> str:
+        """Return the ANKH3 prefix token for a sequence."""
         return str(self._prefix)
 
 
@@ -56,9 +57,11 @@ class Ankh3TokenizerAdapter(TokenizerAdapter):
         self.device = str(device)
 
     def tokenize(self, sequence: str) -> Any:
+        """Tokenize one sequence for ANKH3."""
         return self.tokenize_many([sequence])
 
     def tokenize_many(self, sequences: Sequence[str]) -> Any:
+        """Tokenize a batch of sequences for ANKH3."""
         if not sequences:
             raise EmbeddingInputError("ANKH3 tokenization requires at least one sequence.")
         encoded = self.tokenizer(
@@ -88,6 +91,7 @@ class Ankh3ModelAdapter(ModelAdapter):
             eval_fn()
 
     def infer(self, tokens: Any, *, layer_index: int | Sequence[int] | None = None) -> Any:
+        """Run ANKH3 inference and return hidden states."""
         if not isinstance(tokens, dict):
             raise EmbeddingInputError("Ankh3ModelAdapter expects tokenized input as a dict.")
         if "input_ids" not in tokens or "attention_mask" not in tokens:
@@ -123,6 +127,7 @@ class Ankh3ModelAdapter(ModelAdapter):
         return {"layers": selected_layers, "sample_spans": sample_spans}
 
     def available_layers(self) -> List[int] | None:
+        """Return layer indices exposed by the ANKH3 model."""
         total_layers = infer_total_layers_from_model(self.model)
         if total_layers is None:
             return None
@@ -225,6 +230,7 @@ class Ankh3EmbeddingGenerator(EmbeddingGenerator):
         pooler: PoolerInput = None,
         fail_fast: bool = False,
     ) -> GenerationResult:
+        """Generate embeddings with the ANKH3 adapter."""
         return self._generate_from_batched_layer_output_map(
             records,
             layer_index=layer_index,

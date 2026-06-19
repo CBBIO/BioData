@@ -19,6 +19,7 @@ SearchBackend: TypeAlias = Literal["auto", "gpu", "pgvector", "faiss_cpu", "fais
 
 @dataclass(frozen=True)
 class EmbeddingType:
+    """Database embedding type metadata."""
     id: int
     name: str
     model_name: str | None
@@ -28,6 +29,7 @@ class EmbeddingType:
 
 @dataclass(frozen=True)
 class Neighbor:
+    """Nearest-neighbor match with layer and distance."""
     protein_id: str
     layer_index: int
     distance: float
@@ -35,6 +37,7 @@ class Neighbor:
 
 @dataclass(frozen=True)
 class GOAnnotation:
+    """Gene Ontology annotation metadata."""
     go_id: str
     category: str
     description: str

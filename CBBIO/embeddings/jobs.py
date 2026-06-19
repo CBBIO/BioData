@@ -2,4 +2,14 @@
 
 from __future__ import annotations
 
-from .utils.jobs import *  # noqa: F403
+from .utils.jobs import (
+    EmbeddingJobResult,
+    ProgressCallback,
+    run_embedding_generation,
+)
+
+__all__ = [
+    "EmbeddingJobResult",
+    "ProgressCallback",
+    "run_embedding_generation",
+]

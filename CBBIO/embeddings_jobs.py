@@ -1,5 +1,15 @@
-"""Compatibility wrapper for :mod:`CBBIO.embeddings.jobs`."""
+"""Compatibility wrapper for :mod:`CBBIO.embeddings.utils.jobs`."""
 
 from __future__ import annotations
 
-from .embeddings.jobs import *  # noqa: F403
+from .embeddings.utils.jobs import (
+    EmbeddingJobResult,
+    ProgressCallback,
+    run_embedding_generation,
+)
+
+__all__ = [
+    "EmbeddingJobResult",
+    "ProgressCallback",
+    "run_embedding_generation",
+]

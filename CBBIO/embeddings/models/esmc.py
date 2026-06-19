@@ -17,6 +17,7 @@ from .. import (
 )
 from ..utils.pooler import PoolerInput
 from ..utils.torch import BasePreprocessor, DefaultPostprocessor, framework_versions, normalize_requested_layers
+from ._esm_hf import HfEsmEmbeddingGenerator
 
 
 ESMC_HF_MODEL_NAMES: Dict[str, str] = {
@@ -86,9 +87,11 @@ class EsmcTokenizerAdapter(TokenizerAdapter):
         self.device = str(device)
 
     def tokenize(self, sequence: str) -> Any:
+        """Tokenize one sequence for ESM-C."""
         return self.tokenize_many([sequence])
 
     def tokenize_many(self, sequences: Sequence[str]) -> Any:
+        """Tokenize a batch of sequences for ESM-C."""
         if not sequences:
             raise EmbeddingInputError("ESM-C tokenization requires at least one sequence.")
         tokenize_fn = getattr(self.client, "_tokenize", None)
@@ -109,6 +112,7 @@ class EsmcModelAdapter(ModelAdapter):
         self.available_layer_count = available_layer_count
 
     def infer(self, tokens: Any, *, layer_index: int | Sequence[int] | None = None) -> Any:
+        """Run ESM-C inference and return hidden states."""
         if not isinstance(tokens, dict):
             raise EmbeddingInputError("EsmcModelAdapter expects tokenized input as a dict.")
         token_map = cast(Dict[str, Any], tokens)
@@ -138,6 +142,7 @@ class EsmcModelAdapter(ModelAdapter):
         }
 
     def available_layers(self) -> List[int] | None:
+        """Return layer indices exposed by the ESM-C model."""
         if self.available_layer_count is None:
             return None
         return list(range(int(self.available_layer_count)))
@@ -148,7 +153,7 @@ class EsmcModelAdapter(ModelAdapter):
         transformer = getattr(self.client, "transformer", None)
         blocks = getattr(transformer, "blocks", None)
         if isinstance(blocks, Sequence):
-            return len(blocks)
+            return len(cast(Sequence[object], blocks))
         raise EmbeddingBackendError("Could not infer ESM-C layer count from SDK model.")
 
 
@@ -156,7 +161,7 @@ class EsmcPostprocessor(DefaultPostprocessor):
     """Postprocessing for ESM-C outputs without pooling."""
 
 
-class EsmcEmbeddingGenerator(EmbeddingGenerator):
+class EsmcEmbeddingGenerator(HfEsmEmbeddingGenerator):
     """Concrete embedding generator for ESM-C family models."""
 
     GENERATOR_CLASS = "esmc"
@@ -177,10 +182,32 @@ class EsmcEmbeddingGenerator(EmbeddingGenerator):
         use_flash_attention: bool | None = None,
         from_pretrained_kwargs: Dict[str, Any] | None = None,
     ) -> None:
-        _ = dtype, tokenizer
         model_reference = _resolve_model_reference(model_name)
         sdk_model_name = _resolve_sdk_model_name(model_name)
         resolved_client = client if client is not None else model
+        is_hf_alias = str(model_name).strip().lower() in ESMC_HF_MODEL_NAMES
+
+        if resolved_client is None and is_hf_alias:
+            register_hf_esmc_architecture()
+            layer_count = ESMC_LAYER_SPECS.get(model_reference)
+            HfEsmEmbeddingGenerator.__init__(
+                self,
+                model_name=model_name,
+                model_reference=model_reference,
+                context="ESM-C preprocessing",
+                provider="huggingface",
+                device=device,
+                dtype=dtype,
+                tokenizer=tokenizer,
+                tokenizer_trust_remote_code=True,
+                from_pretrained_kwargs=from_pretrained_kwargs,
+                layer_count_hint=None if layer_count is None else max(0, int(layer_count) - 1),
+            )
+            if self.model_metadata.parameters is not None:
+                self.model_metadata.parameters["available_layer_count_hint"] = layer_count
+            return
+
+        _ = dtype, tokenizer
 
         if resolved_client is None:
             try:
@@ -204,7 +231,8 @@ class EsmcEmbeddingGenerator(EmbeddingGenerator):
             resolved_client = _maybe_to_device(resolved_client, device)
 
         layer_count = ESMC_LAYER_SPECS.get(model_reference) or ESMC_LAYER_SPECS.get(sdk_model_name)
-        super().__init__(
+        EmbeddingGenerator.__init__(
+            self,
             model_reference=model_reference,
             preprocessor=EsmcPreprocessor(),
             tokenizer=EsmcTokenizerAdapter(resolved_client, device=device),
@@ -237,6 +265,7 @@ class EsmcEmbeddingGenerator(EmbeddingGenerator):
         pooler: PoolerInput = None,
         fail_fast: bool = False,
     ) -> GenerationResult:
+        """Generate embeddings with the ESM-C adapter."""
         return self._generate_from_batched_layer_output_map(
             records,
             layer_index=layer_index,

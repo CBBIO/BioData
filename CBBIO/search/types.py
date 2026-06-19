@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Literal, Optional, Union
+from typing import Any, Dict, List, Literal
 
 from ..types import DistanceMetric
 
 
-ResolvedSearchBackend = Union[Literal["pgvector"], Literal["faiss_cpu"], Literal["faiss_gpu"], Literal["cuvs_gpu"], Literal["torch_gpu"]]
+ResolvedSearchBackend = Literal["pgvector"] | Literal["faiss_cpu"] | Literal["faiss_gpu"] | Literal["cuvs_gpu"] | Literal["torch_gpu"]
 
 DEFAULT_BACKEND_THRESHOLDS: Dict[str, Dict[str, int]] = {
     "cuda": {
@@ -34,21 +34,23 @@ DEFAULT_BACKEND_THRESHOLDS: Dict[str, Dict[str, int]] = {
 
 @dataclass
 class BackendAvailability:
+    """Detected availability of local search backends and devices."""
     faiss_gpu: bool
     torch_gpu: bool
-    preferred_device: Optional[str]
-    torch_device: Optional[str]
-    faiss_device: Optional[str]
+    preferred_device: str | None
+    torch_device: str | None
+    faiss_device: str | None
     hardware_class: str
     faiss_cpu: bool = False
     cuvs_gpu: bool = False
-    cuvs_device: Optional[str] = None
+    cuvs_device: str | None = None
 
 
 @dataclass
 class ResolvedBackend:
+    """Effective search backend choice for one workload."""
     backend: ResolvedSearchBackend
-    device: Optional[str]
+    device: str | None
     ann_requested: bool
     ann_used: bool
     degraded: bool
@@ -56,13 +58,14 @@ class ResolvedBackend:
     batch_size: int
     resident: bool
     hardware_class: str
-    chunk_size: Optional[int] = None
-    estimated_bytes: Optional[int] = None
-    free_bytes: Optional[int] = None
+    chunk_size: int | None = None
+    estimated_bytes: int | None = None
+    free_bytes: int | None = None
 
 
 @dataclass
 class GpuSearchState:
+    """Loaded accelerated search state for one embedding workload."""
     backend: ResolvedSearchBackend
     embedding_type_id: int
     layer_index: int
@@ -88,7 +91,4 @@ __all__ = [
     "BackendAvailability",
     "ResolvedBackend",
     "GpuSearchState",
-    "_BackendAvailability",
-    "_ResolvedBackend",
-    "_GpuSearchState",
 ]

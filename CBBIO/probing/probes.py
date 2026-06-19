@@ -19,6 +19,7 @@ DEFAULT_RESIDUE_BATCH_SIZE = 8192
 
 @dataclass(frozen=True)
 class ProbeEvaluation:
+    """Evaluation metrics, predictions, and optional scores from a probe."""
     metrics: Dict[str, float]
     predictions: Dict[str, float | int | str]
     scores: Dict[str, float] | None = None
@@ -269,7 +270,7 @@ def train_and_evaluate_residue_probe(
                 optimizer.step()
 
     model.eval()
-    test_logits = []
+    test_logits: List[Any] = []
     test_label_ids_used: List[str] = []
     with torch.inference_mode():
         if flat_data is not None:
@@ -352,48 +353,6 @@ def _validate_embeddings(ids: Sequence[str], embeddings: Mapping[str, Sequence[f
     return input_dim
 
 
-def _flatten_residue_examples(
-    ids: Sequence[str],
-    *,
-    embeddings: Mapping[str, Sequence[Sequence[float]]],
-    labels: Mapping[str, Sequence[object]],
-    masks: Mapping[str, Sequence[bool] | None],
-) -> Tuple[List[str], Dict[str, Sequence[float]], Dict[str, object]]:
-    flat_ids: List[str] = []
-    flat_embeddings: Dict[str, Sequence[float]] = {}
-    flat_labels: Dict[str, object] = {}
-    missing_embeddings = [item for item in ids if item not in embeddings]
-    if missing_embeddings:
-        sample = ", ".join(missing_embeddings[:5])
-        raise EmbeddingInputError(f"Missing residue embeddings for examples: {sample}.")
-    missing_labels = [item for item in ids if item not in labels]
-    if missing_labels:
-        sample = ", ".join(missing_labels[:5])
-        raise EmbeddingInputError(f"Missing residue labels for examples: {sample}.")
-    for item in ids:
-        matrix = embeddings[item]
-        target_values = labels[item]
-        mask = masks.get(item)
-        if len(matrix) != len(target_values):
-            raise EmbeddingInputError(
-                f"Residue embedding length {len(matrix)} does not match label length {len(target_values)} for {item!r}."
-            )
-        if mask is not None and len(mask) != len(target_values):
-            raise EmbeddingInputError(
-                f"Residue mask length {len(mask)} does not match label length {len(target_values)} for {item!r}."
-            )
-        for index, (vector, label) in enumerate(zip(matrix, target_values)):
-            if mask is not None and not bool(mask[index]):
-                continue
-            if not vector:
-                raise EmbeddingInputError(f"Residue embedding for {item!r} position {index + 1} is empty.")
-            flat_id = f"{item}:{index + 1}"
-            flat_ids.append(flat_id)
-            flat_embeddings[flat_id] = vector
-            flat_labels[flat_id] = label
-    return flat_ids, flat_embeddings, flat_labels
-
-
 def _validate_residue_examples(
     ids: Sequence[str],
     *,
@@ -447,30 +406,6 @@ def _flatten_residue_labels(
             flat_ids.append(flat_id)
             flat_labels[flat_id] = label
     return flat_ids, flat_labels
-
-
-def _residue_tensor_and_label_ids(
-    torch: Any,
-    ids: Sequence[str],
-    *,
-    embeddings: Mapping[str, Sequence[Sequence[float]]],
-    masks: Mapping[str, Sequence[bool] | None],
-) -> Tuple[Any, List[str]]:
-    tensors: List[Any] = []
-    label_ids: List[str] = []
-    for item in ids:
-        tensor = torch.as_tensor(embeddings[item], dtype=torch.float32)
-        if tensor.ndim != 2 or int(tensor.shape[0]) < 1 or int(tensor.shape[1]) < 1:
-            raise EmbeddingInputError(f"Residue embedding matrix for {item!r} must be non-empty and rank 2.")
-        keep_indices = _valid_residue_indices(int(tensor.shape[0]), masks.get(item))
-        if not keep_indices:
-            continue
-        index_tensor = torch.tensor(keep_indices, dtype=torch.long)
-        tensors.append(tensor.index_select(0, index_tensor))
-        label_ids.extend(f"{item}:{index + 1}" for index in keep_indices)
-    if not tensors:
-        return torch.empty((0, 0), dtype=torch.float32), []
-    return torch.cat(tensors, dim=0), label_ids
 
 
 def _valid_residue_count(
@@ -542,7 +477,7 @@ def _flatten_residue_embeddings(
     for item in ids:
         matrix = embeddings[item]
         to_array = getattr(matrix, "__array__", None)
-        arr = to_array() if callable(to_array) else _np.array(matrix, dtype=_np.float32)
+        arr = _np.asarray(cast(Any, to_array)(), dtype=_np.float32) if callable(to_array) else _np.array(matrix, dtype=_np.float32)
         if arr.dtype != _np.float32:
             arr = arr.astype(_np.float32)
         mask = masks.get(item)
@@ -596,7 +531,7 @@ def _iter_residue_batches(
 def _residue_matrix_tensor(torch: Any, item: str, matrix: Sequence[Sequence[float]]) -> Any:
     to_array = getattr(matrix, "__array__", None)
     if callable(to_array):
-        matrix = to_array()
+        matrix = cast(Sequence[Sequence[float]], to_array())
     tensor = torch.as_tensor(matrix, dtype=torch.float32)
     if tensor.ndim != 2 or int(tensor.shape[0]) < 1 or int(tensor.shape[1]) < 1:
         raise EmbeddingInputError(f"Residue embedding matrix for {item!r} must be non-empty and rank 2.")

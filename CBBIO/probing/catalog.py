@@ -60,6 +60,7 @@ def build_dataset_catalog() -> Dict[str, DatasetCatalogEntry]:
 
 
 def get_dataset_catalog_entry(dataset_id: str) -> DatasetCatalogEntry:
+    """Return one registered probing dataset catalog entry."""
     key = _normalize_catalog_id(dataset_id)
     entry = DATASET_CATALOG.get(key)
     if entry is None:
@@ -82,6 +83,7 @@ def list_dataset_catalog(
     has_loader: bool | None = None,
     tag: str | None = None,
 ) -> List[DatasetCatalogEntry]:
+    """Return registered probing dataset catalog entries."""
     values = list(DATASET_CATALOG.values())
     if collection is not None:
         normalized = collection.strip().lower()

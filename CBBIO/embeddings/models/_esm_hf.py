@@ -45,9 +45,11 @@ class HfEsmTokenizerAdapter(TokenizerAdapter):
         self.device = str(device)
 
     def tokenize(self, sequence: str) -> Any:
+        """Tokenize one sequence for a HuggingFace ESM model."""
         return self.tokenize_many([sequence])
 
     def tokenize_many(self, sequences: Sequence[str]) -> Any:
+        """Tokenize a batch of sequences for a HuggingFace ESM model."""
         if not sequences:
             raise EmbeddingInputError("ESM tokenization requires at least one sequence.")
         encoded = self.tokenizer(
@@ -73,6 +75,7 @@ class HfEsmModelAdapter(ModelAdapter):
         self.available_layer_count = available_layer_count
 
     def infer(self, tokens: Any, *, layer_index: int | Sequence[int] | None = None) -> Any:
+        """Run HuggingFace ESM inference and return hidden states."""
         if not isinstance(tokens, dict):
             raise EmbeddingInputError("HfEsmModelAdapter expects tokenized input as a dict.")
         token_map = cast(Dict[str, Any], tokens)
@@ -108,6 +111,7 @@ class HfEsmModelAdapter(ModelAdapter):
         }
 
     def available_layers(self) -> List[int] | None:
+        """Return layer indices exposed by the HuggingFace ESM model."""
         total = self._total_layers()
         return list(range(total + 1))
 
@@ -259,6 +263,7 @@ class HfEsmEmbeddingGenerator(EmbeddingGenerator):
         pooler: PoolerInput = None,
         fail_fast: bool = False,
     ) -> GenerationResult:
+        """Generate embeddings with a HuggingFace ESM adapter."""
         return self._generate_from_batched_layer_output_map(
             records,
             layer_index=layer_index,
@@ -274,6 +279,7 @@ class HfEsmEmbeddingGenerator(EmbeddingGenerator):
 
 
 def resolve_hf_esm_layer_indices(layer_index: int | Sequence[int] | None, *, total_layers: int) -> List[int]:
+    """Resolve requested HuggingFace ESM layers to concrete indices."""
     if total_layers < 0:
         raise EmbeddingBackendError("ESM reported invalid total layer count.")
     if layer_index is None:
@@ -300,6 +306,7 @@ def resolve_hf_esm_layer_indices(layer_index: int | Sequence[int] | None, *, tot
 
 
 def esm_sample_spans_from_attention_mask(attention_mask: Any) -> List[tuple[int, int]]:
+    """Return residue-token spans from an ESM attention mask."""
     try:
         rows = attention_mask.tolist()
     except Exception:
@@ -314,6 +321,7 @@ def esm_sample_spans_from_attention_mask(attention_mask: Any) -> List[tuple[int,
 
 
 def infer_hf_esm_transformer_layers(model: Any) -> int | None:
+    """Infer the number of transformer layers in a HuggingFace ESM model."""
     config = getattr(model, "config", None)
     if config is not None:
         num_hidden_layers = getattr(config, "num_hidden_layers", None)
@@ -334,6 +342,7 @@ def infer_hf_esm_transformer_layers(model: Any) -> int | None:
 
 
 def resolve_model_name(value: str, aliases: Dict[str, str], *, family: str) -> str:
+    """Resolve a model name or alias against known family models."""
     resolved = str(value).strip()
     if not resolved:
         raise EmbeddingInputError(f"{family} model_name must be non-empty.")

@@ -10,14 +10,14 @@ import os
 from collections.abc import Mapping as MappingABC
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, Dict, Generator, List, Mapping, Optional, Sequence, Set, Tuple, Union, cast
+from typing import Any, Callable, Dict, Generator, List, Mapping, Sequence, Set, Tuple, cast
 
 from .search.types import DEFAULT_BACKEND_THRESHOLDS as _DEFAULT_BACKEND_THRESHOLDS
 from .search.types import BackendAvailability, GpuSearchState, ResolvedBackend, ResolvedSearchBackend
 from .types import DistanceMetric, EmbeddingModel, EmbeddingType, GOAnnotation, Neighbor, SearchBackend
 
 
-Params = Union[Sequence[Any], Mapping[str, Any], None]
+Params = Sequence[Any] | Mapping[str, Any] | None
 ConfigDict = Dict[str, Any]
 
 # Backward-compatible aliases for older internal/test references.
@@ -163,7 +163,7 @@ def _apply_env_overrides(config: Mapping[str, Any]) -> ConfigDict:
     }
 
 
-def load_config(config_path: Optional[Union[str, Path]] = None, *, strict: bool = False) -> ConfigDict:
+def load_config(config_path: str | Path | None = None, *, strict: bool = False) -> ConfigDict:
     """Load config YAML, merged on top of built-in defaults.
 
     When ``strict`` is ``False`` and ``pyyaml`` is unavailable, defaults are returned.
@@ -249,11 +249,11 @@ class BioDataClient:
 
     def __init__(
         self,
-        dsn: Optional[str] = None,
+        dsn: str | None = None,
         *,
-        autocommit: Optional[bool] = None,
-        register_halfvec: Optional[bool] = None,
-        config_path: Optional[Union[str, Path]] = None,
+        autocommit: bool | None = None,
+        register_halfvec: bool | None = None,
+        config_path: str | Path | None = None,
     ) -> None:
         config = load_config(config_path)
         defaults = _config_defaults(config)
@@ -269,7 +269,7 @@ class BioDataClient:
         self._ann_index_presence_cache: Dict[Tuple[int, int, str], bool] = {}
         self._ann_index_warned: Set[Tuple[int, int, str]] = set()
         self._search_backend_warned: Set[Tuple[str, str, str, str, bool]] = set()
-        self._gpu_search_state: Optional[GpuSearchState] = None
+        self._gpu_search_state: GpuSearchState | None = None
         self._last_search_diagnostics: Dict[str, Any] = {}
         self._search_workload_cache: Dict[Tuple[int, int], Dict[str, int]] = {}
         from .search.service import SearchService
@@ -285,10 +285,12 @@ class BioDataClient:
 
     @property
     def is_connected(self) -> bool:
+        """Return whether the client currently has an open connection."""
         return self._conn is not None
 
     @property
     def last_search_diagnostics(self) -> Dict[str, Any]:
+        """Return diagnostics recorded by the most recent neighbor search."""
         return dict(self._last_search_diagnostics)
 
     def connect(self) -> None:
@@ -348,7 +350,7 @@ class BioDataClient:
             rows = cur.fetchall()
             return [_row_to_dict(row, cur) for row in rows]
 
-    def query_one(self, sql: str, params: Params = None) -> Optional[Dict[str, Any]]:
+    def query_one(self, sql: str, params: Params = None) -> Dict[str, Any] | None:
         """Execute a query and return one row as a dictionary."""
         conn = self._require_connection()
         with _cursor(conn) as cur:
@@ -422,7 +424,7 @@ class BioDataClient:
             for row in rows
         ]
 
-    def get_protein(self, protein_id: str) -> Optional[Dict[str, Any]]:
+    def get_protein(self, protein_id: str) -> Dict[str, Any] | None:
         """Fetch one protein row by ``protein.id``."""
         return self.query_one(
             """
@@ -451,7 +453,7 @@ class BioDataClient:
             (protein_id,),
         )
 
-    def get_protein_by_accession(self, accession_code: str) -> Optional[Dict[str, Any]]:
+    def get_protein_by_accession(self, accession_code: str) -> Dict[str, Any] | None:
         """Fetch a protein via accession code."""
         return self.query_one(
             """
@@ -502,7 +504,7 @@ class BioDataClient:
             (protein_id,),
         )
 
-    def get_protein_sequence(self, protein_id: str) -> Optional[str]:
+    def get_protein_sequence(self, protein_id: str) -> str | None:
         """Fetch raw amino-acid sequence for one protein ID."""
         row = self.query_one(
             """
@@ -521,7 +523,7 @@ class BioDataClient:
             return None
         return str(value)
 
-    def get_protein_species(self, protein_id: str) -> Optional[str]:
+    def get_protein_species(self, protein_id: str) -> str | None:
         """Fetch organism/species value for one protein ID."""
         row = self.query_one(
             """
@@ -539,7 +541,7 @@ class BioDataClient:
             return None
         return str(value)
 
-    def get_protein_taxonomy_id(self, protein_id: str) -> Optional[str]:
+    def get_protein_taxonomy_id(self, protein_id: str) -> str | None:
         """Fetch taxonomy ID for one protein ID."""
         row = self.query_one(
             """
@@ -560,7 +562,7 @@ class BioDataClient:
     def get_protein_species_taxonomy(
         self,
         protein_ids: Sequence[str],
-    ) -> Dict[str, Dict[str, Optional[str]]]:
+    ) -> Dict[str, Dict[str, str | None]]:
         """Fetch organism/species and taxonomy ID for many proteins."""
         ids = [str(value) for value in protein_ids]
         if not ids:
@@ -670,7 +672,7 @@ class BioDataClient:
         protein_id: str,
         *,
         include_3di: bool = False,
-    ) -> Optional[Dict[str, Any]]:
+    ) -> Dict[str, Any] | None:
         """Fetch protein + related accession/GO/structure context in one call."""
         protein = self.get_protein(protein_id)
         if protein is None:
@@ -711,7 +713,7 @@ class BioDataClient:
             context["structure_3di_by_state"] = structure_3di_by_state
         return context
 
-    def get_embedding_type_by_name(self, name: str) -> Optional[EmbeddingType]:
+    def get_embedding_type_by_name(self, name: str) -> EmbeddingType | None:
         """Get embedding type metadata by exact ``sequence_embedding_type.name``."""
         row = self.query_one(
             """
@@ -738,7 +740,7 @@ class BioDataClient:
         protein_id: str,
         model: EmbeddingModel,
         layer_index: int = 0,
-        metric: Optional[DistanceMetric] = None,
+        metric: DistanceMetric | None = None,
     ) -> float:
         """Compute distance between a query embedding and one protein embedding."""
         embedding_type_id = self._resolve_embedding_type_id(model)
@@ -768,7 +770,7 @@ class BioDataClient:
         protein_b_id: str,
         model: EmbeddingModel,
         layer_index: int = 0,
-        metric: Optional[DistanceMetric] = None,
+        metric: DistanceMetric | None = None,
     ) -> float:
         """Compute distance between two proteins for the same model/layer."""
         embedding_type_id = self._resolve_embedding_type_id(model)
@@ -917,15 +919,15 @@ class BioDataClient:
         query_embedding: Any,
         embedding_type_id: int,
         layer_index: int = 0,
-        k: Optional[int] = None,
+        k: int | None = None,
         *,
-        metric: Optional[DistanceMetric] = None,
-        exclude_protein_ids: Optional[Sequence[str]] = None,
+        metric: DistanceMetric | None = None,
+        exclude_protein_ids: Sequence[str] | None = None,
         use_ann: bool = False,
         ann_ef_search: int = 200,
-        ann_candidate_pool: Optional[int] = None,
-        backend: Optional[SearchBackend] = None,
-        device: Optional[str] = None,
+        ann_candidate_pool: int | None = None,
+        backend: SearchBackend | None = None,
+        device: str | None = None,
     ) -> List[Neighbor]:
         """Find nearest proteins using the configured search backend."""
         return self._search.find_nearest_neighbors(
@@ -947,12 +949,12 @@ class BioDataClient:
         protein_ids: Sequence[str],
         embedding_type_id: int,
         layer_index: int = 0,
-        k: Optional[int] = None,
+        k: int | None = None,
         *,
-        metric: Optional[DistanceMetric] = None,
+        metric: DistanceMetric | None = None,
         include_query: bool = False,
-        backend: Optional[SearchBackend] = None,
-        device: Optional[str] = None,
+        backend: SearchBackend | None = None,
+        device: str | None = None,
     ) -> Dict[str, List[Neighbor]]:
         """Find nearest neighbors for many proteins using the configured backend."""
         return self._search.find_nearest_neighbors_for_proteins(
@@ -977,7 +979,7 @@ class BioDataClient:
         exclude_protein_ids: Sequence[str],
         use_ann: bool,
         ann_ef_search: int,
-        ann_candidate_pool: Optional[int],
+        ann_candidate_pool: int | None,
     ) -> List[Neighbor]:
         return self._search.find_nearest_neighbors_pgvector(
             query_embedding,
@@ -1019,7 +1021,7 @@ class BioDataClient:
         k: int,
         metric: DistanceMetric,
         exclude_protein_ids: Sequence[str],
-        device: Optional[str],
+        device: str | None,
         use_ann: bool,
     ) -> List[Neighbor]:
         return self._search.find_nearest_neighbors_faiss(
@@ -1063,7 +1065,7 @@ class BioDataClient:
         k: int,
         metric: DistanceMetric,
         exclude_protein_ids: Sequence[str],
-        device: Optional[str],
+        device: str | None,
         use_ann: bool,
     ) -> List[Neighbor]:
         return self._search.find_nearest_neighbors_cuvs(
@@ -1086,7 +1088,7 @@ class BioDataClient:
         k: int,
         metric: DistanceMetric,
         exclude_protein_ids: Sequence[str],
-        device: Optional[str],
+        device: str | None,
     ) -> List[Neighbor]:
         return self._search.find_nearest_neighbors_torch(
             query_embedding,
@@ -1108,7 +1110,7 @@ class BioDataClient:
         k: int,
         metric: DistanceMetric,
         include_query: bool,
-        device: Optional[str],
+        device: str | None,
     ) -> Dict[str, List[Neighbor]]:
         return self._search.find_nearest_neighbors_for_queries_faiss(
             query_ids,
@@ -1154,7 +1156,7 @@ class BioDataClient:
         k: int,
         metric: DistanceMetric,
         include_query: bool,
-        device: Optional[str],
+        device: str | None,
         use_ann: bool = False,
     ) -> Dict[str, List[Neighbor]]:
         return self._search.find_nearest_neighbors_for_queries_cuvs(
@@ -1179,7 +1181,7 @@ class BioDataClient:
         k: int,
         metric: DistanceMetric,
         include_query: bool,
-        device: Optional[str],
+        device: str | None,
     ) -> Dict[str, List[Neighbor]]:
         return self._search.find_nearest_neighbors_for_queries_torch(
             query_ids,
@@ -1271,7 +1273,7 @@ class BioDataClient:
         metric: DistanceMetric,
         batch_size: int,
         ann_requested: bool,
-        device: Optional[str],
+        device: str | None,
     ) -> ResolvedBackend:
         return self._search.resolve_search_backend(
             requested_backend=requested_backend,
@@ -1283,7 +1285,7 @@ class BioDataClient:
             device=device,
         )
 
-    def _detect_backend_availability(self, *, device: Optional[str]) -> BackendAvailability:
+    def _detect_backend_availability(self, *, device: str | None) -> BackendAvailability:
         return self._search.detect_backend_availability(device=device)
 
     def _get_or_load_gpu_search_state(
@@ -1293,7 +1295,7 @@ class BioDataClient:
         embedding_type_id: int,
         layer_index: int,
         metric: DistanceMetric,
-        device: Optional[str],
+        device: str | None,
         ann_requested: bool,
     ) -> GpuSearchState:
         return self._search.get_or_load_gpu_search_state(
@@ -1334,7 +1336,7 @@ class BioDataClient:
         embedding_type_id: int,
         layer_index: int,
         metric: DistanceMetric,
-        device: Optional[str],
+        device: str | None,
         ann_enabled: bool,
     ) -> bool:
         return self._search.gpu_state_matches(
@@ -1434,7 +1436,7 @@ class BioDataClient:
 
     def fetch_protein_go_ids(
         self,
-        protein_ids: Optional[Sequence[str]] = None,
+        protein_ids: Sequence[str] | None = None,
     ) -> Dict[str, Set[str]]:
         """Fetch GO IDs grouped by protein ID.
 
@@ -1469,13 +1471,13 @@ class BioDataClient:
         query_uniprot_id: str,
         embedding_type_id: int,
         layer_index: int = 0,
-        k: Optional[int] = None,
+        k: int | None = None,
         *,
-        metric: Optional[DistanceMetric] = None,
+        metric: DistanceMetric | None = None,
         include_query: bool = False,
         use_ann: bool = False,
-        backend: Optional[SearchBackend] = None,
-        device: Optional[str] = None,
+        backend: SearchBackend | None = None,
+        device: str | None = None,
     ) -> Tuple[List[Neighbor], Dict[str, List[GOAnnotation]]]:
         """End-to-end helper: query embedding -> neighbors -> GO annotations."""
         query_embedding = self.get_protein_embedding(
@@ -1535,11 +1537,11 @@ def build_dsn(
 
 
 def connect(
-    dsn: Optional[str] = None,
+    dsn: str | None = None,
     *,
-    autocommit: Optional[bool] = None,
-    register_halfvec: Optional[bool] = None,
-    config_path: Optional[Union[str, Path]] = None,
+    autocommit: bool | None = None,
+    register_halfvec: bool | None = None,
+    config_path: str | Path | None = None,
 ) -> BioDataClient:
     """Create and connect a ``BioDataClient``."""
     client = BioDataClient(
@@ -1552,7 +1554,7 @@ def connect(
     return client
 
 
-def _as_optional_str(value: Any) -> Optional[str]:
+def _as_optional_str(value: Any) -> str | None:
     if value is None:
         return None
     return str(value)

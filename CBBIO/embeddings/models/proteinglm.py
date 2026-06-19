@@ -62,6 +62,7 @@ class ProteinGlmModelAdapter(HfEsmModelAdapter):
     """Model adapter for ProteinGLM MLM checkpoints."""
 
     def infer(self, tokens: Any, *, layer_index: int | Sequence[int] | None = None) -> Any:
+        """Run ProteinGLM inference and return hidden states."""
         if not isinstance(tokens, dict):
             raise EmbeddingInputError("ProteinGlmModelAdapter expects tokenized input as a dict.")
         token_map = cast(Dict[str, Any], tokens)
@@ -184,10 +185,12 @@ class ProteinGlmEmbeddingGenerator(HfEsmEmbeddingGenerator):
         pooler: PoolerInput = None,
         fail_fast: bool = False,
     ) -> GenerationResult:
+        """Generate embeddings with the ProteinGLM adapter."""
         return super().generate(records, layer_index=layer_index, pooler=pooler, fail_fast=fail_fast)
 
 
 def proteinglm_sample_spans_from_attention_mask(attention_mask: Any) -> List[tuple[int, int]]:
+    """Return residue-token spans from a ProteinGLM attention mask."""
     try:
         rows = attention_mask.tolist()
     except Exception:

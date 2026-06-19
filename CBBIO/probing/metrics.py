@@ -7,6 +7,7 @@ from typing import Dict, List, Sequence
 
 
 def regression_metrics(y_true: Sequence[float], y_pred: Sequence[float]) -> Dict[str, float]:
+    """Compute regression metrics for true and predicted values."""
     _require_same_non_empty_length(y_true, y_pred)
     count = float(len(y_true))
     errors = [float(pred) - float(true) for true, pred in zip(y_true, y_pred)]
@@ -29,6 +30,7 @@ def spearmanr(y_true: Sequence[float], y_pred: Sequence[float]) -> float:
 
 
 def binary_metrics(y_true: Sequence[int], y_pred: Sequence[int], y_score: Sequence[float]) -> Dict[str, float]:
+    """Compute binary classification metrics for labels, predictions, and scores."""
     _require_same_non_empty_length(y_true, y_pred)
     _require_same_non_empty_length(y_true, y_score)
     tp = sum(1 for true, pred in zip(y_true, y_pred) if int(true) == 1 and int(pred) == 1)
@@ -65,6 +67,7 @@ def binary_metrics(y_true: Sequence[int], y_pred: Sequence[int], y_score: Sequen
 
 
 def multiclass_metrics(y_true: Sequence[int], y_pred: Sequence[int], *, class_count: int) -> Dict[str, float]:
+    """Compute multiclass classification metrics for labels and predictions."""
     _require_same_non_empty_length(y_true, y_pred)
     # Build confusion matrix in O(N) instead of the previous O(class_count × N) triple scan.
     conf = [[0] * class_count for _ in range(class_count)]

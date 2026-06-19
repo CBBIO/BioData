@@ -17,9 +17,12 @@ PoolerName: TypeAlias = Literal["none", "mean", "cls", "bos"]
 
 
 class EmbeddingPooler(Protocol):
+    """Protocol for transforming residue embeddings into output payloads."""
     @property
-    def name(self) -> str: ...
+    def name(self) -> str:
+        """Return the canonical pooler name."""
 
+        ...
     def __call__(self, residue_tensor: object) -> object: ...
 
 
@@ -28,6 +31,7 @@ PoolerInput: TypeAlias = EmbeddingPooler | PoolerName | str | None
 
 @dataclass(frozen=True)
 class IdentityPooler:
+    """Pooler that preserves residue-level embeddings."""
     name: str = "none"
 
     def __call__(self, residue_tensor: object) -> object:
@@ -36,6 +40,7 @@ class IdentityPooler:
 
 @dataclass(frozen=True)
 class MeanPooler:
+    """Pooler that averages residue-level embeddings."""
     name: str = "mean"
 
     def __call__(self, residue_tensor: object) -> object:
@@ -47,6 +52,7 @@ class MeanPooler:
 
 @dataclass(frozen=True)
 class ClsPooler:
+    """Pooler placeholder for CLS/BOS-style outputs."""
     name: str = "cls"
 
     def __call__(self, residue_tensor: object) -> object:
@@ -54,6 +60,7 @@ class ClsPooler:
 
 
 def pooler_factory(name: PoolerName | str | None) -> EmbeddingPooler | None:
+    """Create a pooler instance from a pooler name."""
     if name is None:
         return None
     normalized = str(name).strip().lower()
@@ -67,6 +74,7 @@ def pooler_factory(name: PoolerName | str | None) -> EmbeddingPooler | None:
 
 
 def resolve_pooler(pooler: PoolerInput) -> EmbeddingPooler | None:
+    """Resolve a pooler name or instance to a pooler object."""
     if pooler is None:
         return None
     if isinstance(pooler, str):
@@ -78,6 +86,7 @@ def resolve_pooler(pooler: PoolerInput) -> EmbeddingPooler | None:
 
 
 def materialize_embedding_payload(value: object) -> tuple[Sequence[float] | Sequence[Sequence[float]], tuple[int, ...]]:
+    """Convert tensor-like embedding output into a serializable payload."""
     import numpy as _np
 
     shape = getattr(value, "shape", None)
@@ -93,13 +102,14 @@ def materialize_embedding_payload(value: object) -> tuple[Sequence[float] | Sequ
                 # directly by np.array() in the notebook with zero extra copy.
                 detach = getattr(value, "detach", None)
                 if callable(detach):
-                    arr = detach().cpu().float().numpy()
-                    return arr, tuple(int(d) for d in arr.shape)
+                    tensor = cast(Any, detach())
+                    arr = _np.asarray(tensor.cpu().float().numpy(), dtype=_np.float32)
+                    return cast(Sequence[float] | Sequence[Sequence[float]], arr), tuple(int(d) for d in arr.shape)
                 # numpy arrays: ensure float32, return as-is
                 to_numpy = getattr(value, "__array__", None)
                 if callable(to_numpy):
                     arr = _np.asarray(value, dtype=_np.float32)
-                    return arr, tuple(int(d) for d in arr.shape)
+                    return cast(Sequence[float] | Sequence[Sequence[float]], arr), tuple(int(d) for d in arr.shape)
         except (TypeError, RuntimeError, AttributeError):
             pass
         try:
@@ -172,6 +182,7 @@ def mean_pool_embedding_record(record: EmbeddingRecord) -> EmbeddingRecord:
 
 
 def mean_pool_matrix(matrix: Sequence[Sequence[float]]) -> List[float]:
+    """Mean-pool a row-major embedding matrix into one vector."""
     # Fast path: numpy arrays avoid the O(L*D) Python element loop
     shape = getattr(matrix, "shape", None)
     if shape is not None:

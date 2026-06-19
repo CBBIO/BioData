@@ -2,4 +2,12 @@
 
 from __future__ import annotations
 
-from .utils.batcher import *  # noqa: F403
+from .utils.batcher import (
+    FastaBatcher,
+    IterableBatcher,
+)
+
+__all__ = [
+    "FastaBatcher",
+    "IterableBatcher",
+]

@@ -258,6 +258,7 @@ DTU_PROBING_CATALOG: Dict[str, DtuServiceSpec] = {
 
 
 def get_dtu_service(name: str) -> DtuServiceSpec:
+    """Return one registered DTU service specification."""
     key = str(name).strip().lower().replace("-", "_")
     spec = DTU_PROBING_CATALOG.get(key)
     if spec is None:
@@ -272,6 +273,7 @@ def list_dtu_services(
     level: TaskLevel | None = None,
     has_dataset: bool | None = None,
 ) -> List[DtuServiceSpec]:
+    """Return registered DTU service specifications."""
     values = list(DTU_PROBING_CATALOG.values())
     if category is not None:
         values = [value for value in values if value.category == category]

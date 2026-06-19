@@ -85,8 +85,8 @@ class AlignmentResult:
 
 
 def align_sequences(
-    seq1: str,
-    seq2: str,
+    seq1: object,
+    seq2: object,
     *,
     mode: AlignmentMode = DEFAULT_MODE,
     gap_open: int = DEFAULT_GAP_OPEN,

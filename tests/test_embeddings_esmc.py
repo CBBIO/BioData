@@ -89,6 +89,18 @@ class _FakeSdkModel:
         return _FakeSdkOutput(hidden_states)
 
 
+class _FakeHfModel:
+    def to(self, *_args: Any, **_kwargs: Any) -> "_FakeHfModel":
+        return self
+
+    def eval(self) -> None:
+        return None
+
+
+class _FakeTokenizer:
+    name_or_path = "fake-esmc-tokenizer"
+
+
 def test_esmc_preprocessor_replaces_ambiguous_amino_acids() -> None:
     pre = EsmcPreprocessor()
     assert pre.preprocess("acduzob") == "ACDXXXX"
@@ -108,7 +120,7 @@ def test_esmc_generator_raises_dependency_error_when_sdk_missing(
     monkeypatch.delitem(sys.modules, "esm.models.esmc", raising=False)
 
     with pytest.raises(EmbeddingDependencyError):
-        EsmcEmbeddingGenerator()
+        EsmcEmbeddingGenerator(model_name="sdk-only-test")
 
 
 def test_esmc_generate_returns_per_residue_matrix_without_pooling() -> None:
@@ -194,7 +206,8 @@ def test_esmc_generator_loads_hf_model_and_tokenizer_for_aliases(
 
     class _FakeAutoTokenizer:
         @staticmethod
-        def from_pretrained(name: str) -> _FakeTokenizer:
+        def from_pretrained(name: str, **kwargs: Any) -> _FakeTokenizer:
+            _ = kwargs
             observed_tokenizers.append(name)
             return _FakeTokenizer()
 
@@ -247,8 +260,8 @@ def test_esmc_generator_forwards_explicit_from_pretrained_kwargs(
 
     class _FakeAutoTokenizer:
         @staticmethod
-        def from_pretrained(name: str) -> _FakeTokenizer:
-            _ = name
+        def from_pretrained(name: str, **kwargs: Any) -> _FakeTokenizer:
+            _ = name, kwargs
             return _FakeTokenizer()
 
     fake_transformers = types.SimpleNamespace(

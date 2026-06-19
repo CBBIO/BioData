@@ -49,9 +49,11 @@ class ProtT5TokenizerAdapter(TokenizerAdapter):
         self.device = str(device)
 
     def tokenize(self, sequence: str) -> Any:
+        """Tokenize one sequence for ProtT5."""
         return self.tokenize_many([sequence])
 
     def tokenize_many(self, sequences: Sequence[str]) -> Any:
+        """Tokenize a batch of sequences for ProtT5."""
         try:
             import torch  # type: ignore
         except ModuleNotFoundError as exc:
@@ -114,6 +116,7 @@ class ProtT5ModelAdapter(ModelAdapter):
             eval_fn()
 
     def infer(self, tokens: Any, *, layer_index: int | Sequence[int] | None = None) -> Any:
+        """Run ProtT5 inference and return hidden states."""
         if not isinstance(tokens, dict):
             raise EmbeddingInputError("ProtT5ModelAdapter expects tokenized input as a dict.")
         if "input_ids" not in tokens or "attention_mask" not in tokens:
@@ -157,6 +160,7 @@ class ProtT5ModelAdapter(ModelAdapter):
         return {"layers": selected_layers, "residue_lens": residue_lens}
 
     def available_layers(self) -> List[int] | None:
+        """Return layer indices exposed by the ProtT5 model."""
         total_layers = infer_total_layers_from_model(self.model)
         if total_layers is None:
             return None

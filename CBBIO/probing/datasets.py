@@ -81,12 +81,15 @@ class ProteinDataset:
                 )
 
     def ids(self) -> List[str]:
+        """Return protein example identifiers."""
         return [example.id for example in self.examples]
 
     def by_split(self, split: SplitName) -> List[ProteinExample]:
+        """Return protein examples assigned to one split."""
         return [example for example in self.examples if example.split == split]
 
     def target_values(self, target: str) -> Dict[str, Any]:
+        """Return label values for one protein-level target."""
         resolved = str(target).strip()
         if not resolved:
             raise EmbeddingInputError("Prediction target must be non-empty.")
@@ -97,6 +100,7 @@ class ProteinDataset:
         return {example.id: example.labels[resolved] for example in self.examples}
 
     def split_counts(self) -> Dict[str, int]:
+        """Return protein example counts by split."""
         return {
             "train": len(self.by_split("train")),
             "val": len(self.by_split("val")),
@@ -104,6 +108,7 @@ class ProteinDataset:
         }
 
     def require_training_and_test_splits(self) -> Tuple[List[ProteinExample], List[ProteinExample]]:
+        """Return train and test protein examples, requiring both splits."""
         train = self.by_split("train")
         test = self.by_split("test")
         if not train:
@@ -159,12 +164,15 @@ class ResidueDataset:
                 )
 
     def ids(self) -> List[str]:
+        """Return residue example identifiers."""
         return [example.id for example in self.examples]
 
     def by_split(self, split: SplitName) -> List[ResidueExample]:
+        """Return residue examples assigned to one split."""
         return [example for example in self.examples if example.split == split]
 
     def target_values(self, target: str) -> Dict[str, Sequence[Any]]:
+        """Return label sequences for one residue-level target."""
         resolved = str(target).strip()
         if not resolved:
             raise EmbeddingInputError("Prediction target must be non-empty.")
@@ -175,6 +183,7 @@ class ResidueDataset:
         return {example.id: example.labels[resolved] for example in self.examples}
 
     def split_counts(self) -> Dict[str, int]:
+        """Return residue example counts by split."""
         return {
             "train": len(self.by_split("train")),
             "val": len(self.by_split("val")),
@@ -182,6 +191,7 @@ class ResidueDataset:
         }
 
     def require_training_and_test_splits(self) -> Tuple[List[ResidueExample], List[ResidueExample]]:
+        """Return train and test residue examples, requiring both splits."""
         train = self.by_split("train")
         test = self.by_split("test")
         if not train:

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import warnings
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, cast
+from typing import Any, Dict, List, Mapping, Sequence, Set, cast
 
 from ..BioData import BioDataError, NotFoundError, cursor, embedding_dimension, metric_opclass, metric_operator
 from ..types import DistanceMetric, Neighbor, SearchBackend
@@ -75,7 +75,7 @@ class SearchService:
         self._client._search_workload_cache[cache_key] = stats
         return dict(stats)
 
-    def _probe_cuda_memory(self, *, device: Optional[str]) -> Optional[tuple[int, int]]:
+    def _probe_cuda_memory(self, *, device: str | None) -> tuple[int, int] | None:
         resolved_device = str(device or "").strip().lower()
         if not resolved_device.startswith("cuda"):
             return None
@@ -106,7 +106,7 @@ class SearchService:
         embedding_type_id: int,
         layer_index: int,
         batch_size: int,
-    ) -> Optional[int]:
+    ) -> int | None:
         if backend not in {"faiss_gpu", "cuvs_gpu", "torch_gpu"}:
             return None
         stats = self._search_workload_stats(embedding_type_id=embedding_type_id, layer_index=layer_index)
@@ -131,7 +131,7 @@ class SearchService:
         layer_index: int,
         free_bytes: int,
         requested_batch_size: int,
-    ) -> Optional[int]:
+    ) -> int | None:
         if backend not in {"faiss_gpu", "cuvs_gpu", "torch_gpu"}:
             return None
         stats = self._search_workload_stats(embedding_type_id=embedding_type_id, layer_index=layer_index)
@@ -167,7 +167,7 @@ class SearchService:
         layer_index: int,
         metric: DistanceMetric,
         batch_size: int,
-        device: Optional[str],
+        device: str | None,
     ) -> ResolvedBackend:
         del metric
         if str(requested_backend) != "auto":
@@ -263,16 +263,17 @@ class SearchService:
         query_embedding: Any,
         embedding_type_id: int,
         layer_index: int = 0,
-        k: Optional[int] = None,
+        k: int | None = None,
         *,
-        metric: Optional[DistanceMetric] = None,
-        exclude_protein_ids: Optional[Sequence[str]] = None,
+        metric: DistanceMetric | None = None,
+        exclude_protein_ids: Sequence[str] | None = None,
         use_ann: bool = False,
         ann_ef_search: int = 200,
-        ann_candidate_pool: Optional[int] = None,
-        backend: Optional[SearchBackend] = None,
-        device: Optional[str] = None,
+        ann_candidate_pool: int | None = None,
+        backend: SearchBackend | None = None,
+        device: str | None = None,
     ) -> List[Neighbor]:
+        """Find nearest neighbors for one query embedding."""
         effective_metric = metric or self._client.default_metric
         effective_k = self._client.default_k if k is None else int(k)
         if effective_k < 1:
@@ -370,13 +371,14 @@ class SearchService:
         protein_ids: Sequence[str],
         embedding_type_id: int,
         layer_index: int = 0,
-        k: Optional[int] = None,
+        k: int | None = None,
         *,
-        metric: Optional[DistanceMetric] = None,
+        metric: DistanceMetric | None = None,
         include_query: bool = False,
-        backend: Optional[SearchBackend] = None,
-        device: Optional[str] = None,
+        backend: SearchBackend | None = None,
+        device: str | None = None,
     ) -> Dict[str, List[Neighbor]]:
+        """Find nearest neighbors for stored protein embeddings."""
         ids = [str(value) for value in protein_ids]
         if not ids:
             return {}
@@ -494,8 +496,9 @@ class SearchService:
         exclude_protein_ids: Sequence[str],
         use_ann: bool,
         ann_ef_search: int,
-        ann_candidate_pool: Optional[int],
+        ann_candidate_pool: int | None,
     ) -> List[Neighbor]:
+        """Find nearest neighbors through pgvector."""
         conn = self._client._require_connection()
         operator = metric_operator(metric)
         excluded_ids = [str(value) for value in exclude_protein_ids]
@@ -588,6 +591,7 @@ class SearchService:
         metric: DistanceMetric,
         include_query: bool,
     ) -> Dict[str, List[Neighbor]]:
+        """Find stored-protein nearest neighbors through pgvector."""
         conn = self._client._require_connection()
         operator = metric_operator(metric)
         dim_row = self._client.query_one(
@@ -685,9 +689,10 @@ class SearchService:
         k: int,
         metric: DistanceMetric,
         exclude_protein_ids: Sequence[str],
-        device: Optional[str],
+        device: str | None,
         use_ann: bool,
     ) -> List[Neighbor]:
+        """Find nearest neighbors through a FAISS GPU index."""
         state = self._client._get_or_load_gpu_search_state(
             backend="faiss_gpu",
             embedding_type_id=embedding_type_id,
@@ -717,6 +722,7 @@ class SearchService:
         exclude_protein_ids: Sequence[str],
         use_ann: bool,
     ) -> List[Neighbor]:
+        """Find nearest neighbors through a FAISS CPU index."""
         state = self._client._get_or_load_gpu_search_state(
             backend="faiss_cpu",
             embedding_type_id=embedding_type_id,
@@ -744,8 +750,9 @@ class SearchService:
         k: int,
         metric: DistanceMetric,
         exclude_protein_ids: Sequence[str],
-        device: Optional[str],
+        device: str | None,
     ) -> List[Neighbor]:
+        """Find nearest neighbors through a torch tensor backend."""
         state = self._client._get_or_load_gpu_search_state(
             backend="torch_gpu",
             embedding_type_id=embedding_type_id,
@@ -773,9 +780,10 @@ class SearchService:
         k: int,
         metric: DistanceMetric,
         exclude_protein_ids: Sequence[str],
-        device: Optional[str],
+        device: str | None,
         use_ann: bool,
     ) -> List[Neighbor]:
+        """Find nearest neighbors through a cuVS GPU index."""
         state = self._client._get_or_load_gpu_search_state(
             backend="cuvs_gpu",
             embedding_type_id=embedding_type_id,
@@ -804,8 +812,9 @@ class SearchService:
         k: int,
         metric: DistanceMetric,
         include_query: bool,
-        device: Optional[str],
+        device: str | None,
     ) -> Dict[str, List[Neighbor]]:
+        """Find batch nearest neighbors through a FAISS GPU index."""
         state = self._client._get_or_load_gpu_search_state(
             backend="faiss_gpu",
             embedding_type_id=embedding_type_id,
@@ -838,6 +847,7 @@ class SearchService:
         include_query: bool,
         use_ann: bool,
     ) -> Dict[str, List[Neighbor]]:
+        """Find batch nearest neighbors through a FAISS CPU index."""
         state = self._client._get_or_load_gpu_search_state(
             backend="faiss_cpu",
             embedding_type_id=embedding_type_id,
@@ -868,9 +878,10 @@ class SearchService:
         k: int,
         metric: DistanceMetric,
         include_query: bool,
-        device: Optional[str],
+        device: str | None,
         use_ann: bool,
     ) -> Dict[str, List[Neighbor]]:
+        """Find batch nearest neighbors through a cuVS GPU index."""
         state = self._client._get_or_load_gpu_search_state(
             backend="cuvs_gpu",
             embedding_type_id=embedding_type_id,
@@ -901,8 +912,9 @@ class SearchService:
         k: int,
         metric: DistanceMetric,
         include_query: bool,
-        device: Optional[str],
+        device: str | None,
     ) -> Dict[str, List[Neighbor]]:
+        """Find batch nearest neighbors through a torch tensor backend."""
         state = self._client._get_or_load_gpu_search_state(
             backend="torch_gpu",
             embedding_type_id=embedding_type_id,
@@ -932,6 +944,7 @@ class SearchService:
         k: int,
         per_query_excluded: Mapping[str, Set[str]],
     ) -> Dict[str, List[Neighbor]]:
+        """Search an initialized FAISS state for query vectors."""
         import numpy as np
 
         if state.faiss_index is None:
@@ -977,6 +990,7 @@ class SearchService:
         k: int,
         per_query_excluded: Mapping[str, Set[str]],
     ) -> Dict[str, List[Neighbor]]:
+        """Search an initialized cuVS state for query vectors."""
         cupy = import_cupy()
         import_cuvs()
         from cuvs.neighbors import brute_force as cuvs_brute_force  # type: ignore
@@ -1037,6 +1051,7 @@ class SearchService:
         k: int,
         per_query_excluded: Mapping[str, Set[str]],
     ) -> Dict[str, List[Neighbor]]:
+        """Search an initialized torch state for query vectors."""
         torch = import_torch()
         query_tensor = torch.as_tensor(query_vectors, dtype=torch.float32, device=state.device)
         if query_tensor.ndim == 1:
@@ -1086,6 +1101,7 @@ class SearchService:
         excluded_protein_ids: Set[str],
         l2_squared: bool,
     ) -> List[Neighbor]:
+        """Convert backend candidate rows into neighbor records."""
         neighbors: List[Neighbor] = []
         for raw_index, raw_distance in zip(candidate_indices, candidate_distances):
             candidate_index = int(raw_index)
@@ -1114,8 +1130,9 @@ class SearchService:
         metric: DistanceMetric,
         batch_size: int,
         ann_requested: bool,
-        device: Optional[str],
+        device: str | None,
     ) -> ResolvedBackend:
+        """Resolve the effective search backend for a workload."""
         requested = str(requested_backend).strip().lower()
         if requested not in {"auto", "gpu", "pgvector", "faiss_cpu", "faiss_gpu", "cuvs_gpu", "torch_gpu"}:
             raise BioDataError(f"Unsupported search backend: {requested_backend!r}")
@@ -1210,7 +1227,8 @@ class SearchService:
             return ResolvedBackend("torch_gpu", availability.torch_device, False, False, False, "auto_torch_threshold", batch_size, False, availability.hardware_class)
         return ResolvedBackend("pgvector", None, ann_requested, ann_requested, False, "auto_pgvector_threshold", batch_size, False, availability.hardware_class)
 
-    def detect_backend_availability(self, *, device: Optional[str]) -> BackendAvailability:
+    def detect_backend_availability(self, *, device: str | None) -> BackendAvailability:
+        """Detect available local search backends and devices."""
         torch_device = preferred_torch_device(device)
         faiss_device = preferred_faiss_device(device)
         cuvs_device = preferred_cuvs_device(device)
@@ -1252,9 +1270,10 @@ class SearchService:
         embedding_type_id: int,
         layer_index: int,
         metric: DistanceMetric,
-        device: Optional[str],
+        device: str | None,
         ann_requested: bool,
     ) -> GpuSearchState:
+        """Return a cached GPU search state or load a new one."""
         resolved_device = str(device or "")
         if not resolved_device:
             raise BioDataError(f"{backend} selected without a usable accelerator device.")
@@ -1288,6 +1307,7 @@ class SearchService:
         device: str,
         ann_requested: bool,
     ) -> GpuSearchState:
+        """Load vectors and initialize an accelerated search state."""
         import numpy as np
 
         protein_ids, vectors = self._client._load_search_vectors(embedding_type_id=embedding_type_id, layer_index=layer_index)
@@ -1373,6 +1393,7 @@ class SearchService:
         )
 
     def load_search_vectors(self, *, embedding_type_id: int, layer_index: int) -> tuple[List[str], Any]:
+        """Load search vectors for one embedding type and layer."""
         rows = self._client.query_all(
             """
             SELECT p.id AS protein_id, se.embedding
@@ -1400,9 +1421,10 @@ class SearchService:
         embedding_type_id: int,
         layer_index: int,
         metric: DistanceMetric,
-        device: Optional[str],
+        device: str | None,
         ann_enabled: bool,
     ) -> bool:
+        """Return whether the cached accelerated search state matches a request."""
         state = self._client._gpu_search_state
         return bool(
             state is not None
@@ -1425,6 +1447,7 @@ class SearchService:
         k: int,
         query_count: int,
     ) -> None:
+        """Record diagnostics for a completed search."""
         self._client._warn_if_search_backend_degraded(
             resolved,
             requested_backend=requested_backend,
@@ -1462,7 +1485,8 @@ class SearchService:
         layer_index: int,
         metric: DistanceMetric,
     ) -> None:
-        warning_message: Optional[str] = None
+        """Warn once when backend routing degrades a search request."""
+        warning_message: str | None = None
         requested = str(requested_backend)
         reason = str(resolved.reason)
 
@@ -1533,6 +1557,7 @@ class SearchService:
         layer_index: int,
         metric: DistanceMetric,
     ) -> None:
+        """Warn once when pgvector ANN search lacks a matching HNSW index."""
         metric_name = str(metric).strip().lower()
         opclass = metric_opclass(cast(DistanceMetric, metric_name))
         cache_key = (int(embedding_type_id), int(layer_index), metric_name)

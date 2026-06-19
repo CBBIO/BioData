@@ -68,6 +68,7 @@ class EmbeddingWriter:
             )
 
     def write(self, records: Sequence[EmbeddingRecord]) -> None:
+        """Write embedding records to the configured output format."""
         if not records:
             return
 
@@ -102,6 +103,7 @@ class EmbeddingWriter:
         raise AssertionError("unreachable writer format")
 
     def close(self) -> None:
+        """Close any resources owned by the writer."""
         if self.format in {"pkl", "npy"} and self._pending:
             self._write_pending_shard(len(self._pending))
         if self._h5_writer is not None:
@@ -173,18 +175,18 @@ def _normalize_payload(value: object) -> tuple[EmbeddingPayload, Tuple[int, ...]
             import numpy as _np
             # Detach from autograd graph if this is a live tensor
             detach = getattr(value, "detach", None)
-            arr_src = detach().cpu() if callable(detach) else value
+            arr_src = cast(Any, detach()).cpu() if callable(detach) else value
             arr = _np.asarray(arr_src, dtype=_np.float32)
             if arr.ndim == 1:
                 if arr.size == 0:
                     raise EmbeddingInputError("Embedding payload is empty.")
-                return arr, (int(arr.shape[0]),)
+                return cast(EmbeddingPayload, arr), (int(arr.shape[0]),)
             if arr.ndim == 2:
                 if arr.size == 0:
                     raise EmbeddingInputError("Embedding matrix is empty.")
                 if arr.shape[1] == 0:
                     raise EmbeddingInputError("Embedding matrix rows must have the same length.")
-                return arr, (int(arr.shape[0]), int(arr.shape[1]))
+                return cast(EmbeddingPayload, arr), (int(arr.shape[0]), int(arr.shape[1]))
         except EmbeddingInputError:
             raise
         except Exception:

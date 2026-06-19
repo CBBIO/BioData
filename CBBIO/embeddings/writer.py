@@ -2,4 +2,12 @@
 
 from __future__ import annotations
 
-from .utils.writer import *  # noqa: F403
+from .utils.writer import (
+    EmbeddingWriter,
+    EmbeddingWriterFormat,
+)
+
+__all__ = [
+    "EmbeddingWriter",
+    "EmbeddingWriterFormat",
+]

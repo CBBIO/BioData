@@ -20,9 +20,8 @@ _SCRIPT_REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_SCRIPT_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_REPO_ROOT))
 
-from CBBIO.BioData import BioDataClient
-from CBBIO.embeddings import GenerationInput, Generator, load_fasta_inputs
-from CBBIO.search.types import _ResolvedBackend
+from CBBIO import BioDataClient, GenerationInput, Generator, load_fasta_inputs
+from CBBIO.search.types import ResolvedBackend
 from CBBIO.types import DistanceMetric, SearchBackend
 
 
@@ -401,7 +400,7 @@ def _resolve_backend(
     batch_size: int,
     use_ann: bool,
     device: str | None,
-) -> _ResolvedBackend:
+) -> ResolvedBackend:
     resolved = client._resolve_search_backend(
         requested_backend=backend,
         embedding_type_id=embedding_type_id,
@@ -425,7 +424,7 @@ def _resolve_backend(
 def _search_embeddings_once(
     client: BioDataClient,
     *,
-    resolved: _ResolvedBackend,
+    resolved: ResolvedBackend,
     query_ids: Sequence[str],
     query_vectors: Sequence[Sequence[float]],
     embedding_type_id: int,

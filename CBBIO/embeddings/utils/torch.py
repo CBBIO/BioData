@@ -19,6 +19,7 @@ from .. import (
 
 
 def normalize_torch_dtype_name(dtype: str | None) -> str | None:
+    """Normalize a torch dtype name for lookup."""
     if dtype is None:
         return None
     value = str(dtype).strip().lower()
@@ -39,6 +40,7 @@ def normalize_torch_dtype_name(dtype: str | None) -> str | None:
 
 
 def resolve_torch_dtype(dtype: str) -> Any:
+    """Resolve a torch dtype name to a torch dtype object."""
     try:
         import torch  # type: ignore
     except ModuleNotFoundError as exc:
@@ -59,6 +61,7 @@ def move_model_to_device(
     dtype: Any | None = None,
     dtype_name: str | None = None,
 ) -> None:
+    """Move a model to the requested device when supported."""
     to_fn = getattr(model, "to", None)
     if not callable(to_fn):
         return
@@ -122,6 +125,7 @@ class BasePreprocessor(PreprocessorAdapter):
         self._prefix_space = prefix_space
 
     def preprocess(self, raw_sequence: str) -> str:
+        """Return the input sequence unchanged."""
         sequence = str(raw_sequence).strip().upper().replace(" ", "")
         validate_sequence(sequence, context=self._context)
         replaced = re.sub(r"[UZOB]", "X", sequence)
@@ -137,6 +141,7 @@ class DefaultPostprocessor(PostprocessorAdapter):
     """Shared postprocessor for all models that return a standard {layers: {int: tensor}} dict."""
 
     def postprocess(self, model_output: Any) -> EmbeddingPayload:
+        """Return model output as a validated embedding payload."""
         name = self.__class__.__name__
         if not isinstance(model_output, dict):
             raise EmbeddingBackendError(f"{name} expects a dict payload from model adapter.")

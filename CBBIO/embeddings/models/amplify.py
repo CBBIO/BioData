@@ -48,6 +48,7 @@ class AmplifyModelAdapter(HfEsmModelAdapter):
     """Model adapter for Hugging Face AMPLIFY."""
 
     def infer(self, tokens: Any, *, layer_index: int | Sequence[int] | None = None) -> Any:
+        """Run AMPLIFY model inference and return hidden states."""
         if not isinstance(tokens, dict):
             raise EmbeddingInputError("AmplifyModelAdapter expects tokenized input as a dict.")
         token_map = cast(Dict[str, Any], tokens)
@@ -97,6 +98,7 @@ class AmplifyModelAdapter(HfEsmModelAdapter):
         }
 
     def available_layers(self) -> List[int] | None:
+        """Return layer indices exposed by the AMPLIFY model."""
         total = self._total_layers()
         return list(range(total))
 

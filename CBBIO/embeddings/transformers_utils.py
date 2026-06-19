@@ -2,4 +2,12 @@
 
 from __future__ import annotations
 
-from .utils.transformers import *  # noqa: F403
+from .utils.transformers import (
+    load_esm_tokenizer,
+    suppress_esm_tokenizer_class_warning,
+)
+
+__all__ = [
+    "load_esm_tokenizer",
+    "suppress_esm_tokenizer_class_warning",
+]

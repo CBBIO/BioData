@@ -8,7 +8,7 @@ from __future__ import annotations
 import math
 from collections import defaultdict
 from pathlib import Path
-from typing import Collection, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
+from typing import Collection, Dict, Iterable, List, Mapping, Sequence, Set, Tuple
 
 
 class TaxonomyError(Exception):
@@ -53,12 +53,15 @@ class TaxonomyOntology:
 
     @property
     def taxon_ids(self) -> Set[str]:
+        """Return all taxonomy IDs present in the graph."""
         return set(self._parent_by_taxon.keys())
 
     def has_taxon(self, tax_id: str) -> bool:
+        """Return whether a taxonomy ID exists in the graph."""
         return str(tax_id) in self._parent_by_taxon
 
     def taxon(self, tax_id: str) -> Dict[str, object]:
+        """Return metadata for one taxonomy ID."""
         value = self._require_taxon(tax_id)
         return {
             "id": value,
@@ -73,6 +76,7 @@ class TaxonomyOntology:
         return normalize_taxonomy_id(tax_id)
 
     def ancestors(self, tax_id: str, *, include_self: bool = False) -> List[str]:
+        """Return ancestor taxonomy IDs for one taxon."""
         taxon = self._require_taxon(tax_id)
         lineage = self.lineage(taxon, include_self=True, include_root=True)
         if not include_self:
@@ -80,6 +84,7 @@ class TaxonomyOntology:
         return lineage
 
     def descendants(self, tax_id: str, *, include_self: bool = False) -> List[str]:
+        """Return descendant taxonomy IDs for one taxon."""
         start = self._require_taxon(tax_id)
         visited: Set[str] = set()
         stack: List[str] = [start]
@@ -95,6 +100,7 @@ class TaxonomyOntology:
         return sorted(visited, key=lambda value: (self._depth_by_taxon.get(value, 0), value))
 
     def lineage(self, tax_id: str, *, include_self: bool = True, include_root: bool = True) -> List[str]:
+        """Return the root-to-taxon lineage for one taxonomy ID."""
         taxon = self._require_taxon(tax_id)
         chain: List[str] = []
         visited: Set[str] = set()
@@ -121,12 +127,14 @@ class TaxonomyOntology:
         return chain
 
     def common_ancestors(self, tax_id_a: str, tax_id_b: str, *, include_terms: bool = True) -> List[str]:
+        """Return common ancestor taxonomy IDs for two taxa."""
         lineage_a = self.lineage(tax_id_a, include_self=include_terms, include_root=True)
         lineage_b = self.lineage(tax_id_b, include_self=include_terms, include_root=True)
         common = set(lineage_a).intersection(set(lineage_b))
         return sorted(common, key=lambda value: (self._depth_by_taxon.get(value, 0), value))
 
-    def lowest_common_ancestor(self, tax_id_a: str, tax_id_b: str) -> Optional[str]:
+    def lowest_common_ancestor(self, tax_id_a: str, tax_id_b: str) -> str | None:
+        """Return the deepest shared ancestor for two taxa."""
         self._require_taxon(tax_id_a)
         self._require_taxon(tax_id_b)
 
@@ -135,14 +143,14 @@ class TaxonomyOntology:
             return None
         return max(common, key=lambda value: (self._depth_by_taxon.get(value, -1), value))
 
-    def lowest_common_ancestor_rank(self, tax_id_a: str, tax_id_b: str) -> Optional[str]:
+    def lowest_common_ancestor_rank(self, tax_id_a: str, tax_id_b: str) -> str | None:
         """Return the rank of the lowest common ancestor (e.g. ``family``)."""
         lca = self.lowest_common_ancestor(tax_id_a, tax_id_b)
         if lca is None:
             return None
         return self._rank_by_taxon.get(lca, "")
 
-    def lowest_common_ancestor_clade(self, tax_id_a: str, tax_id_b: str) -> Optional[Dict[str, object]]:
+    def lowest_common_ancestor_clade(self, tax_id_a: str, tax_id_b: str) -> Dict[str, object] | None:
         """Return metadata for the lowest common ancestor clade."""
         lca = self.lowest_common_ancestor(tax_id_a, tax_id_b)
         if lca is None:
@@ -168,7 +176,8 @@ class TaxonomyOntology:
             return ancestor in ancestors_b
         return False
 
-    def minimal_branch_length(self, tax_id_a: str, tax_id_b: str) -> Optional[int]:
+    def minimal_branch_length(self, tax_id_a: str, tax_id_b: str) -> int | None:
+        """Return the shortest branch distance between two taxa."""
         taxon_a = self._require_taxon(tax_id_a)
         taxon_b = self._require_taxon(tax_id_b)
         lca = self.lowest_common_ancestor(taxon_a, taxon_b)
@@ -177,7 +186,7 @@ class TaxonomyOntology:
         depth_lca = self._depth_by_taxon[lca]
         return (self._depth_by_taxon[taxon_a] - depth_lca) + (self._depth_by_taxon[taxon_b] - depth_lca)
 
-    def normalized_lca_depth(self, tax_id_a: str, tax_id_b: str) -> Optional[float]:
+    def normalized_lca_depth(self, tax_id_a: str, tax_id_b: str) -> float | None:
         """Return depth(LCA) / max(depth(a), depth(b)).
 
         Values are in [0, 1] when both taxonomy IDs are in the same rooted tree.
@@ -195,7 +204,7 @@ class TaxonomyOntology:
             return 1.0
         return float(self._depth_by_taxon[lca]) / float(denom)
 
-    def wu_palmer_similarity(self, tax_id_a: str, tax_id_b: str) -> Optional[float]:
+    def wu_palmer_similarity(self, tax_id_a: str, tax_id_b: str) -> float | None:
         """Return Wu-Palmer similarity: 2*depth(LCA) / (depth(a) + depth(b))."""
         taxon_a = self._require_taxon(tax_id_a)
         taxon_b = self._require_taxon(tax_id_b)
@@ -210,7 +219,7 @@ class TaxonomyOntology:
             return 1.0
         return (2.0 * float(self._depth_by_taxon[lca])) / float(denom)
 
-    def lin_similarity(self, tax_id_a: str, tax_id_b: str, *, mode: str = "observed") -> Optional[float]:
+    def lin_similarity(self, tax_id_a: str, tax_id_b: str, *, mode: str = "observed") -> float | None:
         """Return Lin similarity: 2*IC(LCA) / (IC(a) + IC(b)).
 
         Returns None if the LCA cannot be determined.
@@ -236,6 +245,7 @@ class TaxonomyOntology:
         *,
         mode: str = "observed",
     ) -> None:
+        """Prepare taxonomy probabilities used by IC-based metrics."""
         mode_value = _normalize_mode(mode)
 
         if mode_value in {"observed", "whole_db"}:
@@ -270,6 +280,7 @@ class TaxonomyOntology:
         self._prepared_probabilities[mode_value] = probabilities
 
     def information_content(self, tax_id: str, *, mode: str = "observed") -> float:
+        """Return information content for one taxonomy ID."""
         value = self._require_taxon(tax_id)
         mode_value = _normalize_mode(mode)
         probabilities = self._prepared_probabilities.get(mode_value)
@@ -284,6 +295,7 @@ class TaxonomyOntology:
         return float(-math.log(probability))
 
     def taxon_names(self, tax_ids: Collection[str], *, sort: bool = True) -> List[str]:
+        """Return names for the provided taxonomy IDs."""
         names = [str(self.taxon(str(tax_id))["name"]) for tax_id in tax_ids]
         return sorted(names) if sort else names
 
@@ -294,6 +306,7 @@ class TaxonomyOntology:
         separator: str = "; ",
         sort: bool = True,
     ) -> str:
+        """Return taxonomy names joined into one string."""
         return separator.join(self.taxon_names(tax_ids, sort=sort))
 
     def _require_taxon(self, tax_id: str) -> str:
@@ -338,9 +351,9 @@ def normalize_taxonomy_id(value: object) -> str:
 def compute_taxon_ic_and_lin_maps(
     taxonomy: TaxonomyOntology,
     query_tax_ids: Iterable[object],
-    subject_tax_ids: Optional[Iterable[object]] = None,
+    subject_tax_ids: Iterable[object] | None = None,
     *,
-    observed_tax_ids: Optional[Iterable[object]] = None,
+    observed_tax_ids: Iterable[object] | None = None,
     observed_mode: str = "observed",
 ) -> Tuple[Dict[str, float], Dict[Tuple[str, str], float]]:
     """Compute taxonomy IC and Lin-similarity lookup maps.

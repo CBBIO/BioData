@@ -2,4 +2,18 @@
 
 from __future__ import annotations
 
-from .embeddings.models.prott5 import *  # noqa: F403
+from .embeddings.models.prott5 import (
+    ProtT5Preprocessor,
+    ProtT5TokenizerAdapter,
+    ProtT5ModelAdapter,
+    ProtT5Postprocessor,
+    ProtT5EmbeddingGenerator,
+)
+
+__all__ = [
+    "ProtT5Preprocessor",
+    "ProtT5TokenizerAdapter",
+    "ProtT5ModelAdapter",
+    "ProtT5Postprocessor",
+    "ProtT5EmbeddingGenerator",
+]

@@ -13,6 +13,7 @@ from .. import (
     EmbeddingDependencyError,
     EmbeddingGenerator,
     EmbeddingInputError,
+    EmbeddingPayload,
     EmbeddingRecord,
     FastaEmbeddingH5Result,
     FastaEmbeddingNpyShardResult,
@@ -769,7 +770,7 @@ def _load_h5_records_by_index(
                     arr = mat_arrays[pos]
                     result[pos] = EmbeddingRecord(
                         id=record_index.ids[index],
-                        embedding=cast(Any, arr),
+                        embedding=cast(EmbeddingPayload, arr),
                         layer_index=record_index.layer_values[index],
                         model_reference=record_index.model_values[index],
                         shape=arr.shape,
@@ -1161,7 +1162,7 @@ def _records_from_numpy(
     return [
         EmbeddingRecord(
             id=resolved_ids[idx],
-            embedding=vector,
+            embedding=cast(EmbeddingPayload, vector),
             layer_index=int(layer_index),
             model_reference=model_reference,
             shape=row_shapes[idx],

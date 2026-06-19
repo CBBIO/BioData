@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Any, Callable, Collection, Dict, List, Mapping, Optional, Sequence, Set, cast
+from typing import Any, Callable, Collection, Dict, List, Mapping, Sequence, Set, cast
 
 from .types import SimilarityMethod
 
@@ -41,7 +41,7 @@ class GOOntology:
         obo_path: str,
         *,
         load_obsolete: bool = False,
-        optional_attrs: Optional[Set[str]] = None,
+        optional_attrs: Set[str] | None = None,
         quiet: bool = True,
     ) -> None:
         try:
@@ -57,8 +57,8 @@ class GOOntology:
             prt=prt,
         )
         self._dag: Any = dag_obj
-        self._term_counts: Optional[Any] = None
-        self._wang_ss: Optional[Any] = None
+        self._term_counts: Any | None = None
+        self._wang_ss: Any | None = None
         self._direct_parent_cache: Dict[str, Set[str]] = {}
         self._direct_child_cache: Dict[str, Set[str]] = {}
         self._ancestor_cache: Dict[str, Set[str]] = {}
@@ -67,12 +67,15 @@ class GOOntology:
 
     @property
     def go_ids(self) -> Set[str]:
+        """Return all GO IDs present in the loaded DAG."""
         return {str(go_id) for go_id in self._dag.keys()}
 
     def has_term(self, go_id: str) -> bool:
+        """Return whether a GO term exists in the loaded DAG."""
         return go_id in self._dag
 
     def term(self, go_id: str) -> Dict[str, Any]:
+        """Return metadata for one GO term."""
         term_obj = self._get_term(go_id)
         return {
             "id": str(term_obj.id),
@@ -84,12 +87,14 @@ class GOOntology:
         }
 
     def ancestors(self, go_id: str, *, include_self: bool = False) -> List[str]:
+        """Return ancestor GO IDs for one term."""
         values = set(self._ancestor_set(go_id))
         if include_self:
             values.add(go_id)
         return sorted(values)
 
     def descendants(self, go_id: str, *, include_self: bool = False) -> List[str]:
+        """Return descendant GO IDs for one term."""
         values = set(self._descendant_set(go_id))
         if include_self:
             values.add(go_id)
@@ -207,6 +212,7 @@ class GOOntology:
         }
 
     def common_ancestors(self, go_id_a: str, go_id_b: str, *, include_terms: bool = True) -> List[str]:
+        """Return common ancestor GO IDs for two terms."""
         ancestors_a = set(self.ancestors(go_id_a, include_self=include_terms))
         ancestors_b = set(self.ancestors(go_id_b, include_self=include_terms))
         return sorted(ancestors_a.intersection(ancestors_b))
@@ -220,7 +226,7 @@ class GOOntology:
         self,
         annotations: Mapping[str, Collection[str]],
         *,
-        relationships: Optional[Set[str]] = None,
+        relationships: Set[str] | None = None,
     ) -> None:
         """Build GO term counts from gene/protein -> GO annotations."""
         try:
@@ -292,7 +298,7 @@ class GOOntology:
         *,
         method: SimilarityMethod = "resnik",
         aggregate: str = "bma",
-    ) -> Optional[float]:
+    ) -> float | None:
         """Compute semantic similarity between two GO-term groups.
 
         Currently supports best-match average aggregation (``aggregate='bma'``).
@@ -347,7 +353,7 @@ class GOOntology:
         """Return GO term names as one formatted string."""
         return separator.join(self.term_names(go_ids, sort=sort))
 
-    def category_for_term(self, go_id: str) -> Optional[str]:
+    def category_for_term(self, go_id: str) -> str | None:
         """Return canonical GO category for a term: ``mf``, ``bp``, or ``cc``."""
         term_obj = self._get_term(go_id)
         namespace = str(getattr(term_obj, "namespace", "")).strip().lower()
@@ -389,8 +395,8 @@ class GOOntology:
         go_id_a: str,
         go_id_b: str,
         *,
-        branch_dist: Optional[int] = None,
-    ) -> Optional[int]:
+        branch_dist: int | None = None,
+    ) -> int | None:
         """Return minimum branch distance between two GO terms.
 
         This wraps ``goatools.semantic.min_branch_length`` when available.
@@ -469,7 +475,7 @@ def load_go(
     obo_path: str,
     *,
     load_obsolete: bool = False,
-    optional_attrs: Optional[Set[str]] = None,
+    optional_attrs: Set[str] | None = None,
     quiet: bool = True,
 ) -> GOOntology:
     """Convenience loader for GO ontology."""
@@ -521,7 +527,7 @@ def _as_float(value: object) -> float:
         return 0.0
 
 
-def _as_optional_int(value: object) -> Optional[int]:
+def _as_optional_int(value: object) -> int | None:
     if value is None:
         return None
     if isinstance(value, bool):
@@ -536,7 +542,7 @@ def _as_optional_int(value: object) -> Optional[int]:
         return None
 
 
-def _fallback_min_branch_length(term_a: Any, term_b: Any, dag: Any, *, branch_dist: Optional[int]) -> Optional[int]:
+def _fallback_min_branch_length(term_a: Any, term_b: Any, dag: Any, *, branch_dist: int | None) -> int | None:
     # This mirrors goatools behavior when min_branch_length is unavailable.
     if getattr(term_a, "namespace", None) == getattr(term_b, "namespace", None):
         common = set(term_a.get_all_parents()).intersection(set(term_b.get_all_parents()))

@@ -31,6 +31,7 @@ def _path_list() -> List[Path]:
 
 @dataclass(frozen=True)
 class EmbeddingJobResult:
+    """Result metadata for one embedding generation job."""
     record_count: int
     error_count: int = 0
     skipped_count: int = 0

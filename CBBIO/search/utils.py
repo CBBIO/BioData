@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Iterable, List, Optional, cast
+from typing import Any, Iterable, List, cast
 
 from ..BioData import DriverDependencyError
 from ..types import DistanceMetric
@@ -111,7 +111,7 @@ def _import_cuvs(*, allow_missing: bool = False) -> Any:
     return cuvs
 
 
-def _preferred_torch_device(device: Optional[str]) -> Optional[str]:
+def _preferred_torch_device(device: str | None) -> str | None:
     try:
         import torch  # type: ignore
     except ModuleNotFoundError:
@@ -135,7 +135,7 @@ def _preferred_torch_device(device: Optional[str]) -> Optional[str]:
     return None
 
 
-def _preferred_faiss_device(device: Optional[str]) -> Optional[str]:
+def _preferred_faiss_device(device: str | None) -> str | None:
     requested = str(device or "").strip().lower()
     if requested == "mps":
         return None
@@ -154,7 +154,7 @@ def _preferred_faiss_device(device: Optional[str]) -> Optional[str]:
     return None
 
 
-def _preferred_cuvs_device(device: Optional[str]) -> Optional[str]:
+def _preferred_cuvs_device(device: str | None) -> str | None:
     requested = str(device or "").strip().lower()
     if requested == "mps":
         return None
@@ -227,20 +227,6 @@ tensor_to_list = _tensor_to_list
 
 
 __all__ = [
-    "_coerce_vector_row",
-    "_as_numpy_matrix",
-    "_prepare_index_vectors",
-    "_normalize_distance",
-    "_import_torch",
-    "_import_faiss",
-    "_import_cupy",
-    "_import_cuvs",
-    "_preferred_torch_device",
-    "_preferred_faiss_device",
-    "_preferred_cuvs_device",
-    "_cuda_device_index",
-    "_torch_normalize",
-    "_tensor_to_list",
     "as_numpy_matrix",
     "prepare_index_vectors",
     "normalize_distance",

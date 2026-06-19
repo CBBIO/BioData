@@ -374,6 +374,7 @@ MUSITEDEEP_TESTDATA_API_URL = (
 
 
 def get_residue_source(name: str) -> ResidueSourceSpec:
+    """Return one registered residue source specification."""
     key = _normalize_residue_source_name(name)
     spec = RESIDUE_SOURCE_SPECS.get(key)
     if spec is None:
@@ -405,6 +406,7 @@ def _normalize_residue_source_name(name: str) -> str:
 
 
 def list_residue_sources(*, category: str | None = None) -> List[ResidueSourceSpec]:
+    """Return registered residue source specifications."""
     values = list(RESIDUE_SOURCE_SPECS.values())
     if category is not None:
         normalized = str(category).strip().lower()
@@ -413,6 +415,7 @@ def list_residue_sources(*, category: str | None = None) -> List[ResidueSourceSp
 
 
 def get_dbptm_benchmark(name: str) -> DbptmBenchmarkSpec:
+    """Return one registered dbPTM benchmark specification."""
     key = _normalize_dbptm_benchmark_name(name)
     spec = DBPTM_BENCHMARKS.get(key)
     if spec is None:
@@ -422,6 +425,7 @@ def get_dbptm_benchmark(name: str) -> DbptmBenchmarkSpec:
 
 
 def list_dbptm_benchmarks() -> List[DbptmBenchmarkSpec]:
+    """Return registered dbPTM benchmark specifications."""
     return list(DBPTM_BENCHMARKS.values())
 
 

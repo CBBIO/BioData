@@ -16,6 +16,7 @@ from .tasks import Task
 
 @dataclass(frozen=True)
 class TaskLayerResult:
+    """Result of evaluating one probing task on one embedding layer."""
     task_name: str
     model_reference: str
     layer_index: int
