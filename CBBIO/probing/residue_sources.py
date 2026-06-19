@@ -19,6 +19,14 @@ from urllib.request import Request, urlopen, urlretrieve
 from CBBIO.embeddings import EmbeddingInputError
 
 from .datasets import ObjectiveName, ResidueDataset, ResidueExample, SplitName
+from .disprot import (
+    DISPROT_CURRENT_JSON_URL,
+    DISPROT_CURRENT_TSV_URL,
+    download_disprot_current_json,
+    download_disprot_current_tsv,
+    load_disprot_json,
+    load_disprot_tsv,
+)
 
 
 ResidueSourceName = Literal[
@@ -73,13 +81,6 @@ class DbptmBenchmarkSpec:
 
 
 DBPTM_BENCHMARK_BASE_URL = "https://biomics.lab.nycu.edu.tw/dbPTM/download/benchmark"
-DISPROT_CURRENT_TSV_URL = (
-    "https://disprot.org/api/v2/download?format=tsv&release=current&term_ontology=IDPO&term_ontology=GO"
-)
-DISPROT_CURRENT_JSON_URL = (
-    "https://disprot.org/api/v2/download?format=json&release=current&term_ontology=IDPO&term_ontology=GO"
-)
-DISPROT_SPLIT_RATIOS: Tuple[Tuple[SplitName, float], ...] = (("train", 0.8), ("val", 0.1), ("test", 0.1))
 BIOLIP_DOWNLOAD_URLS = (
     "https://zhanggroup.org/BioLiP/download/BioLiP_nr.txt.gz",
     "https://zhanggroup.org/BioLiP/data/protein_nr.fasta.gz",
@@ -449,28 +450,6 @@ def download_residue_source(root: str | Path, *, name: str, force: bool = False)
             _download_url(url, path)
         paths.append(path)
     return paths
-
-
-def download_disprot_current_tsv(root: str | Path, *, force: bool = False) -> Path:
-    """Download the current DisProt TSV export with IDPO and GO terms."""
-
-    output_dir = Path(root).expanduser() / "disprot"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    path = output_dir / "disprot_current.tsv"
-    if force or not path.exists():
-        urlretrieve(DISPROT_CURRENT_TSV_URL, path)
-    return path
-
-
-def download_disprot_current_json(root: str | Path, *, force: bool = False) -> Path:
-    """Download the current DisProt JSON export with IDPO and GO terms."""
-
-    output_dir = Path(root).expanduser() / "disprot"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    path = output_dir / "disprot_current.json"
-    if force or not path.exists():
-        urlretrieve(DISPROT_CURRENT_JSON_URL, path)
-    return path
 
 
 def download_dbptm_benchmark(
@@ -872,126 +851,6 @@ def load_residue_label_table(
     return ResidueDataset(examples)
 
 
-def load_disprot_json(
-    path: str | Path,
-    *,
-    target: str = "disorder",
-    split: SplitName | None = None,
-) -> ResidueDataset:
-    """Load DisProt-style JSON entries by expanding regions to residue labels."""
-
-    payload = json.loads(Path(path).read_text(encoding="utf-8"))
-    entries = _disprot_entries(payload)
-    if _has_current_disprot_region_schema(entries):
-        return _load_current_disprot_json_entries(entries, target=target, split=split)
-
-    examples: List[ResidueExample] = []
-    for index, entry in enumerate(entries):
-        entry_map = cast(Mapping[str, Any], entry)
-        sequence = _entry_sequence(entry_map)
-        labels = [0] * len(sequence)
-        for region in _entry_regions(entry_map):
-            start, end = _region_bounds(cast(Mapping[str, Any], region))
-            _mark_interval(labels, start=start, end=end, one_based=True)
-        record_id = str(entry_map.get("acc") or entry_map.get("disprot_id") or entry_map.get("id") or index)
-        examples.append(
-            ResidueExample(
-                id=record_id,
-                sequence=sequence,
-                labels={target: labels},
-                split=split or "train",
-                metadata={"source": "disprot"},
-            )
-        )
-    return ResidueDataset(examples)
-
-
-def load_disprot_tsv(
-    path: str | Path,
-    *,
-    target: str = "disorder",
-    split: SplitName = "train",
-    protein_sequences: Mapping[str, str] | None = None,
-    region_mode: bool = False,
-    term_ids: Sequence[str] = ("IDPO:0000002",),
-    term_names: Sequence[str] = ("disorder",),
-) -> ResidueDataset:
-    """Load the DisProt TSV export.
-
-    The current TSV export contains region sequences and coordinates but not
-    full protein sequences. Pass ``protein_sequences`` to expand intervals
-    over full proteins, or set ``region_mode=True`` to create one positive
-    region-window example per matching TSV row.
-    """
-
-    rows = _matching_disprot_tsv_rows(path, term_ids=term_ids, term_names=term_names)
-    if region_mode:
-        examples: List[ResidueExample] = []
-        for row_index, row in enumerate(rows):
-            sequence = str(row.get("Region sequence", "")).strip()
-            if not sequence:
-                raise EmbeddingInputError("DisProt TSV region-mode rows require 'Region sequence'.")
-            record_id = str(row.get("Region ID") or row.get("DisProt ID") or row_index)
-            examples.append(
-                ResidueExample(
-                    id=record_id,
-                    sequence=sequence,
-                    labels={target: [1] * len(sequence)},
-                    split=split,
-                    metadata={
-                        "source": "disprot",
-                        "uniprot_acc": row.get("UniProt ACC", ""),
-                        "disprot_id": row.get("DisProt ID", ""),
-                        "start": row.get("Start", ""),
-                        "end": row.get("End", ""),
-                        "term_id": row.get("Term ID", ""),
-                        "term_name": row.get("Term name", ""),
-                    },
-                )
-            )
-        return ResidueDataset(examples)
-
-    if protein_sequences is None:
-        raise EmbeddingInputError(
-            "DisProt TSV does not include full protein sequences. Pass protein_sequences or set region_mode=True."
-        )
-
-    grouped: Dict[str, Dict[str, Any]] = {}
-    for row in rows:
-        acc = str(row.get("UniProt ACC", "")).strip()
-        disprot_id = str(row.get("DisProt ID", "")).strip()
-        record_id = acc or disprot_id
-        sequence = protein_sequences.get(acc) or protein_sequences.get(disprot_id)
-        if not record_id or sequence is None:
-            raise EmbeddingInputError(
-                f"Missing protein sequence for DisProt TSV row with UniProt ACC {acc!r} / DisProt ID {disprot_id!r}."
-            )
-        entry = grouped.setdefault(
-            record_id,
-            {
-                "sequence": sequence,
-                "labels": [0] * len(sequence),
-                "metadata": {"source": "disprot", "uniprot_acc": acc, "disprot_id": disprot_id},
-            },
-        )
-        if entry["sequence"] != sequence:
-            raise EmbeddingInputError(f"Conflicting sequences for DisProt record {record_id!r}.")
-        start = int(str(row.get("Start", "")).strip())
-        end = int(str(row.get("End", start)).strip())
-        _mark_interval(cast(List[int], entry["labels"]), start=start, end=end, one_based=True)
-
-    return ResidueDataset(
-        ResidueExample(
-            id=record_id,
-            sequence=str(entry["sequence"]),
-            labels={target: cast(List[int], entry["labels"])},
-            split=split,
-            metadata=cast(Dict[str, Any], entry["metadata"]),
-        )
-        for record_id, entry in grouped.items()
-    )
-
-
 def load_biolip_dataset(
     annotation_path: str | Path,
     *,
@@ -1151,159 +1010,7 @@ def _coerce_label(value: object) -> Any:
         return text
 
 
-def _disprot_entries(payload: object) -> Sequence[object]:
-    if isinstance(payload, list):
-        return cast(List[object], payload)
-    if isinstance(payload, dict):
-        payload_map = cast(Mapping[str, object], payload)
-        for key in ("data", "entries", "results"):
-            value = payload_map.get(key)
-            if isinstance(value, list):
-                return cast(List[object], value)
-    raise EmbeddingInputError("DisProt JSON must be a list or contain data/entries/results list.")
-
-
-def _has_current_disprot_region_schema(entries: Sequence[object]) -> bool:
-    for entry in entries:
-        if not isinstance(entry, Mapping):
-            continue
-        raw_regions = cast(Mapping[str, object], entry).get("regions")
-        if isinstance(raw_regions, Mapping) and (
-            "term_namespace" in raw_regions or "term_name" in raw_regions or "term_id" in raw_regions
-        ):
-            return True
-    return False
-
-
-def _load_current_disprot_json_entries(
-    entries: Sequence[object],
-    *,
-    target: str,
-    split: SplitName | None,
-) -> ResidueDataset:
-    grouped: Dict[str, Dict[str, Any]] = {}
-    for entry in entries:
-        if not isinstance(entry, Mapping):
-            continue
-        entry_map = cast(Mapping[str, Any], entry)
-        raw_region = entry_map.get("regions")
-        if not isinstance(raw_region, Mapping):
-            continue
-        region = cast(Mapping[str, Any], raw_region)
-        if not _is_disprot_disorder_region(region):
-            continue
-
-        sequence = _entry_sequence(entry_map)
-        record_id = str(entry_map.get("acc") or entry_map.get("disprot_id") or entry_map.get("id") or "").strip()
-        if not record_id:
-            raise EmbeddingInputError("Current DisProt JSON disorder rows require acc, disprot_id, or id.")
-        disprot_id = str(entry_map.get("disprot_id") or "").strip()
-        dataset_tags = tuple(str(tag) for tag in entry_map.get("dataset", ()) if str(tag).strip())
-        group = grouped.setdefault(
-            record_id,
-            {
-                "sequence": sequence,
-                "labels": [0] * len(sequence),
-                "metadata": {
-                    "source": "disprot",
-                    "uniprot_acc": str(entry_map.get("acc") or ""),
-                    "disprot_id": disprot_id,
-                    "dataset_tags": dataset_tags,
-                    "disorder_interval_count": 0,
-                },
-            },
-        )
-        if group["sequence"] != sequence:
-            raise EmbeddingInputError(f"Conflicting sequences for DisProt record {record_id!r}.")
-        metadata = cast(Dict[str, Any], group["metadata"])
-        metadata["dataset_tags"] = tuple(sorted(set(cast(Tuple[str, ...], metadata["dataset_tags"]) + dataset_tags)))
-        if disprot_id and not metadata.get("disprot_id"):
-            metadata["disprot_id"] = disprot_id
-
-        start, end = _region_bounds(region)
-        _mark_interval(cast(List[int], group["labels"]), start=start, end=end, one_based=True)
-        metadata["disorder_interval_count"] = int(metadata["disorder_interval_count"]) + 1
-
-    if not grouped:
-        raise EmbeddingInputError("No Structural state disorder rows found in DisProt JSON.")
-
-    examples: List[ResidueExample] = []
-    for record_id, group in grouped.items():
-        labels = cast(List[int], group["labels"])
-        sequence = str(group["sequence"])
-        metadata = dict(cast(Dict[str, Any], group["metadata"]))
-        metadata["disorder_fraction"] = sum(labels) / len(labels)
-        metadata["disorder_content_bin"] = _disprot_disorder_content_bin(float(metadata["disorder_fraction"]))
-        metadata["dataset_stratum"] = _disprot_dataset_stratum(cast(Sequence[str], metadata["dataset_tags"]))
-        examples.append(
-            ResidueExample(
-                id=record_id,
-                sequence=sequence,
-                labels={target: labels},
-                split=split or "train",
-                metadata=metadata,
-            )
-        )
-
-    if split is None:
-        examples = _assign_disprot_stratified_splits(examples)
-    return ResidueDataset(examples)
-
-
-def _is_disprot_disorder_region(region: Mapping[str, Any]) -> bool:
-    namespace = str(region.get("term_namespace") or "").strip().lower()
-    term_name = str(region.get("term_name") or "").strip().lower()
-    return namespace == "structural state" and term_name == "disorder"
-
-
-def _assign_disprot_stratified_splits(examples: Sequence[ResidueExample]) -> List[ResidueExample]:
-    primary_groups: Dict[Tuple[str, str], List[ResidueExample]] = {}
-    for example in examples:
-        metadata = example.metadata or {}
-        key = (
-            str(metadata.get("dataset_stratum") or "none"),
-            str(metadata.get("disorder_content_bin") or "unknown"),
-        )
-        primary_groups.setdefault(key, []).append(example)
-
-    assigned: List[ResidueExample] = []
-    rare_by_content: Dict[str, List[ResidueExample]] = {}
-    for key, group in primary_groups.items():
-        if len(group) >= 10:
-            assigned.extend(_split_disprot_group(group))
-        else:
-            rare_by_content.setdefault(key[1], []).extend(group)
-
-    rare_global: List[ResidueExample] = []
-    for group in rare_by_content.values():
-        if len(group) >= 10:
-            assigned.extend(_split_disprot_group(group))
-        else:
-            rare_global.extend(group)
-    if rare_global:
-        assigned.extend(_split_disprot_group(rare_global))
-
-    return sorted(assigned, key=lambda example: example.id)
-
-
-def _split_disprot_group(group: Sequence[ResidueExample]) -> List[ResidueExample]:
-    ordered = sorted(group, key=lambda example: _stable_disprot_hash(example.id))
-    counts = _disprot_split_counts(len(ordered))
-    split_names: List[SplitName] = [split_name for split_name, count in counts for _ in range(count)]
-    return [
-        ResidueExample(
-            id=example.id,
-            sequence=example.sequence,
-            labels=example.labels,
-            split=split_name,
-            mask=example.mask,
-            metadata=example.metadata,
-        )
-        for example, split_name in zip(ordered, split_names)
-    ]
-
-
-def _disprot_split_counts(total: int) -> List[Tuple[SplitName, int]]:
+def _deterministic_split_counts(total: int) -> List[Tuple[SplitName, int]]:
     if total <= 0:
         return [("train", 0), ("val", 0), ("test", 0)]
     val = int(round(total * 0.1))
@@ -1323,28 +1030,9 @@ def _disprot_split_counts(total: int) -> List[Tuple[SplitName, int]]:
     return [("train", train), ("val", val), ("test", test)]
 
 
-def _stable_disprot_hash(value: str) -> str:
-    return hashlib.sha256(f"disprot-split-v1:{value}".encode("utf-8")).hexdigest()
-
-
-def _disprot_disorder_content_bin(fraction: float) -> str:
-    if fraction < 0.1:
-        return "0-10%"
-    if fraction < 0.3:
-        return "10-30%"
-    if fraction < 0.6:
-        return "30-60%"
-    return "60-100%"
-
-
-def _disprot_dataset_stratum(dataset_tags: Sequence[str]) -> str:
-    values = sorted({str(tag).strip() for tag in dataset_tags if str(tag).strip()})
-    return "+".join(values) if values else "none"
-
-
 def _split_biolip_examples(examples: Sequence[ResidueExample]) -> List[ResidueExample]:
     ordered = sorted(examples, key=lambda example: _stable_biolip_hash(example.id))
-    counts = _disprot_split_counts(len(ordered))
+    counts = _deterministic_split_counts(len(ordered))
     split_names: List[SplitName] = [split_name for split_name, count in counts for _ in range(count)]
     return [
         ResidueExample(
@@ -1472,7 +1160,7 @@ def _split_phosphoelm_examples(examples: Sequence[ResidueExample]) -> List[Resid
 
 def _split_phosphoelm_group(group: Sequence[ResidueExample]) -> List[ResidueExample]:
     ordered = sorted(group, key=lambda example: _stable_phosphoelm_hash(example.id))
-    counts = _disprot_split_counts(len(ordered))
+    counts = _deterministic_split_counts(len(ordered))
     split_names: List[SplitName] = [split_name for split_name, count in counts for _ in range(count)]
     return [
         ResidueExample(
@@ -1550,64 +1238,6 @@ def _biolip_ligand_matches(value: str, ligand_class: BioLipLigandClass) -> bool:
     if ligand_class == "other":
         return ligand not in {"dna", "rna", "peptide"}
     return ligand == ligand_class
-
-
-def _entry_sequence(entry: Mapping[str, Any]) -> str:
-    sequence = entry.get("sequence")
-    if isinstance(sequence, str):
-        return sequence
-    if isinstance(sequence, Mapping):
-        sequence_map = cast(Mapping[str, object], sequence)
-        for key in ("sequence", "value"):
-            value = sequence_map.get(key)
-            if isinstance(value, str):
-                return value
-    raise EmbeddingInputError("DisProt entry is missing a sequence string.")
-
-
-def _entry_regions(entry: Mapping[str, Any]) -> Sequence[object]:
-    raw_regions = entry.get("regions")
-    if raw_regions is None:
-        raw_regions = entry.get("annotations")
-    regions: object = raw_regions if raw_regions is not None else []
-    if not isinstance(regions, list):
-        raise EmbeddingInputError("DisProt entry regions must be a list.")
-    return cast(List[object], regions)
-
-
-def _matching_disprot_tsv_rows(
-    path: str | Path,
-    *,
-    term_ids: Sequence[str],
-    term_names: Sequence[str],
-) -> List[Mapping[str, str]]:
-    wanted_ids = {term_id.strip().lower() for term_id in term_ids}
-    wanted_names = {term_name.strip().lower() for term_name in term_names}
-    rows: List[Mapping[str, str]] = []
-    with Path(path).open("r", encoding="utf-8", newline="") as handle:
-        reader = csv.DictReader(handle, delimiter="\t")
-        if reader.fieldnames is None:
-            raise EmbeddingInputError(f"DisProt TSV {path} does not contain a header row.")
-        required = {"UniProt ACC", "DisProt ID", "Start", "End", "Region sequence", "Term ID", "Term name"}
-        missing = sorted(required - set(reader.fieldnames))
-        if missing:
-            raise EmbeddingInputError(f"DisProt TSV is missing required columns: {', '.join(missing)}.")
-        for row in reader:
-            term_id = str(row.get("Term ID", "")).strip().lower()
-            term_name = str(row.get("Term name", "")).strip().lower()
-            if term_id in wanted_ids or term_name in wanted_names:
-                rows.append(row)
-    if not rows:
-        raise EmbeddingInputError("No matching DisProt TSV rows found for the requested term filters.")
-    return rows
-
-
-def _region_bounds(region: Mapping[str, Any]) -> Tuple[int, int]:
-    start = region.get("start") or region.get("start_position") or region.get("begin")
-    end = region.get("end") or region.get("end_position") or region.get("stop") or start
-    if start is None or end is None:
-        raise EmbeddingInputError("DisProt region is missing start/end coordinates.")
-    return int(start), int(end)
 
 
 def _biolip_positions(value: str) -> List[int]:

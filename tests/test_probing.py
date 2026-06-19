@@ -906,7 +906,7 @@ def test_download_disprot_current_tsv_uses_current_release_url(monkeypatch: pyte
         filename.write_text("UniProt ACC\tDisProt ID\n", encoding="utf-8")
         return filename, None
 
-    monkeypatch.setattr(residue_sources_module, "urlretrieve", fake_urlretrieve)
+    monkeypatch.setattr("urllib.request.urlretrieve", fake_urlretrieve)
 
     path = download_disprot_current_tsv(tmp_path)
 
@@ -924,7 +924,7 @@ def test_download_disprot_current_json_uses_current_release_url(monkeypatch: pyt
         filename.write_text('{"data": []}', encoding="utf-8")
         return filename, None
 
-    monkeypatch.setattr(residue_sources_module, "urlretrieve", fake_urlretrieve)
+    monkeypatch.setattr("urllib.request.urlretrieve", fake_urlretrieve)
 
     path = download_disprot_current_json(tmp_path)
 
