@@ -8,7 +8,6 @@
   ],
   "include": [
     "CBBIO",
-    "examples",
     "tests"
   ],
   "exclude": [
