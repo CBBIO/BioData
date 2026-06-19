@@ -18,6 +18,7 @@ from urllib.request import Request, urlopen, urlretrieve
 
 from CBBIO.embeddings import EmbeddingInputError
 
+from .biolip import BIOLIP_DOWNLOAD_URLS, BioLipLigandClass, load_biolip_dataset
 from .datasets import ObjectiveName, ResidueDataset, ResidueExample, SplitName
 from .disprot import (
     DISPROT_CURRENT_JSON_URL,
@@ -47,7 +48,6 @@ ResidueSourceName = Literal[
     "phosphoelm_htp",
 ]
 
-BioLipLigandClass = Literal["all", "dna", "rna", "pep", "other"]
 PhosphoElmSourceFilter = Literal["all", "LTP", "HTP"]
 
 
@@ -81,11 +81,6 @@ class DbptmBenchmarkSpec:
 
 
 DBPTM_BENCHMARK_BASE_URL = "https://biomics.lab.nycu.edu.tw/dbPTM/download/benchmark"
-BIOLIP_DOWNLOAD_URLS = (
-    "https://zhanggroup.org/BioLiP/download/BioLiP_nr.txt.gz",
-    "https://zhanggroup.org/BioLiP/data/protein_nr.fasta.gz",
-)
-
 DBPTM_BENCHMARKS: Dict[str, DbptmBenchmarkSpec] = {
     "phosphorylation_by_cdk": DbptmBenchmarkSpec(
         name="phosphorylation_by_cdk",
@@ -851,53 +846,6 @@ def load_residue_label_table(
     return ResidueDataset(examples)
 
 
-def load_biolip_dataset(
-    annotation_path: str | Path,
-    *,
-    protein_fasta: str | Path | None = None,
-    target: str | None = None,
-    split: SplitName | None = "train",
-    ligand_class: BioLipLigandClass = "all",
-) -> ResidueDataset:
-    """Load BioLiP annotation rows into residue-level ligand-binding labels."""
-
-    resolved_ligand_class = _normalize_biolip_ligand_class(ligand_class)
-    resolved_target = target or _biolip_target_for_ligand_class(resolved_ligand_class)
-    fasta_sequences = dict(_iter_fasta(protein_fasta)) if protein_fasta is not None and Path(protein_fasta).exists() else {}
-    grouped: Dict[str, Dict[str, Any]] = {}
-    opener = gzip.open if str(annotation_path).endswith(".gz") else open
-    with opener(annotation_path, "rt", encoding="utf-8") as handle:
-        for line_index, raw_line in enumerate(handle):
-            line = raw_line.strip()
-            if not line or line.startswith("#"):
-                continue
-            columns = line.split("\t") if "\t" in line else line.split()
-            if len(columns) < 21:
-                raise EmbeddingInputError(f"BioLiP row {line_index} has {len(columns)} columns; expected at least 21.")
-            if not _biolip_ligand_matches(columns[4], resolved_ligand_class):
-                continue
-            record_id = f"{columns[0]}{columns[1]}"
-            sequence = fasta_sequences.get(record_id, columns[20])
-            entry = grouped.setdefault(record_id, {"sequence": sequence, "labels": [0] * len(sequence)})
-            if entry["sequence"] != sequence:
-                raise EmbeddingInputError(f"Conflicting BioLiP sequences for receptor {record_id!r}.")
-            for position in _biolip_positions(columns[8]):
-                _mark_interval(cast(List[int], entry["labels"]), start=position, end=position, one_based=True)
-    examples = [
-        ResidueExample(
-            id=record_id,
-            sequence=str(entry["sequence"]),
-            labels={resolved_target: cast(List[int], entry["labels"])},
-            split=split or "train",
-            metadata={"source": "biolip", "ligand_class": resolved_ligand_class},
-        )
-        for record_id, entry in grouped.items()
-    ]
-    if split is None:
-        examples = _split_biolip_examples(examples)
-    return ResidueDataset(examples)
-
-
 def _iter_fasta(path: str | Path | None) -> Iterable[Tuple[str, str]]:
     if path is None:
         return []
@@ -1028,27 +976,6 @@ def _deterministic_split_counts(total: int) -> List[Tuple[SplitName, int]]:
         test -= 1
         train += 1
     return [("train", train), ("val", val), ("test", test)]
-
-
-def _split_biolip_examples(examples: Sequence[ResidueExample]) -> List[ResidueExample]:
-    ordered = sorted(examples, key=lambda example: _stable_biolip_hash(example.id))
-    counts = _deterministic_split_counts(len(ordered))
-    split_names: List[SplitName] = [split_name for split_name, count in counts for _ in range(count)]
-    return [
-        ResidueExample(
-            id=example.id,
-            sequence=example.sequence,
-            labels=example.labels,
-            split=split_name,
-            mask=example.mask,
-            metadata=example.metadata,
-        )
-        for example, split_name in zip(ordered, split_names)
-    ]
-
-
-def _stable_biolip_hash(value: str) -> str:
-    return hashlib.sha256(f"biolip-split-v1:{value}".encode("utf-8")).hexdigest()
 
 
 def _residue_source_storage_name(name: str) -> str:
@@ -1206,47 +1133,6 @@ def _biolip_ligand_class_for_source(name: str) -> BioLipLigandClass | None:
     if normalized == "biolip_other":
         return "other"
     return None
-
-
-def _normalize_biolip_ligand_class(value: str) -> BioLipLigandClass:
-    normalized = str(value).strip().lower()
-    if normalized in {"all", "dna", "rna", "other"}:
-        return cast(BioLipLigandClass, normalized)
-    if normalized in {"pep", "peptide"}:
-        return "pep"
-    raise EmbeddingInputError("BioLiP ligand_class must be one of: all, dna, rna, pep, other.")
-
-
-def _biolip_target_for_ligand_class(ligand_class: BioLipLigandClass) -> str:
-    if ligand_class == "dna":
-        return "dna_binding_site"
-    if ligand_class == "rna":
-        return "rna_binding_site"
-    if ligand_class == "pep":
-        return "peptide_binding_site"
-    if ligand_class == "other":
-        return "other_ligand_binding_site"
-    return "ligand_binding_site"
-
-
-def _biolip_ligand_matches(value: str, ligand_class: BioLipLigandClass) -> bool:
-    ligand = str(value).strip().lower()
-    if ligand_class == "all":
-        return True
-    if ligand_class == "pep":
-        return ligand == "peptide"
-    if ligand_class == "other":
-        return ligand not in {"dna", "rna", "peptide"}
-    return ligand == ligand_class
-
-
-def _biolip_positions(value: str) -> List[int]:
-    positions: List[int] = []
-    for token in value.replace(";", " ").split():
-        match = re.search(r"(-?\d+)$", token)
-        if match is not None:
-            positions.append(int(match.group(1)))
-    return positions
 
 
 def _download_filename(url: str) -> str:
