@@ -10,7 +10,7 @@ from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Sequence, Tuple, TypeAlias, cast
+from typing import Any, Dict, List, Literal, Self, Sequence, Tuple, TypeAlias, cast
 import warnings
 
 
@@ -210,6 +210,47 @@ class PostprocessorAdapter(ABC):
 
 class EmbeddingGenerator:
     """Adapter-orchestrated embedding generator without persistence side effects."""
+
+    @classmethod
+    def from_pretrained(
+        cls,
+        model_name: str,
+        *,
+        device: str = "cpu",
+        **kwargs: Any,
+    ) -> Self:
+        """Load a pretrained model and tokenizer for this generator family."""
+        generator_cls = cast(Any, cls)
+        return cast(Self, generator_cls(model_name=model_name, device=device, **kwargs))
+
+    @classmethod
+    def from_model_and_tokenizer(
+        cls,
+        model: Any,
+        tokenizer: Any,
+        *,
+        model_name: str | None = None,
+        device: str = "cpu",
+        **kwargs: Any,
+    ) -> Self:
+        """Wrap an already-loaded model and tokenizer."""
+        resolved_model_name = model_name or str(getattr(cls, "DEFAULT_MODEL_NAME", "")).strip()
+        if not resolved_model_name:
+            raise EmbeddingInputError(
+                f"{cls.__name__}.from_model_and_tokenizer requires model_name because no "
+                "DEFAULT_MODEL_NAME is defined."
+            )
+        generator_cls = cast(Any, cls)
+        return cast(
+            Self,
+            generator_cls(
+                model_name=resolved_model_name,
+                device=device,
+                model=model,
+                tokenizer=tokenizer,
+                **kwargs,
+            ),
+        )
 
     def __init__(
         self,

@@ -1,14 +1,18 @@
 from __future__ import annotations
 
-import builtins
 import sys
 import types
 from typing import Any
 
 import pytest
 
-from CBBIO.embeddings import EmbeddingDependencyError, GenerationInput
-from CBBIO.embeddings_esm1b import Esm1bEmbeddingGenerator, Esm1bModelAdapter, Esm1bPreprocessor
+from CBBIO import (
+    EmbeddingDependencyError,
+    Esm1bEmbeddingGenerator,
+    Esm1bModelAdapter,
+    Esm1bPreprocessor,
+    GenerationInput,
+)
 
 
 class _FakeTensor:
@@ -29,6 +33,12 @@ class _FakeTensor:
 
     def tolist(self) -> Any:
         return self.data
+
+    def __ne__(self, other: object) -> "_FakeTensor":
+        return _FakeTensor(
+            [[int(value != other) for value in row] for row in self.data],
+            device=self.device,
+        )
 
 
 class _FakeConfig:
@@ -96,25 +106,67 @@ class _FakeTokenizer:
         return {"input_ids": _FakeTensor(input_ids), "attention_mask": _FakeTensor(attention_mask)}
 
 
+class _FakeAlphabet:
+    padding_idx = 1
+
+    def get_batch_converter(self) -> Any:
+        def _convert(records: list[tuple[str, str]]) -> tuple[list[str], list[str], _FakeTensor]:
+            labels = [label for label, _sequence in records]
+            sequences = [sequence for _label, sequence in records]
+            max_length = max(len(sequence) for sequence in sequences) + 2
+            rows = []
+            for sequence in sequences:
+                row = [0] + list(range(5, 5 + len(sequence))) + [2]
+                row.extend([self.padding_idx] * (max_length - len(row)))
+                rows.append(row)
+            return labels, sequences, _FakeTensor(rows)
+
+        return _convert
+
+
+class _FakeTorchHubModel(_FakeHfModel):
+    def __call__(
+        self,
+        tokens: _FakeTensor,
+        *,
+        repr_layers: list[int],
+        return_contacts: bool,
+    ) -> dict[str, dict[int, _FakeTensor]]:
+        assert not return_contacts
+        token_rows = tokens.tolist()
+        sequence_length = len(token_rows[0])
+        return {
+            "representations": {
+                layer: _FakeTensor(
+                    [
+                        [
+                            [float(layer), float(row_index * 100 + position)]
+                            for position in range(sequence_length)
+                        ]
+                        for row_index, _row in enumerate(token_rows)
+                    ]
+                )
+                for layer in repr_layers
+            }
+        }
+
+
 def test_esm1b_preprocessor_normalizes_sequence() -> None:
     pre = Esm1bPreprocessor()
     assert pre.preprocess("acduzob") == "ACDXXXX"
 
 
-def test_esm1b_generator_raises_dependency_error_when_transformers_missing(
+def test_esm1b_generator_raises_dependency_error_when_torch_hub_loading_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    original_import = builtins.__import__
+    def _raise_load_error(*args: Any, **kwargs: Any) -> Any:
+        _ = args, kwargs
+        raise RuntimeError("network unavailable")
 
-    def _raising_import(name: str, globals: Any = None, locals: Any = None, fromlist: Any = (), level: int = 0) -> Any:
-        if name == "transformers" or name.startswith("transformers."):
-            raise ModuleNotFoundError("No module named 'transformers'")
-        return original_import(name, globals, locals, fromlist, level)
+    fake_torch = types.SimpleNamespace(hub=types.SimpleNamespace(load=_raise_load_error))
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
 
-    monkeypatch.setattr(builtins, "__import__", _raising_import)
-    monkeypatch.delitem(sys.modules, "transformers", raising=False)
-
-    with pytest.raises(EmbeddingDependencyError):
+    with pytest.raises(EmbeddingDependencyError, match="torch.hub"):
         Esm1bEmbeddingGenerator()
 
 
@@ -126,6 +178,26 @@ def test_esm1b_generate_returns_per_residue_matrices_without_pooling() -> None:
     assert [record.layer_index for record in result.records] == [33]
     assert result.records[0].shape == (4, 2)
     assert result.records[0].embedding == [[33.0, 1.0], [33.0, 2.0], [33.0, 3.0], [33.0, 4.0]]
+
+
+def test_esm1b_generate_uses_torch_hub_model_contract() -> None:
+    generator = Esm1bEmbeddingGenerator(
+        model=_FakeTorchHubModel(),
+        tokenizer=_FakeAlphabet(),
+    )
+
+    result = generator.generate(
+        [GenerationInput(id="P1", sequence="ACDE")],
+        layer_index=[33],
+        fail_fast=True,
+    )
+
+    assert result.records[0].embedding == [
+        [33.0, 1.0],
+        [33.0, 2.0],
+        [33.0, 3.0],
+        [33.0, 4.0],
+    ]
 
 
 def test_esm1b_generate_slices_variable_length_batches_to_residues() -> None:
@@ -220,35 +292,25 @@ def test_esm1b_available_layers_and_count() -> None:
     assert generator.num_layers() == 34
 
 
-def test_esm1b_generator_loads_hf_model_and_tokenizer_for_alias(
+def test_esm1b_generator_loads_torch_hub_model_for_huggingface_alias(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class _FakeAutoModel:
-        observed_name: str | None = None
+    observed: dict[str, Any] = {}
 
-        @staticmethod
-        def from_pretrained(name: str, **kwargs: Any) -> _FakeHfModel:
-            _ = kwargs
-            _FakeAutoModel.observed_name = name
-            return _FakeHfModel()
+    def _load(repository: str, model_name: str, **kwargs: Any) -> tuple[_FakeHfModel, _FakeTokenizer]:
+        observed.update(repository=repository, model_name=model_name, kwargs=kwargs)
+        return _FakeHfModel(), _FakeTokenizer()
 
-    class _FakeAutoTokenizer:
-        observed_name: str | None = None
+    fake_torch = types.SimpleNamespace(hub=types.SimpleNamespace(load=_load))
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
 
-        @staticmethod
-        def from_pretrained(name: str) -> _FakeTokenizer:
-            _FakeAutoTokenizer.observed_name = name
-            return _FakeTokenizer()
+    generator = Esm1bEmbeddingGenerator(model_name="facebook/esm-1b", device="cpu")
 
-    fake_transformers = types.SimpleNamespace(
-        AutoModel=_FakeAutoModel,
-        AutoTokenizer=_FakeAutoTokenizer,
-    )
-    monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
-
-    generator = Esm1bEmbeddingGenerator(model_name="esm1b_t33_650M_UR50S", device="cpu")
-
-    assert generator.model_metadata.model_name == "esm1b_t33_650M_UR50S"
-    assert generator.model_metadata.model_reference == "facebook/esm-1b"
-    assert _FakeAutoModel.observed_name == "facebook/esm-1b"
-    assert _FakeAutoTokenizer.observed_name == "facebook/esm-1b"
+    assert generator.model_metadata.model_name == "facebook/esm-1b"
+    assert generator.model_metadata.model_reference == "esm1b_t33_650M_UR50S"
+    assert generator.model_metadata.provider == "torch-hub"
+    assert observed == {
+        "repository": "facebookresearch/esm:main",
+        "model_name": "esm1b_t33_650M_UR50S",
+        "kwargs": {},
+    }

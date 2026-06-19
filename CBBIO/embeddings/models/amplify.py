@@ -111,7 +111,8 @@ class AmplifyEmbeddingGenerator(HfEsmEmbeddingGenerator):
     """Concrete embedding generator for AMPLIFY family models."""
 
     GENERATOR_CLASS = "amplify"
-    GENERATOR_ALIASES = ("AMPLIFY", "amplify_120m", "amplify_350m")
+    GENERATOR_ALIASES = ("amplify_120m", "amplify_350m")
+    MODEL_ALIASES = AMPLIFY_HF_MODEL_NAMES
     DEFAULT_MODEL_NAME = "nvidia/AMPLIFY_120M"
     FAMILY_MODELS = [
         "amplify_120m",
@@ -136,7 +137,7 @@ class AmplifyEmbeddingGenerator(HfEsmEmbeddingGenerator):
         tokenizer: Any | None = None,
         from_pretrained_kwargs: Dict[str, Any] | None = None,
     ) -> None:
-        model_reference = resolve_model_name(model_name, AMPLIFY_HF_MODEL_NAMES, family="AMPLIFY")
+        model_reference = resolve_model_name(model_name, self.MODEL_ALIASES, family="AMPLIFY")
         if model is None and _is_nvidia_amplify_model(model_reference):
             _ensure_transformer_engine_pytorch_available(model_reference)
         resolved_dtype = _resolve_amplify_dtype(dtype=dtype, device=device)

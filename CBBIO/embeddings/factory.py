@@ -23,7 +23,7 @@ def Generator(
     """Convenience factory for model-specific embedding generators."""
     resolved_class = model_class or class_ or cast(str | None, kwargs.pop("class", None))
     if resolved_class is None or not str(resolved_class).strip():
-        raise EmbeddingInputError("Generator requires model_class/class_/class (e.g. 'protT5').")
+        raise EmbeddingInputError("Generator requires model_class/class_/class (e.g. 'prott5').")
 
     registry, aliases = _generator_registry()
     canonical = _normalize_model_class(resolved_class, aliases)
@@ -43,8 +43,7 @@ def Generator(
             raise EmbeddingInputError(
                 f"Generator requires a model name for class {canonical!r}; no DEFAULT_MODEL_NAME is defined."
             )
-    generator_factory = cast(Any, generator_cls)
-    return generator_factory(model_name=resolved_name, device=device, **kwargs)
+    return generator_cls.from_pretrained(resolved_name, device=device, **kwargs)
 
 
 def available_generator_classes() -> List[str]:

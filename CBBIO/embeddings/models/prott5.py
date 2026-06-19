@@ -28,6 +28,27 @@ from ..utils.torch import (
     normalize_torch_dtype_name,
     resolve_torch_dtype,
 )
+from ._esm_hf import resolve_model_name
+
+
+_PROTT5_MODEL_ALIASES: Dict[str, str] = {
+    "prott5_xl_uniref50": "Rostlab/prot_t5_xl_uniref50",
+    "prot_t5_xl_uniref50": "Rostlab/prot_t5_xl_uniref50",
+    "prot-t5-xl-uniref50": "Rostlab/prot_t5_xl_uniref50",
+    "prott5_xxl_bfd": "Rostlab/prot_t5_xxl_bfd",
+    "prot_t5_xxl_bfd": "Rostlab/prot_t5_xxl_bfd",
+    "prot-t5-xxl-bfd": "Rostlab/prot_t5_xxl_bfd",
+    "prott5_xl_bfd": "Rostlab/prot_t5_xl_bfd",
+    "prot_t5_xl_bfd": "Rostlab/prot_t5_xl_bfd",
+    "prot-t5-xl-bfd": "Rostlab/prot_t5_xl_bfd",
+    "prott5_xxl_uniref50": "Rostlab/prot_t5_xxl_uniref50",
+    "prot_t5_xxl_uniref50": "Rostlab/prot_t5_xxl_uniref50",
+    "prot-t5-xxl-uniref50": "Rostlab/prot_t5_xxl_uniref50",
+    "prott5_xl_half_uniref50_enc": "Rostlab/prot_t5_xl_half_uniref50-enc",
+    "prot_t5_xl_half_uniref50_enc": "Rostlab/prot_t5_xl_half_uniref50-enc",
+    "prot_t5_xl_half_uniref50-enc": "Rostlab/prot_t5_xl_half_uniref50-enc",
+    "prot-t5-xl-half-uniref50-enc": "Rostlab/prot_t5_xl_half_uniref50-enc",
+}
 
 
 class ProtT5Preprocessor(BasePreprocessor):
@@ -174,10 +195,17 @@ class ProtT5Postprocessor(DefaultPostprocessor):
 class ProtT5EmbeddingGenerator(EmbeddingGenerator):
     """Concrete embedding generator for ProtT5 models."""
 
-    GENERATOR_CLASS = "protT5"
-    GENERATOR_ALIASES = ("prott5", "prot_t5", "prot-t5", "Prot-T5")
+    GENERATOR_CLASS = "prott5"
+    GENERATOR_ALIASES = ("prot_t5", "prot-t5")
+    MODEL_ALIASES = _PROTT5_MODEL_ALIASES
     DEFAULT_MODEL_NAME = "Rostlab/prot_t5_xl_uniref50"
-    FAMILY_MODELS = [DEFAULT_MODEL_NAME]
+    FAMILY_MODELS = [
+        DEFAULT_MODEL_NAME,
+        "Rostlab/prot_t5_xxl_bfd",
+        "Rostlab/prot_t5_xl_bfd",
+        "Rostlab/prot_t5_xxl_uniref50",
+        "Rostlab/prot_t5_xl_half_uniref50-enc",
+    ]
     SUPPORTED_POOLERS = ("none", "mean")
 
     def __init__(
@@ -189,6 +217,11 @@ class ProtT5EmbeddingGenerator(EmbeddingGenerator):
         tokenizer: Any | None = None,
         model: Any | None = None,
     ) -> None:
+        model_reference = resolve_model_name(
+            model_name,
+            self.MODEL_ALIASES,
+            family="ProtT5",
+        )
         resolved_tokenizer: Any | None = tokenizer
         resolved_model: Any | None = model
         resolved_dtype_name = normalize_torch_dtype_name(dtype)
@@ -204,18 +237,24 @@ class ProtT5EmbeddingGenerator(EmbeddingGenerator):
 
             if resolved_tokenizer is None:
                 tokenizer_cls = cast(Any, T5Tokenizer)
-                resolved_tokenizer = tokenizer_cls.from_pretrained(model_name, do_lower_case=False)
+                resolved_tokenizer = tokenizer_cls.from_pretrained(
+                    model_reference,
+                    do_lower_case=False,
+                )
             if resolved_model is None:
-                config = cast(Any, AutoConfig).from_pretrained(model_name)
+                config = cast(Any, AutoConfig).from_pretrained(model_reference)
                 # Silence tied-weights warning for ProtT5 checkpoints with both shared and encoder embeds present.
                 setattr(config, "tie_word_embeddings", False)
                 model_kwargs: Dict[str, Any] = {"config": config}
                 if resolved_torch_dtype is not None:
                     model_kwargs["torch_dtype"] = resolved_torch_dtype
-                resolved_model = cast(Any, T5EncoderModel).from_pretrained(model_name, **model_kwargs)
+                resolved_model = cast(Any, T5EncoderModel).from_pretrained(
+                    model_reference,
+                    **model_kwargs,
+                )
 
         super().__init__(
-            model_reference=model_name,
+            model_reference=model_reference,
             preprocessor=ProtT5Preprocessor(),
             tokenizer=ProtT5TokenizerAdapter(resolved_tokenizer, device=device),
             model=ProtT5ModelAdapter(
@@ -237,7 +276,7 @@ class ProtT5EmbeddingGenerator(EmbeddingGenerator):
         self.model_metadata = ModelMetadata(
             provider="huggingface-transformers",
             model_name=model_name,
-            model_reference=model_name,
+            model_reference=model_reference,
             model_revision=extract_revision(resolved_model),
             tokenizer_name=extract_name_or_path(resolved_tokenizer),
             tokenizer_revision=extract_revision(resolved_tokenizer),
@@ -274,22 +313,6 @@ class ProtT5EmbeddingGenerator(EmbeddingGenerator):
             requested_layers=normalize_requested_layers(requested_layers),
             run_parameters={"model_reference": self.model_reference},
         )
-
-    def _generate(
-        self,
-        records: Sequence[GenerationInput],
-        *,
-        layer_index: int | Sequence[int] | None,
-        fail_fast: bool,
-        pooler: PoolerInput,
-    ) -> GenerationResult:
-        return self.generate(
-            records,
-            layer_index=layer_index,
-            pooler=pooler,
-            fail_fast=fail_fast,
-        )
-
 
 def _resolve_layer_indices(
     layer_index: int | Sequence[int] | None,

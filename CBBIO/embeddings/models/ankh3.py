@@ -28,6 +28,19 @@ from ..utils.torch import (
     normalize_torch_dtype_name,
     resolve_torch_dtype,
 )
+from ._esm_hf import resolve_model_name
+
+
+ANKH3_MODEL_NAMES: Dict[str, str] = {
+    "ankh large": "ElnaggarLab/ankh-large",
+    "ankh base": "ElnaggarLab/ankh-base",
+    "ankh3 large": "ElnaggarLab/ankh3-large",
+    "ankh3-large": "ElnaggarLab/ankh3-large",
+    "ankh3_large": "ElnaggarLab/ankh3-large",
+    "ankh3 xl": "ElnaggarLab/ankh3-xl",
+    "ankh3-xl": "ElnaggarLab/ankh3-xl",
+    "ankh3_xl": "ElnaggarLab/ankh3-xl",
+}
 
 
 class Ankh3Preprocessor(BasePreprocessor):
@@ -142,7 +155,8 @@ class Ankh3EmbeddingGenerator(EmbeddingGenerator):
     """Concrete embedding generator for ANKH3 models."""
 
     GENERATOR_CLASS = "ankh3"
-    GENERATOR_ALIASES = ("Ankh3-Large", "ankh3_large")
+    GENERATOR_ALIASES = ("ankh", "ankh3-large", "ankh3_large")
+    MODEL_ALIASES = ANKH3_MODEL_NAMES
     DEFAULT_MODEL_NAME = "ElnaggarLab/ankh3-large"
     # Published model family members from ANKH/ANKH3 plus the HF checkpoint used by default.
     FAMILY_MODELS = [
@@ -165,6 +179,7 @@ class Ankh3EmbeddingGenerator(EmbeddingGenerator):
         tokenizer: Any | None = None,
         model: Any | None = None,
     ) -> None:
+        model_reference = resolve_model_name(model_name, self.MODEL_ALIASES, family="ANKH3")
         resolved_tokenizer: Any | None = tokenizer
         resolved_model: Any | None = model
         resolved_dtype_name = normalize_torch_dtype_name(dtype)
@@ -179,14 +194,20 @@ class Ankh3EmbeddingGenerator(EmbeddingGenerator):
                 ) from exc
 
             if resolved_tokenizer is None:
-                resolved_tokenizer = cast(Any, T5Tokenizer).from_pretrained(model_name, do_lower_case=False)
+                resolved_tokenizer = cast(Any, T5Tokenizer).from_pretrained(
+                    model_reference,
+                    do_lower_case=False,
+                )
             if resolved_model is None:
-                config = cast(Any, AutoConfig).from_pretrained(model_name)
+                config = cast(Any, AutoConfig).from_pretrained(model_reference)
                 setattr(config, "tie_word_embeddings", False)
                 model_kwargs: Dict[str, Any] = {"config": config}
                 if resolved_torch_dtype is not None:
                     model_kwargs["torch_dtype"] = resolved_torch_dtype
-                resolved_model = cast(Any, T5EncoderModel).from_pretrained(model_name, **model_kwargs)
+                resolved_model = cast(Any, T5EncoderModel).from_pretrained(
+                    model_reference,
+                    **model_kwargs,
+                )
 
         parameters: Dict[str, Any] = {
             "mode": "protein_to_embedding_only",
@@ -199,7 +220,7 @@ class Ankh3EmbeddingGenerator(EmbeddingGenerator):
             parameters["torch_dtype"] = resolved_dtype_name
 
         super().__init__(
-            model_reference=model_name,
+            model_reference=model_reference,
             preprocessor=Ankh3Preprocessor(prefix=prefix),
             tokenizer=Ankh3TokenizerAdapter(resolved_tokenizer, device=device),
             model=Ankh3ModelAdapter(
@@ -213,7 +234,7 @@ class Ankh3EmbeddingGenerator(EmbeddingGenerator):
         self.model_metadata = ModelMetadata(
             provider="huggingface-transformers",
             model_name=model_name,
-            model_reference=model_name,
+            model_reference=model_reference,
             model_revision=extract_revision(resolved_model),
             tokenizer_name=extract_name_or_path(resolved_tokenizer),
             tokenizer_revision=extract_revision(resolved_tokenizer),
@@ -299,6 +320,7 @@ def _protein_token_spans_from_mask(attention_mask: Any) -> List[tuple[int, int]]
     return spans
 
 __all__ = [
+    "ANKH3_MODEL_NAMES",
     "Ankh3Preprocessor",
     "Ankh3TokenizerAdapter",
     "Ankh3ModelAdapter",

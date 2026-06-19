@@ -64,7 +64,7 @@ from CBBIO import (
     run_embedding_generation,
 )
 
-generator = Generator(model_class="protT5", device="cuda:0", dtype="float16")
+generator = Generator(model_class="prott5", device="cuda:0", dtype="float16")
 batcher = FastaBatcher(
     "proteins.fasta",
     batch_size=None,
@@ -125,7 +125,7 @@ records = [
     GenerationInput(id="P2", sequence="GAGGVGKSAL"),
 ]
 
-generator = Generator(model_class="protT5", device="cuda:0", dtype="float16")
+generator = Generator(model_class="prott5", device="cuda:0", dtype="float16")
 batcher = IterableBatcher(records, batch_size=16)
 writer = EmbeddingWriter(format="memory")
 
@@ -281,7 +281,7 @@ If more than one record matches `reader.read(...)`, it raises `EmbeddingInputErr
 Factory for model-specific generators:
 
 ```python
-Generator(model_class="protT5", device="cuda:0", dtype="float16")
+Generator(model_class="prott5", device="cuda:0", dtype="float16")
 Generator(model_class="esm2", name="esm2_t6_8M_UR50D", device="cuda:0")
 Generator(model_class="ankh3", name="ElnaggarLab/ankh3-large", prefix="[S2S]")
 Generator(model_class="amplify", name="nvidia/AMPLIFY_120M", device="cuda:0")
@@ -403,13 +403,13 @@ FASTA helpers also remain:
 
 | `model_class` | Default checkpoint | Layers | Poolers | Notes |
 |---|---|---|---|---|
-| `protT5` | `Rostlab/prot_t5_xl_uniref50` | 24 | `none`, `mean` | Whitespace-separated input; U/Z/O/B → X |
-| `prostT5` | `Rostlab/ProstT5` | 24 | `none`, `mean` | Structure-aware ProtT5 variant |
+| `prott5` | `Rostlab/prot_t5_xl_uniref50` | 24 | `none`, `mean` | Whitespace-separated input; U/Z/O/B → X |
+| `prostt5` | `Rostlab/ProstT5` | 24 | `none`, `mean` | Structure-aware ProtT5 variant |
 | `ankh3` | `ElnaggarLab/ankh3-large` | varies | `none`, `mean` | T5EncoderModel backbone |
 | `amplify` | `nvidia/AMPLIFY_120M` | varies | `none`, `mean`, `cls` | Max 2048 residues; bfloat16 on CUDA |
 | `proteinglm` | `biomap-research/proteinglm-1b-mlm` | varies | `none`, `mean` | 1B / 3B / 10B variants |
 | `esm2` | `facebook/esm2_t33_650M_UR50D` | 6–48 (by size) | `none`, `mean`, `cls` | ESM2 family: 8M to 15B |
-| `esm1b` | `facebook/esm-1b` | 33 | `none`, `mean`, `cls` | Load via torch.hub (HF weights have pre/post-norm mismatch) |
+| `esm1b` | `esm1b_t33_650M_UR50S` | 33 | `none`, `mean`, `cls` | Loads via torch.hub; `facebook/esm-1b` is an alias |
 | `esmc` | `esmc_600m` | varies | `none`, `mean`, `cls` | ESM-C SDK; use `batch_size=1` if SDK rejects batched input |
 
 ### ESM-2 model sizes
@@ -423,9 +423,19 @@ FASTA helpers also remain:
 | `facebook/esm2_t36_3B_UR50D` | 36 | 3 B |
 | `facebook/esm2_t48_15B_UR50D` | 48 | 15 B |
 
+### ProtT5 checkpoints
+
+| Model name | Aliases |
+|---|---|
+| `Rostlab/prot_t5_xl_uniref50` | `prott5_xl_uniref50`, `prot_t5_xl_uniref50`, `prot-t5-xl-uniref50` |
+| `Rostlab/prot_t5_xxl_bfd` | `prott5_xxl_bfd`, `prot_t5_xxl_bfd`, `prot-t5-xxl-bfd` |
+| `Rostlab/prot_t5_xl_bfd` | `prott5_xl_bfd`, `prot_t5_xl_bfd`, `prot-t5-xl-bfd` |
+| `Rostlab/prot_t5_xxl_uniref50` | `prott5_xxl_uniref50`, `prot_t5_xxl_uniref50`, `prot-t5-xxl-uniref50` |
+| `Rostlab/prot_t5_xl_half_uniref50-enc` | `prott5_xl_half_uniref50_enc`, `prot_t5_xl_half_uniref50_enc`, `prot-t5-xl-half-uniref50-enc` |
+
 ### Model-specific notes
 
-- **protT5 / prostT5**: Input sequences are whitespace-joined (`M K V L ...`); non-standard amino acids U, Z, O, B are replaced with X automatically.
+- **prott5 / prostt5**: Input sequences are whitespace-joined (`M K V L ...`); non-standard amino acids U, Z, O, B are replaced with X automatically.
 - **AMPLIFY**: On CUDA, defaults to `bfloat16` because its xFormers attention kernels do not support `float32`. Pass `dtype="float16"` explicitly if preferred. Short aliases `amplify_120m` and `amplify_350m` use NVIDIA TransformerEngine-optimized checkpoints (requires `transformer_engine.pytorch`). For CUDA 13: `pip install --no-build-isolation 'transformer-engine[pytorch,core-cu13]==2.16.0'`. For the upstream Chandar Lab checkpoints use `amplify_120m_chandar` / `amplify_350m_chandar`.
 - **ProteinGLM**: Short aliases `proteinglm_1b_mlm`, `proteinglm_3b_mlm`, `proteinglm_10b_mlm` resolve to Biomap checkpoints. Trailing EOS token is trimmed automatically.
 - **ESM-1b**: The HuggingFace checkpoint (`facebook/esm-1b`) was trained with post-norm but the HF model code uses pre-norm, which degrades accuracy. The generator loads via `torch.hub` by default to avoid this mismatch.

@@ -30,9 +30,14 @@ from CBBIO.embeddings import (
     RunMetadata,
 )
 from CBBIO import (
+    AmplifyEmbeddingGenerator,
+    Ankh3EmbeddingGenerator,
     available_generator_classes,
     available_generator_models,
     EmbeddingWriter,
+    Esm1bEmbeddingGenerator,
+    Esm2EmbeddingGenerator,
+    EsmcEmbeddingGenerator,
     FastaBatcher,
     Generator,
     H5EmbeddingReader,
@@ -45,6 +50,10 @@ from CBBIO import (
     load_embedding_records_npy,
     load_embedding_records_pickle,
     mean_pool_embedding_record,
+    ProteinGlmEmbeddingGenerator,
+    ProstT5EmbeddingGenerator,
+    ProtT5EmbeddingGenerator,
+    ProtT5Preprocessor,
     save_embedding_records_h5,
     save_embedding_records_npy,
     save_embedding_records_npy_shards,
@@ -53,13 +62,24 @@ from CBBIO import (
     pooler_factory,
     run_embedding_generation,
 )
-from CBBIO.embeddings_prott5 import ProtT5EmbeddingGenerator, ProtT5Preprocessor
-from CBBIO.embeddings_prostt5 import ProstT5EmbeddingGenerator
-from CBBIO.embeddings_ankh3 import Ankh3EmbeddingGenerator
-from CBBIO.embeddings_proteinglm import ProteinGlmEmbeddingGenerator
-from CBBIO.embeddings_esmc import EsmcEmbeddingGenerator
-from CBBIO.embeddings_esm2 import Esm2EmbeddingGenerator
-from CBBIO.embeddings_esm1b import Esm1bEmbeddingGenerator
+
+
+_MODEL_GENERATOR_TYPES: tuple[type[Any], ...] = (
+    ProtT5EmbeddingGenerator,
+    ProstT5EmbeddingGenerator,
+    Ankh3EmbeddingGenerator,
+    AmplifyEmbeddingGenerator,
+    ProteinGlmEmbeddingGenerator,
+    EsmcEmbeddingGenerator,
+    Esm2EmbeddingGenerator,
+    Esm1bEmbeddingGenerator,
+)
+
+_MODEL_ALIAS_CASES = [
+    (generator_type, alias, model_reference)
+    for generator_type in _MODEL_GENERATOR_TYPES
+    for alias, model_reference in generator_type.MODEL_ALIASES.items()
+]
 
 
 class _Preprocessor(PreprocessorAdapter):
@@ -255,7 +275,7 @@ def test_generator_factory_rejects_unknown_class() -> None:
 
 def test_factory_catalog_reports_available_classes_and_models() -> None:
     classes = available_generator_classes()
-    assert classes == ["protT5", "prostT5", "ankh3", "amplify", "proteinglm", "esmc", "esm2", "esm1b"]
+    assert classes == ["prott5", "prostt5", "ankh3", "amplify", "proteinglm", "esmc", "esm2", "esm1b"]
 
     catalog = cast(Dict[str, List[str]], available_generator_models())
     assert set(catalog.keys()) == set(classes)
@@ -274,6 +294,114 @@ def test_factory_catalog_reports_available_classes_and_models() -> None:
 
     esm1b_models = cast(List[str], available_generator_models("esm1b"))
     assert "esm1b_t33_650M_UR50S" in esm1b_models
+
+
+@pytest.mark.parametrize(
+    ("model_class", "generator_type"),
+    [
+        ("prott5", ProtT5EmbeddingGenerator),
+        ("protT5", ProtT5EmbeddingGenerator),
+        ("prot_t5", ProtT5EmbeddingGenerator),
+        ("Prot-T5", ProtT5EmbeddingGenerator),
+        ("prostt5", ProstT5EmbeddingGenerator),
+        ("prostT5", ProstT5EmbeddingGenerator),
+        ("prost_t5", ProstT5EmbeddingGenerator),
+        ("Prost-T5", ProstT5EmbeddingGenerator),
+        ("ankh3", Ankh3EmbeddingGenerator),
+        ("Ankh3-Large", Ankh3EmbeddingGenerator),
+        ("ankh3_large", Ankh3EmbeddingGenerator),
+        ("AMPLIFY", AmplifyEmbeddingGenerator),
+        ("amplify_120m", AmplifyEmbeddingGenerator),
+        ("amplify_350m", AmplifyEmbeddingGenerator),
+        ("ProteinGLM", ProteinGlmEmbeddingGenerator),
+        ("ProteinPGLM", ProteinGlmEmbeddingGenerator),
+        ("pglm", ProteinGlmEmbeddingGenerator),
+        ("proteinglm_mlm", ProteinGlmEmbeddingGenerator),
+        ("esmc", EsmcEmbeddingGenerator),
+        ("esm-c", EsmcEmbeddingGenerator),
+        ("esmc3", EsmcEmbeddingGenerator),
+        ("ESM3c", EsmcEmbeddingGenerator),
+        ("esm2", Esm2EmbeddingGenerator),
+        ("esm-2", Esm2EmbeddingGenerator),
+        ("ESM", Esm2EmbeddingGenerator),
+        ("esm1b", Esm1bEmbeddingGenerator),
+        ("esm-1b", Esm1bEmbeddingGenerator),
+    ],
+)
+def test_generator_factory_accepts_canonical_names_and_aliases(
+    model_class: str,
+    generator_type: type[EmbeddingGenerator],
+) -> None:
+    model = types.SimpleNamespace(config=types.SimpleNamespace(num_hidden_layers=1))
+    generator = Generator(model_class=model_class, model=model, tokenizer=object())
+
+    assert isinstance(generator, generator_type)
+
+
+@pytest.mark.parametrize(
+    "generator_type",
+    _MODEL_GENERATOR_TYPES,
+)
+def test_model_generators_share_construction_classmethods(
+    generator_type: type[Any],
+) -> None:
+    model = types.SimpleNamespace(config=types.SimpleNamespace(num_hidden_layers=1))
+    tokenizer = object()
+
+    pretrained = generator_type.from_pretrained(
+        generator_type.DEFAULT_MODEL_NAME,
+        model=model,
+        tokenizer=tokenizer,
+    )
+    wrapped = generator_type.from_model_and_tokenizer(model, tokenizer)
+
+    assert isinstance(pretrained, generator_type)
+    assert isinstance(wrapped, generator_type)
+
+
+@pytest.mark.parametrize("generator_type", _MODEL_GENERATOR_TYPES)
+def test_model_generators_share_catalog_interface(generator_type: type[Any]) -> None:
+    assert generator_type.GENERATOR_CLASS == generator_type.GENERATOR_CLASS.lower()
+    assert isinstance(generator_type.GENERATOR_ALIASES, tuple)
+    assert isinstance(generator_type.MODEL_ALIASES, dict)
+    assert generator_type.DEFAULT_MODEL_NAME in generator_type.FAMILY_MODELS
+    assert isinstance(generator_type.SUPPORTED_POOLERS, tuple)
+
+
+@pytest.mark.parametrize(
+    ("generator_type", "model_alias", "expected_model_reference"),
+    _MODEL_ALIAS_CASES,
+)
+def test_model_generators_resolve_every_model_alias(
+    generator_type: type[Any],
+    model_alias: str,
+    expected_model_reference: str,
+) -> None:
+    model = types.SimpleNamespace(config=types.SimpleNamespace(num_hidden_layers=1))
+
+    generator = generator_type.from_pretrained(
+        model_alias,
+        model=model,
+        tokenizer=object(),
+    )
+
+    assert generator.model_reference == expected_model_reference
+
+
+@pytest.mark.parametrize("generator_type", _MODEL_GENERATOR_TYPES)
+def test_model_generators_accept_every_advertised_family_model(
+    generator_type: type[Any],
+) -> None:
+    model = types.SimpleNamespace(config=types.SimpleNamespace(num_hidden_layers=1))
+
+    for model_name in generator_type.FAMILY_MODELS:
+        generator = generator_type.from_pretrained(
+            model_name,
+            model=model,
+            tokenizer=object(),
+        )
+
+        assert generator.model_reference
 
 
 def test_generator_factory_builds_ankh3_with_prefix() -> None:
@@ -1301,12 +1429,23 @@ def test_prott5_generator_raises_dependency_error_when_transformers_missing(
     monkeypatch.setattr(builtins, "__import__", _raising_import)
     monkeypatch.delitem(sys.modules, "transformers", raising=False)
 
-    with pytest.raises(EmbeddingDependencyError):
+    with pytest.raises(EmbeddingDependencyError, match="transformers"):
         ProtT5EmbeddingGenerator()
 
 
+@pytest.mark.parametrize(
+    ("model_name", "expected_model_reference"),
+    [
+        ("prott5_xxl_bfd", "Rostlab/prot_t5_xxl_bfd"),
+        ("prot_t5_xl_bfd", "Rostlab/prot_t5_xl_bfd"),
+        ("prot-t5-xxl-uniref50", "Rostlab/prot_t5_xxl_uniref50"),
+        ("prott5_xl_half_uniref50_enc", "Rostlab/prot_t5_xl_half_uniref50-enc"),
+    ],
+)
 def test_prott5_generator_uses_t5_tokenizer_for_transformers_fallback(
     monkeypatch: pytest.MonkeyPatch,
+    model_name: str,
+    expected_model_reference: str,
 ) -> None:
     class _FakeAutoConfig:
         observed_name: str | None = None
@@ -1352,12 +1491,12 @@ def test_prott5_generator_uses_t5_tokenizer_for_transformers_fallback(
 
     monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
 
-    generator = ProtT5EmbeddingGenerator(model_name="Rostlab/prot_t5_xl_uniref50", device="cpu")
+    generator = ProtT5EmbeddingGenerator(model_name=model_name, device="cpu")
 
-    assert generator.model_reference == "Rostlab/prot_t5_xl_uniref50"
-    assert _FakeAutoConfig.observed_name == "Rostlab/prot_t5_xl_uniref50"
-    assert _FakeT5EncoderModel.observed_name == "Rostlab/prot_t5_xl_uniref50"
-    assert _FakeT5Tokenizer.observed_name == "Rostlab/prot_t5_xl_uniref50"
+    assert generator.model_reference == expected_model_reference
+    assert _FakeAutoConfig.observed_name == expected_model_reference
+    assert _FakeT5EncoderModel.observed_name == expected_model_reference
+    assert _FakeT5Tokenizer.observed_name == expected_model_reference
     assert _FakeT5Tokenizer.observed_do_lower_case is False
 
 
@@ -1601,29 +1740,3 @@ def test_prott5_generation_populates_model_and_run_metadata(monkeypatch: pytest.
     assert result.run_metadata.sequence_count == 1
     assert result.run_metadata.requested_layers == [1]
     assert result.run_metadata.resolved_layers == [1]
-
-
-def test_prott5_private_generate_matches_public_generate(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake_torch = types.SimpleNamespace(
-        tensor=lambda values: _FakeTensor(values),
-        no_grad=lambda: _FakeNoGrad(),
-    )
-    monkeypatch.setitem(sys.modules, "torch", fake_torch)
-
-    generator = ProtT5EmbeddingGenerator(
-        tokenizer=_FakeTokenizer(),
-        model=_FakeModel(),
-    )
-    records = [GenerationInput(id="P1", sequence="ACDE"), GenerationInput(id="P2", sequence="AA")]
-
-    public = generator.generate(records, layer_index=0, pooler="mean", fail_fast=False)
-    private = generator._generate(records, layer_index=0, pooler="mean", fail_fast=False)
-
-    assert [record.id for record in private.records] == [record.id for record in public.records]
-    assert [record.embedding for record in private.records] == [record.embedding for record in public.records]
-    assert [record.shape for record in private.records] == [record.shape for record in public.records]
-    assert private.errors == public.errors
-    assert private.run_metadata is not None
-    assert public.run_metadata is not None
-    assert private.run_metadata.requested_layers == public.run_metadata.requested_layers
-    assert private.run_metadata.resolved_layers == public.run_metadata.resolved_layers

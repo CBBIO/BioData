@@ -165,7 +165,8 @@ class EsmcEmbeddingGenerator(HfEsmEmbeddingGenerator):
     """Concrete embedding generator for ESM-C family models."""
 
     GENERATOR_CLASS = "esmc"
-    GENERATOR_ALIASES = ("esm-c", "esmc3", "esm3c", "ESM3c")
+    GENERATOR_ALIASES = ("esm-c", "esmc3", "esm3c")
+    MODEL_ALIASES = ESMC_HF_MODEL_NAMES
     DEFAULT_MODEL_NAME = "esmc_600m"
     FAMILY_MODELS = ["esmc_300m", "esmc_600m", "biohub/ESMC-300M", "biohub/ESMC-600M", "biohub/ESMC-6B"]
     SUPPORTED_POOLERS = ("none", "mean", "cls")
@@ -195,7 +196,7 @@ class EsmcEmbeddingGenerator(HfEsmEmbeddingGenerator):
                 model_name=model_name,
                 model_reference=model_reference,
                 context="ESM-C preprocessing",
-                provider="huggingface",
+                provider="huggingface-transformers",
                 device=device,
                 dtype=dtype,
                 tokenizer=tokenizer,

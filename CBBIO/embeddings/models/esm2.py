@@ -56,7 +56,8 @@ class Esm2EmbeddingGenerator(HfEsmEmbeddingGenerator):
     """Concrete embedding generator for ESM2 family models."""
 
     GENERATOR_CLASS = "esm2"
-    GENERATOR_ALIASES = ("esm-2", "ESM")
+    GENERATOR_ALIASES = ("esm-2", "esm")
+    MODEL_ALIASES = ESM2_HF_MODEL_NAMES
     DEFAULT_MODEL_NAME = "facebook/esm2_t33_650M_UR50D"
     FAMILY_MODELS = [
         "facebook/esm2_t6_8M_UR50D",
@@ -79,12 +80,12 @@ class Esm2EmbeddingGenerator(HfEsmEmbeddingGenerator):
         tokenizer: Any | None = None,
         from_pretrained_kwargs: Dict[str, Any] | None = None,
     ) -> None:
-        model_reference = resolve_model_name(model_name, ESM2_HF_MODEL_NAMES, family="ESM2")
+        model_reference = resolve_model_name(model_name, self.MODEL_ALIASES, family="ESM2")
         super().__init__(
             model_name=model_name,
             model_reference=model_reference,
             context="ESM2 preprocessing",
-            provider="huggingface",
+            provider="huggingface-transformers",
             device=device,
             dtype=dtype,
             model=model,

@@ -8,7 +8,13 @@ import sys
 import types
 from typing import Any, Dict, List, Sequence, cast
 
-from .. import EmbeddingBackendError, EmbeddingDependencyError, EmbeddingInputError, GenerationInput, GenerationResult
+from .. import (
+    EmbeddingBackendError,
+    EmbeddingDependencyError,
+    EmbeddingInputError,
+    GenerationInput,
+    GenerationResult,
+)
 from ..utils.pooler import PoolerInput
 from ._esm_hf import (
     HfEsmEmbeddingGenerator,
@@ -120,7 +126,8 @@ class ProteinGlmEmbeddingGenerator(HfEsmEmbeddingGenerator):
     """Concrete embedding generator for ProteinGLM MLM family models."""
 
     GENERATOR_CLASS = "proteinglm"
-    GENERATOR_ALIASES = ("ProteinGLM", "ProteinPGLM", "pglm", "proteinglm_mlm")
+    GENERATOR_ALIASES = ("proteinpglm", "pglm", "proteinglm_mlm")
+    MODEL_ALIASES = PROTEINGLM_HF_MODEL_NAMES
     DEFAULT_MODEL_NAME = "biomap-research/proteinglm-1b-mlm"
     FAMILY_MODELS = [
         "proteinglm_1b_mlm",
@@ -146,7 +153,11 @@ class ProteinGlmEmbeddingGenerator(HfEsmEmbeddingGenerator):
         from_pretrained_kwargs: Dict[str, Any] | None = None,
         tokenizer_from_pretrained_kwargs: Dict[str, Any] | None = None,
     ) -> None:
-        model_reference = resolve_model_name(model_name, PROTEINGLM_HF_MODEL_NAMES, family="ProteinGLM")
+        model_reference = resolve_model_name(
+            model_name,
+            self.MODEL_ALIASES,
+            family="ProteinGLM",
+        )
         model_kwargs = {"trust_remote_code": True}
         model_kwargs.update(from_pretrained_kwargs or {})
         tokenizer_kwargs = {"use_fast": True}
@@ -186,8 +197,12 @@ class ProteinGlmEmbeddingGenerator(HfEsmEmbeddingGenerator):
         fail_fast: bool = False,
     ) -> GenerationResult:
         """Generate embeddings with the ProteinGLM adapter."""
-        return super().generate(records, layer_index=layer_index, pooler=pooler, fail_fast=fail_fast)
-
+        return super().generate(
+            records,
+            layer_index=layer_index,
+            pooler=pooler,
+            fail_fast=fail_fast,
+        )
 
 def proteinglm_sample_spans_from_attention_mask(attention_mask: Any) -> List[tuple[int, int]]:
     """Return residue-token spans from a ProteinGLM attention mask."""
