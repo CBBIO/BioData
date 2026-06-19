@@ -91,30 +91,26 @@ task = Task(
 
 ## The Dataset Catalog
 
-The catalog aggregates built-in datasets from several sources. Use it to discover what is available.
-
 ```python
-from CBBIO import list_dataset_catalog, search_dataset_catalog
+from CBBIO import list_dataset_catalog, list_dataset_collections, load_dataset
 
-# List everything
-entries = list_dataset_catalog()
+for collection in list_dataset_collections():
+    print(collection.id, len(collection.list_datasets()))
 
-# Filter by level and status
 residue_ready = list_dataset_catalog(level="residue", status="ready")
-for entry in residue_ready:
-    print(entry.id, entry.display_name, entry.objective)
-
-# Full-text search
-results = search_dataset_catalog("phosphorylation CDK")
-for entry in results:
-    print(entry.id, entry.description)
+dataset = load_dataset("disprot:all", "/data/probing", split="test")
 ```
 
-Key `DatasetCatalogEntry` fields:
+Collections own dataset metadata, downloads, and loading. The catalog flattens their `DatasetMetadata`
+objects into one searchable index. `load_dataset()` resolves the qualified ID and delegates to its
+owning collection.
+
+Key `DatasetMetadata` fields:
 
 | Field | Description |
 |---|---|
-| `id` | Unique identifier used with `load_residue_source_dataset()` and related loaders |
+| `id` | Qualified identifier accepted by `load_dataset()` |
+| `collection` | Collection that owns loading for this dataset |
 | `status` | `"ready"` = loadable now; `"adapter"` = needs custom import; `"catalog_only"` = metadata only |
 | `level` | `"protein"` or `"residue"` |
 | `objective` | `"binary"`, `"multiclass"`, `"regression"`, `"multilabel"` |
@@ -123,11 +119,28 @@ Key `DatasetCatalogEntry` fields:
 
 ### Collections
 
+```python
+from CBBIO import get_dataset_collection
+
+biolip = get_dataset_collection("biolip")
+print([dataset.id for dataset in biolip.list_datasets()])
+```
+
 | Collection | Description |
 |---|---|
 | `peer` | PEER benchmark tasks (fitness, thermostability, localization, fluorescence, …) |
-| `residue_sources` | Residue-level annotations: dbPTM, MusiteDeep, DisProt, BioLiP, PhosphoELM |
+| `dbptm` | dbPTM source data and benchmark archives |
+| `musitedeep` | MusiteDeep PTM annotations |
+| `disprot` | DisProt disorder annotations |
+| `biolip` | BioLiP ligand-class binding annotations |
+| `metalpdb` | MetalPDB binding annotations |
+| `scannet` | ScanNet binding annotations |
+| `netsurfp` | NetSurfP structure annotations |
+| `phosphoelm` | PhosphoELM evidence subsets |
 | `dtu` | DTU in-house annotation services |
+
+`DatasetCatalogEntry` remains as a compatibility alias for `DatasetMetadata`. Source-specific
+functions such as `load_peer_dataset()` and `load_residue_source_dataset()` remain available.
 
 ---
 
@@ -434,3 +447,10 @@ class TaskLayerResult:
     test_count: int
     elapsed_seconds: float
 ```
+
+## Exceptions
+
+| Exception | When raised |
+|---|---|
+| `EmbeddingInputError` | Invalid dataset metadata, collection, split, or input file |
+| `EmbeddingDependencyError` | Required probe or dataset dependency is unavailable |

@@ -20,6 +20,7 @@ from CBBIO import (
     ResidueDataset,
     ResidueExample,
     Task,
+    get_dataset_collection,
     get_dataset_catalog_entry,
     download_dbptm_benchmark,
     download_disprot_current_json,
@@ -31,6 +32,7 @@ from CBBIO import (
     get_dtu_service,
     list_dbptm_benchmarks,
     list_dataset_catalog,
+    list_dataset_collections,
     list_dtu_services,
     get_peer_task,
     get_residue_source,
@@ -39,6 +41,7 @@ from CBBIO import (
     list_residue_dataset_catalog,
     list_residue_sources,
     load_biolip_dataset,
+    load_dataset,
     load_dbptm_benchmark_archive,
     load_dbptm_benchmark_dataset,
     load_disprot_json,
@@ -590,6 +593,65 @@ def test_unified_dataset_catalog_is_filterable_and_searchable() -> None:
     assert search_results[0].id == "dbptm:phosphorylation_by_cdk"
     assert "peer:secondary_structure" in {entry.id for entry in search_dataset_catalog("secondary structure")}
     assert "phosphoelm:ltp" in {entry.id for entry in search_dataset_catalog("ptms f1 ltp")}
+
+
+def test_dataset_catalog_is_flattened_from_registered_collections() -> None:
+    collections = list_dataset_collections()
+    published_ids = {
+        dataset.id
+        for collection in collections
+        for dataset in collection.list_datasets()
+    }
+
+    assert published_ids == {dataset.id for dataset in list_dataset_catalog()}
+    assert {collection.id for collection in collections} == {
+        "peer",
+        "dbptm",
+        "musitedeep",
+        "disprot",
+        "biolip",
+        "metalpdb",
+        "scannet",
+        "netsurfp",
+        "phosphoelm",
+        "dtu",
+    }
+
+
+def test_dataset_collection_groups_related_provider_datasets() -> None:
+    collection = get_dataset_collection("biolip")
+
+    assert {dataset.id for dataset in collection.list_datasets()} == {
+        "biolip:all",
+        "biolip:dna",
+        "biolip:rna",
+        "biolip:pep",
+        "biolip:other",
+    }
+
+
+def test_load_dataset_routes_through_owning_collection(tmp_path: Path) -> None:
+    data_dir = tmp_path / "disprot"
+    data_dir.mkdir()
+    (data_dir / "disprot_current.tsv").write_text(
+        "\n".join(
+            [
+                "UniProt ACC\tDisProt ID\tStart\tEnd\tRegion sequence\tTerm ID\tTerm name",
+                "P1\tDP1\t2\t4\tCDE\tIDPO:0000002\tdisorder",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    dataset = load_dataset("disprot:all", tmp_path)
+
+    assert dataset.target_values("disorder") == {"DP1": [1, 1, 1]}
+
+
+def test_load_dataset_raises_when_entry_is_catalog_only(tmp_path: Path) -> None:
+    with pytest.raises(EmbeddingInputError, match="catalog_only"):
+        load_dataset("dtu:signalp", tmp_path)
 
 
 def test_native_peer_registry_lists_sequence_importable_datasets() -> None:

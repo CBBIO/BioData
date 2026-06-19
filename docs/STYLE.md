@@ -262,22 +262,58 @@ def from_model_and_tokenizer(
 
 ---
 
-## Dataset / Residue Source Pattern
+## Dataset Collection Pattern
 
-Functions exposing a probing dataset must follow this three-function pattern:
+Every probing dataset must belong to a `DatasetCollection`. Collections expose discovery,
+download, and loading through one interface:
 
 ```python
-def list_<source>() -> list[str]:
-    """Return the names of available datasets for this source."""
+from collections.abc import Mapping, Sequence
+from pathlib import Path
 
-def download_<source>(name: str, download_dir: str | Path) -> Path:
-    """Download dataset files to download_dir. Returns the file path."""
+from CBBIO import (
+    DatasetCollection,
+    DatasetMetadata,
+    ProteinDataset,
+    ResidueDataset,
+)
 
-def load_<source>_dataset(name: str, split: SplitName) -> ResidueDataset | ProteinDataset:
-    """Load a split of the dataset into memory."""
+
+class ExampleCollection(DatasetCollection):
+    id = "example"
+    display_name = "Example datasets"
+
+    def list_datasets(self) -> list[DatasetMetadata]:
+        """Return datasets published by this collection."""
+
+    def download(
+        self,
+        root: str | Path,
+        *,
+        name: str,
+        force: bool = False,
+    ) -> list[Path]:
+        """Download one dataset and return its local paths."""
+
+    def load(
+        self,
+        root: str | Path,
+        *,
+        name: str,
+        split: str | Sequence[str] | None = None,
+        target: str | None = None,
+        download: bool = False,
+        max_examples_per_split: Mapping[str, int | None] | None = None,
+    ) -> ProteinDataset | ResidueDataset:
+        """Load one dataset into the canonical representation."""
 ```
 
-Parameters that accept a dataset name must accept the exact string returned by `list_<source>()`.
+The collection owns each `DatasetMetadata`. The catalog indexes that metadata and delegates
+`load_dataset()` and `download_dataset()` back to the owning collection. Do not duplicate dataset
+metadata in the catalog.
+
+Existing source-specific `list_*`, `download_*`, and `load_*_dataset` functions may remain as
+compatibility facades. New datasets must be reachable through their collection.
 
 ---
 
