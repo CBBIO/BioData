@@ -2,22 +2,29 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 import csv
 from dataclasses import dataclass
 import json
-import re
 import shutil
-import tarfile
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Tuple, cast
 from urllib.parse import urlparse
-from urllib.request import Request, urlopen, urlretrieve
+from urllib.request import Request, urlopen
 
 from CBBIO.embeddings import EmbeddingInputError
 
 from .biolip import BIOLIP_DOWNLOAD_URLS, BioLipLigandClass, load_biolip_dataset
 from .datasets import ObjectiveName, ResidueDataset, ResidueExample, SplitName
+from .dbptm import (
+    DBPTM_BENCHMARKS,
+    DbptmBenchmarkSpec,
+    download_dbptm_benchmark,
+    get_dbptm_benchmark,
+    list_dbptm_benchmarks,
+    load_dbptm_benchmark_archive,
+    load_dbptm_benchmark_dataset,
+)
 from .disprot import (
     DISPROT_CURRENT_JSON_URL,
     DISPROT_CURRENT_TSV_URL,
@@ -66,144 +73,6 @@ class ResidueSourceSpec:
     download_urls: Tuple[str, ...] = ()
     notes: str = ""
 
-
-@dataclass(frozen=True)
-class DbptmBenchmarkSpec:
-    """Metadata for one dbPTM benchmark PTM dataset."""
-
-    name: str
-    display_name: str
-    target: str
-    archive_name: str
-    protein_count: int
-    positive_sites: int
-    negative_sites: int
-    url: str
-
-
-DBPTM_BENCHMARK_BASE_URL = "https://biomics.lab.nycu.edu.tw/dbPTM/download/benchmark"
-DBPTM_BENCHMARKS: Dict[str, DbptmBenchmarkSpec] = {
-    "phosphorylation_by_cdk": DbptmBenchmarkSpec(
-        name="phosphorylation_by_cdk",
-        display_name="Phosphorylation by CDK",
-        target="phosphorylation_by_cdk",
-        archive_name="PhosphorylationByCDK.tgz",
-        protein_count=1020,
-        positive_sites=1503,
-        negative_sites=29823,
-        url=f"{DBPTM_BENCHMARK_BASE_URL}/PhosphorylationByCDK.tgz",
-    ),
-    "phosphorylation_by_mapk": DbptmBenchmarkSpec(
-        name="phosphorylation_by_mapk",
-        display_name="Phosphorylation by MAPK",
-        target="phosphorylation_by_mapk",
-        archive_name="PhosphorylationByMAPK.tgz",
-        protein_count=857,
-        positive_sites=1270,
-        negative_sites=22436,
-        url=f"{DBPTM_BENCHMARK_BASE_URL}/PhosphorylationByMAPK.tgz",
-    ),
-    "phosphorylation_by_pka": DbptmBenchmarkSpec(
-        name="phosphorylation_by_pka",
-        display_name="Phosphorylation by PKA",
-        target="phosphorylation_by_pka",
-        archive_name="PhosphorylationByPKA.tgz",
-        protein_count=905,
-        positive_sites=1209,
-        negative_sites=29813,
-        url=f"{DBPTM_BENCHMARK_BASE_URL}/PhosphorylationByPKA.tgz",
-    ),
-    "phosphorylation_by_pkc": DbptmBenchmarkSpec(
-        name="phosphorylation_by_pkc",
-        display_name="Phosphorylation by PKC",
-        target="phosphorylation_by_pkc",
-        archive_name="PhosphorylationByPKC.tgz",
-        protein_count=691,
-        positive_sites=943,
-        negative_sites=24207,
-        url=f"{DBPTM_BENCHMARK_BASE_URL}/PhosphorylationByPKC.tgz",
-    ),
-    "phosphorylation_by_ck2": DbptmBenchmarkSpec(
-        name="phosphorylation_by_ck2",
-        display_name="Phosphorylation by CK2",
-        target="phosphorylation_by_ck2",
-        archive_name="PhosphorylationByCK2.tgz",
-        protein_count=511,
-        positive_sites=819,
-        negative_sites=15387,
-        url=f"{DBPTM_BENCHMARK_BASE_URL}/PhosphorylationByCK2.tgz",
-    ),
-    "acetylation": DbptmBenchmarkSpec(
-        name="acetylation",
-        display_name="Acetylation",
-        target="acetylation",
-        archive_name="Acetylation.tgz",
-        protein_count=5646,
-        positive_sites=14407,
-        negative_sites=8704,
-        url=f"{DBPTM_BENCHMARK_BASE_URL}/Acetylation.tgz",
-    ),
-    "methylation": DbptmBenchmarkSpec(
-        name="methylation",
-        display_name="Methylation",
-        target="methylation",
-        archive_name="Methylation.tgz",
-        protein_count=5438,
-        positive_sites=14686,
-        negative_sites=36501,
-        url=f"{DBPTM_BENCHMARK_BASE_URL}/Methylation.tgz",
-    ),
-    "n_linked_glycosylation": DbptmBenchmarkSpec(
-        name="n_linked_glycosylation",
-        display_name="N-linked Glycosylation",
-        target="n_linked_glycosylation",
-        archive_name="N-linkedGlycosylation.tgz",
-        protein_count=1969,
-        positive_sites=2517,
-        negative_sites=8330,
-        url=f"{DBPTM_BENCHMARK_BASE_URL}/N-linkedGlycosylation.tgz",
-    ),
-    "o_linked_glycosylation": DbptmBenchmarkSpec(
-        name="o_linked_glycosylation",
-        display_name="O-linked Glycosylation",
-        target="o_linked_glycosylation",
-        archive_name="O-linkedGlycosylation.tgz",
-        protein_count=1298,
-        positive_sites=4470,
-        negative_sites=37969,
-        url=f"{DBPTM_BENCHMARK_BASE_URL}/O-linkedGlycosylation.tgz",
-    ),
-    "s_nitrosylation": DbptmBenchmarkSpec(
-        name="s_nitrosylation",
-        display_name="S-nitrosylation",
-        target="s_nitrosylation",
-        archive_name="S-nitrosylation.tgz",
-        protein_count=1434,
-        positive_sites=3592,
-        negative_sites=5803,
-        url=f"{DBPTM_BENCHMARK_BASE_URL}/S-nitrosylation.tgz",
-    ),
-    "sumoylation": DbptmBenchmarkSpec(
-        name="sumoylation",
-        display_name="Sumoylation",
-        target="sumoylation",
-        archive_name="Sumoylation.tgz",
-        protein_count=1432,
-        positive_sites=5191,
-        negative_sites=16066,
-        url=f"{DBPTM_BENCHMARK_BASE_URL}/Sumoylation.tgz",
-    ),
-    "ubiquitination": DbptmBenchmarkSpec(
-        name="ubiquitination",
-        display_name="Ubiquitination",
-        target="ubiquitination",
-        archive_name="Ubiquitination.tgz",
-        protein_count=4453,
-        positive_sites=9767,
-        negative_sites=8579,
-        url=f"{DBPTM_BENCHMARK_BASE_URL}/Ubiquitination.tgz",
-    ),
-}
 
 
 RESIDUE_SOURCE_SPECS: Dict[str, ResidueSourceSpec] = {
@@ -406,21 +275,6 @@ def list_residue_sources(*, category: str | None = None) -> List[ResidueSourceSp
     return values
 
 
-def get_dbptm_benchmark(name: str) -> DbptmBenchmarkSpec:
-    """Return one registered dbPTM benchmark specification."""
-    key = _normalize_dbptm_benchmark_name(name)
-    spec = DBPTM_BENCHMARKS.get(key)
-    if spec is None:
-        supported = ", ".join(sorted(DBPTM_BENCHMARKS))
-        raise EmbeddingInputError(f"Unknown dbPTM benchmark {name!r}. Supported values: {supported}.")
-    return spec
-
-
-def list_dbptm_benchmarks() -> List[DbptmBenchmarkSpec]:
-    """Return registered dbPTM benchmark specifications."""
-    return list(DBPTM_BENCHMARKS.values())
-
-
 def download_residue_source(root: str | Path, *, name: str, force: bool = False) -> List[Path]:
     """Download source files for sources with stable direct-download URLs."""
 
@@ -441,87 +295,6 @@ def download_residue_source(root: str | Path, *, name: str, force: bool = False)
             _download_url(url, path)
         paths.append(path)
     return paths
-
-
-def download_dbptm_benchmark(
-    root: str | Path,
-    *,
-    name: str = "phosphorylation_by_cdk",
-    force: bool = False,
-) -> Path:
-    """Download one dbPTM benchmark ``.tgz`` archive."""
-
-    spec = get_dbptm_benchmark(name)
-    output_dir = Path(root).expanduser() / "dbptm" / "benchmark"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    path = output_dir / spec.archive_name
-    if force or not path.exists():
-        urlretrieve(spec.url, path)
-    return path
-
-
-def load_dbptm_benchmark_dataset(
-    root: str | Path,
-    *,
-    name: str = "phosphorylation_by_cdk",
-    target: str | None = None,
-    split: SplitName = "train",
-    download: bool = False,
-) -> ResidueDataset:
-    """Load a dbPTM benchmark archive from ``root/dbptm/benchmark``."""
-
-    spec = get_dbptm_benchmark(name)
-    archive_path = download_dbptm_benchmark(root, name=spec.name) if download else Path(root).expanduser() / "dbptm" / "benchmark" / spec.archive_name
-    return load_dbptm_benchmark_archive(archive_path, target=target or spec.target, split=split)
-
-
-def load_dbptm_benchmark_archive(
-    archive_path: str | Path,
-    *,
-    target: str = "ptm_site",
-    split: SplitName = "train",
-) -> ResidueDataset:
-    """Load dbPTM benchmark positive/negative FASTA windows from a ``.tgz`` archive."""
-
-    path = Path(archive_path).expanduser()
-    if not path.exists():
-        raise EmbeddingInputError(f"dbPTM benchmark archive does not exist: {path}.")
-    examples: List[ResidueExample] = []
-    seen_ids: dict[str, int] = {}
-
-    def _unique_dbptm_id(base_id: str) -> str:
-        count = seen_ids.get(base_id, 0)
-        seen_ids[base_id] = count + 1
-        if count == 0:
-            return base_id
-        return f"{base_id}__dup{count + 1}"
-
-    with tarfile.open(path, "r:gz") as archive:
-        for member in archive.getmembers():
-            if not member.isfile() or not member.name.lower().endswith((".fa", ".fasta", ".faa")):
-                continue
-            label = _dbptm_member_label(member.name)
-            fasta_handle = archive.extractfile(member)
-            if fasta_handle is None:
-                continue
-            text = fasta_handle.read().decode("utf-8")
-            for record_id, sequence in _iter_fasta_text(text):
-                labels = [0] * len(sequence)
-                if label == 1:
-                    labels[_center_index(sequence)] = 1
-                base_id = f"{Path(member.name).stem}:{record_id}"
-                examples.append(
-                    ResidueExample(
-                        id=_unique_dbptm_id(base_id),
-                        sequence=sequence,
-                        labels={target: labels},
-                        split=split,
-                        metadata={"source": "dbptm_benchmark", "file": member.name, "site_label": label},
-                    )
-                )
-    if not examples:
-        raise EmbeddingInputError(f"No dbPTM benchmark FASTA records found in archive {path}.")
-    return ResidueDataset(examples)
 
 
 def load_residue_source_dataset(
@@ -657,26 +430,6 @@ def load_residue_label_table(
     return ResidueDataset(examples)
 
 
-def _iter_fasta_text(text: str) -> Iterable[Tuple[str, str]]:
-    records: List[Tuple[str, str]] = []
-    current_id: str | None = None
-    chunks: List[str] = []
-    for raw_line in text.splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        if line.startswith(">"):
-            if current_id is not None:
-                records.append((current_id, "".join(chunks)))
-            current_id = line[1:].split()[0]
-            chunks = []
-        else:
-            chunks.append(line)
-    if current_id is not None:
-        records.append((current_id, "".join(chunks)))
-    return records
-
-
 def _row_split(row: Mapping[str, str], *, split_field: str | None, default_split: SplitName) -> SplitName:
     if split_field is None:
         return default_split
@@ -795,35 +548,6 @@ def _download_url(url: str, path: Path) -> None:
     request = Request(url, headers={"User-Agent": "Mozilla/5.0 CBBIO/0.1"})
     with urlopen(request) as response, path.open("wb") as handle:
         shutil.copyfileobj(response, handle)
-
-
-def _normalize_dbptm_benchmark_name(name: str) -> str:
-    text = str(name).strip().lower()
-    text = text.replace("-", "_").replace(" ", "_")
-    text = re.sub(r"[^a-z0-9_]+", "", text)
-    text = re.sub(r"_+", "_", text).strip("_")
-    if text.startswith("phosphorylation_by_"):
-        return text
-    if text.startswith("phosphorylationby"):
-        return f"phosphorylation_by_{text.removeprefix('phosphorylationby')}"
-    return text
-
-
-def _dbptm_member_label(member_name: str) -> int:
-    stem = Path(member_name).stem.lower()
-    if stem.endswith("_pos") or "positive" in stem:
-        return 1
-    if stem.endswith("_neg") or "negative" in stem:
-        return 0
-    raise EmbeddingInputError(
-        f"Could not infer positive/negative label from dbPTM FASTA member {member_name!r}."
-    )
-
-
-def _center_index(sequence: str) -> int:
-    if not sequence:
-        raise EmbeddingInputError("dbPTM benchmark sequence windows cannot be empty.")
-    return len(sequence) // 2
 
 
 __all__ = [

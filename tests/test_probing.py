@@ -832,7 +832,7 @@ def test_load_dbptm_benchmark_archive_labels_center_site(tmp_path) -> None:
     }
 
 
-def test_load_dbptm_benchmark_dataset_can_download(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+def test_load_dbptm_benchmark_dataset_can_download(tmp_path) -> None:
     archive_path = tmp_path / "dbptm" / "benchmark" / "PhosphorylationByCDK.tgz"
     archive_path.parent.mkdir(parents=True)
     with tarfile.open(archive_path, "w:gz") as archive:
@@ -840,11 +840,6 @@ def test_load_dbptm_benchmark_dataset_can_download(monkeypatch: pytest.MonkeyPat
         info = tarfile.TarInfo("PhosphorylationByCDK/CDK_pos.fasta")
         info.size = len(data)
         archive.addfile(info, io.BytesIO(data))
-
-    def fake_download(root, *, name: str = "phosphorylation_by_cdk", force: bool = False):
-        return archive_path
-
-    monkeypatch.setattr(residue_sources_module, "download_dbptm_benchmark", fake_download)
 
     dataset = load_dbptm_benchmark_dataset(tmp_path, name="phosphorylation_by_cdk", download=True)
 
@@ -859,7 +854,7 @@ def test_download_dbptm_benchmark_uses_direct_url(monkeypatch: pytest.MonkeyPatc
         filename.write_bytes(b"archive")
         return filename, None
 
-    monkeypatch.setattr(residue_sources_module, "urlretrieve", fake_urlretrieve)
+    monkeypatch.setattr("urllib.request.urlretrieve", fake_urlretrieve)
 
     path = download_dbptm_benchmark(tmp_path, name="PhosphorylationByCDK")
 
