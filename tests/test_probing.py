@@ -964,8 +964,7 @@ def test_load_musitedeep_testdata_dataset_uses_local_fastas(tmp_path) -> None:
 
 
 def test_download_musitedeep_testdata_uses_github_file_list(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
-    def fake_github_contents(api_url: str) -> list[object]:
-        return [
+    records = [
             {
                 "name": "ptm_sites.fasta",
                 "type": "file",
@@ -978,13 +977,26 @@ def test_download_musitedeep_testdata_uses_github_file_list(monkeypatch: pytest.
             },
         ]
 
+    class _FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return False
+
+        def read(self) -> bytes:
+            return json.dumps(records).encode("utf-8")
+
+    def fake_urlopen(request):
+        return _FakeResponse()
+
     def fake_urlretrieve(url: str, filename):
         path = filename
         path.write_text(">P1\nS#TYK\n", encoding="utf-8")
         return path, None
 
-    monkeypatch.setattr(residue_sources_module, "_github_contents", fake_github_contents)
-    monkeypatch.setattr(residue_sources_module, "urlretrieve", fake_urlretrieve)
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("urllib.request.urlretrieve", fake_urlretrieve)
 
     paths = download_musitedeep_testdata(tmp_path)
 

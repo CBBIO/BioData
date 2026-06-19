@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping
 import csv
 from dataclasses import dataclass
-import gzip
 import json
 import re
 import shutil
@@ -26,6 +25,11 @@ from .disprot import (
     download_disprot_current_tsv,
     load_disprot_json,
     load_disprot_tsv,
+)
+from .musitedeep import (
+    download_musitedeep_testdata,
+    load_musitedeep_fasta,
+    load_musitedeep_testdata_dataset,
 )
 from .phosphoelm import PhosphoElmSourceFilter, load_phosphoelm_dataset
 
@@ -361,11 +365,6 @@ RESIDUE_SOURCE_SPECS: Dict[str, ResidueSourceSpec] = {
     ),
 }
 
-MUSITEDEEP_TESTDATA_API_URL = (
-    "https://api.github.com/repos/duolinwang/MusiteDeep/contents/testdata?ref=master"
-)
-
-
 def get_residue_source(name: str) -> ResidueSourceSpec:
     """Return one registered residue source specification."""
     key = _normalize_residue_source_name(name)
@@ -525,74 +524,6 @@ def load_dbptm_benchmark_archive(
     return ResidueDataset(examples)
 
 
-def download_musitedeep_testdata(
-    root: str | Path,
-    *,
-    file_names: Sequence[str] | None = None,
-    force: bool = False,
-) -> List[Path]:
-    """Download FASTA files from ``duolinwang/MusiteDeep/testdata``."""
-
-    output_dir = Path(root).expanduser() / "musitedeep" / "testdata"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    wanted = {str(name) for name in file_names} if file_names is not None else None
-    records = _github_contents(MUSITEDEEP_TESTDATA_API_URL)
-    paths: List[Path] = []
-    for record in records:
-        item = cast(Mapping[str, object], record)
-        name = item.get("name")
-        download_url = item.get("download_url")
-        item_type = item.get("type")
-        if not isinstance(name, str) or not name.endswith(".fasta"):
-            continue
-        if wanted is not None and name not in wanted:
-            continue
-        if item_type != "file" or not isinstance(download_url, str):
-            continue
-        path = output_dir / name
-        if force or not path.exists():
-            urlretrieve(download_url, path)
-        paths.append(path)
-    if wanted is not None:
-        missing = sorted(wanted - {path.name for path in paths})
-        if missing:
-            raise EmbeddingInputError(f"MusiteDeep testdata files not found on GitHub: {', '.join(missing)}.")
-    return paths
-
-
-def load_musitedeep_testdata_dataset(
-    root: str | Path,
-    *,
-    target: str = "phosphorylation",
-    file_names: Sequence[str] | None = None,
-    download: bool = False,
-) -> ResidueDataset:
-    """Load MusiteDeep GitHub testdata FASTA files as one residue dataset.
-
-    Files whose names contain ``test`` are assigned to the test split; all
-    other files are assigned to train.
-    """
-
-    data_dir = Path(root).expanduser() / "musitedeep" / "testdata"
-    paths = download_musitedeep_testdata(root, file_names=file_names) if download else _local_musitedeep_fastas(data_dir, file_names=file_names)
-    examples: List[ResidueExample] = []
-    for path in paths:
-        split: SplitName = "test" if "test" in path.stem.lower() else "train"
-        partial = load_musitedeep_fasta(path, target=target, split=split)
-        examples.extend(
-            ResidueExample(
-                id=f"{path.stem}:{example.id}",
-                sequence=example.sequence,
-                labels=example.labels,
-                split=example.split,
-                mask=example.mask,
-                metadata={"source": "musitedeep_testdata", "file": path.name},
-            )
-            for example in partial.examples
-        )
-    return ResidueDataset(examples)
-
-
 def load_residue_source_dataset(
     root: str | Path,
     *,
@@ -636,29 +567,6 @@ def load_residue_source_dataset(
     raise EmbeddingInputError(
         f"Residue source {spec.name!r} requires explicit input files. Use adapter {spec.import_adapter}."
     )
-
-
-def load_musitedeep_fasta(
-    path: str | Path,
-    *,
-    target: str = "ptm_site",
-    split: SplitName = "train",
-) -> ResidueDataset:
-    """Load MusiteDeep annotated FASTA where ``#`` marks the preceding residue."""
-
-    examples: List[ResidueExample] = []
-    for record_id, raw_sequence in _iter_fasta(path):
-        sequence, labels = _parse_hash_marked_sequence(raw_sequence)
-        examples.append(
-            ResidueExample(
-                id=record_id,
-                sequence=sequence,
-                labels={target: labels},
-                split=split,
-                metadata={"source": "musitedeep"},
-            )
-        )
-    return ResidueDataset(examples)
 
 
 def load_interval_residue_tsv(
@@ -749,30 +657,6 @@ def load_residue_label_table(
     return ResidueDataset(examples)
 
 
-def _iter_fasta(path: str | Path | None) -> Iterable[Tuple[str, str]]:
-    if path is None:
-        return []
-    opener = gzip.open if str(path).endswith(".gz") else open
-    records: List[Tuple[str, str]] = []
-    current_id: str | None = None
-    chunks: List[str] = []
-    with opener(path, "rt", encoding="utf-8") as handle:
-        for raw_line in handle:
-            line = raw_line.strip()
-            if not line:
-                continue
-            if line.startswith(">"):
-                if current_id is not None:
-                    records.append((current_id, "".join(chunks)))
-                current_id = line[1:].split()[0]
-                chunks = []
-            else:
-                chunks.append(line)
-        if current_id is not None:
-            records.append((current_id, "".join(chunks)))
-    return records
-
-
 def _iter_fasta_text(text: str) -> Iterable[Tuple[str, str]]:
     records: List[Tuple[str, str]] = []
     current_id: str | None = None
@@ -791,20 +675,6 @@ def _iter_fasta_text(text: str) -> Iterable[Tuple[str, str]]:
     if current_id is not None:
         records.append((current_id, "".join(chunks)))
     return records
-
-
-def _parse_hash_marked_sequence(raw_sequence: str) -> Tuple[str, List[int]]:
-    residues: List[str] = []
-    labels: List[int] = []
-    for char in raw_sequence:
-        if char == "#":
-            if not labels:
-                raise EmbeddingInputError("MusiteDeep marker '#' appears before any residue.")
-            labels[-1] = 1
-            continue
-        residues.append(char)
-        labels.append(0)
-    return "".join(residues), labels
 
 
 def _row_split(row: Mapping[str, str], *, split_field: str | None, default_split: SplitName) -> SplitName:
@@ -954,33 +824,6 @@ def _center_index(sequence: str) -> int:
     if not sequence:
         raise EmbeddingInputError("dbPTM benchmark sequence windows cannot be empty.")
     return len(sequence) // 2
-
-
-def _github_contents(api_url: str) -> Sequence[object]:
-    path, _headers = urlretrieve(api_url)
-    try:
-        payload = json.loads(Path(path).read_text(encoding="utf-8"))
-    finally:
-        Path(path).unlink(missing_ok=True)
-    if not isinstance(payload, list):
-        raise EmbeddingInputError("GitHub contents API did not return a file list.")
-    return cast(List[object], payload)
-
-
-def _local_musitedeep_fastas(root: Path, *, file_names: Sequence[str] | None) -> List[Path]:
-    if file_names is not None:
-        paths = [root / name for name in file_names]
-    else:
-        paths = sorted(root.glob("*.fasta"))
-    missing = [str(path) for path in paths if not path.exists()]
-    if missing:
-        raise EmbeddingInputError(
-            "Missing MusiteDeep testdata FASTA files. Pass download=True or download them first. "
-            f"Missing: {', '.join(missing[:5])}."
-        )
-    if not paths:
-        raise EmbeddingInputError(f"No MusiteDeep FASTA files found under {root}.")
-    return paths
 
 
 __all__ = [
