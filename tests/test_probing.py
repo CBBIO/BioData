@@ -63,7 +63,6 @@ from CBBIO import (
 import CBBIO.probing.peer as peer_module
 from CBBIO.probing.metrics import binary_metrics
 from CBBIO.probing.metrics import spearmanr
-import CBBIO.probing.residue_sources as residue_sources_module
 from CBBIO.embeddings import EmbeddingInputError
 
 
@@ -881,7 +880,7 @@ def test_download_biolip_variant_uses_browser_user_agent(monkeypatch: pytest.Mon
         seen_requests.append(request)
         return FakeResponse()
 
-    monkeypatch.setattr(residue_sources_module, "urlopen", fake_urlopen)
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
 
     paths = download_residue_source(tmp_path, name="biolip_dna")
 
