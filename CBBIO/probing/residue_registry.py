@@ -12,6 +12,7 @@ import urllib.request
 from CBBIO.embeddings import EmbeddingInputError
 
 from .biolip import BIOLIP_DOWNLOAD_URLS, BioLipLigandClass, load_biolip_dataset
+from .collection_types import CollectionMetadata, DatasetMetadata, residue_dataset_metadata
 from .datasets import ObjectiveName, ResidueDataset, SplitName
 from .dbptm import (
     DBPTM_BENCHMARKS,
@@ -253,6 +254,38 @@ RESIDUE_SOURCE_SPECS: dict[str, ResidueSourceSpec] = {
     ),
 }
 
+ADAPTER_COLLECTION_METADATA: tuple[CollectionMetadata, ...] = (
+    CollectionMetadata("metalpdb", "MetalPDB", "Metal-binding residue datasets."),
+    CollectionMetadata("scannet", "ScanNet", "Protein binding-site datasets."),
+    CollectionMetadata("netsurfp", "NetSurfP", "Protein structure annotation datasets."),
+)
+ADAPTER_DATASETS: tuple[DatasetMetadata, ...] = (
+    residue_dataset_metadata(
+        dataset_id=dataset_id,
+        name=name,
+        display_name=RESIDUE_SOURCE_SPECS[name].source,
+        source=RESIDUE_SOURCE_SPECS[name].source,
+        category=RESIDUE_SOURCE_SPECS[name].category,
+        objective=RESIDUE_SOURCE_SPECS[name].objective,
+        target=RESIDUE_SOURCE_SPECS[name].target,
+        status="adapter",
+        homepage=RESIDUE_SOURCE_SPECS[name].homepage,
+        description=(
+            f"Source: {RESIDUE_SOURCE_SPECS[name].source}. "
+            f"Class: {RESIDUE_SOURCE_SPECS[name].category}. "
+            "Split system: adapter-defined until imported."
+        ),
+        import_adapter=RESIDUE_SOURCE_SPECS[name].import_adapter,
+        tags=("residue", RESIDUE_SOURCE_SPECS[name].category, name),
+        notes=RESIDUE_SOURCE_SPECS[name].notes,
+    )
+    for dataset_id, name in (
+        ("metalpdb:all", "metalpdb"),
+        ("scannet:binding", "scannet_binding"),
+        ("netsurfp:secondary_structure", "netsurfp"),
+    )
+)
+
 def get_residue_source(name: str) -> ResidueSourceSpec:
     """Return one registered residue source specification."""
     key = _normalize_residue_source_name(name)
@@ -447,6 +480,8 @@ def _download_url(url: str, path: Path) -> None:
 
 
 __all__ = [
+    "ADAPTER_COLLECTION_METADATA",
+    "ADAPTER_DATASETS",
     "DBPTM_BENCHMARKS",
     "BioLipLigandClass",
     "DISPROT_CURRENT_JSON_URL",

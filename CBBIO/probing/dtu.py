@@ -7,6 +7,7 @@ from typing import Dict, List, Literal
 
 from CBBIO.embeddings import EmbeddingInputError
 
+from .collection_types import CollectionMetadata, DatasetMetadata
 from .datasets import ObjectiveName, TaskLevel
 
 
@@ -29,6 +30,14 @@ class DtuServiceSpec:
 
 
 DTU_SERVICES_BASE_URL = "https://services.healthtech.dtu.dk"
+
+DTU_COLLECTION_METADATA = CollectionMetadata(
+    id="dtu",
+    display_name="DTU Health Tech",
+    description="Dataset candidates associated with DTU prediction services.",
+    homepage=DTU_SERVICES_BASE_URL,
+    tags=("catalog", "service"),
+)
 
 DTU_PROBING_CATALOG: Dict[str, DtuServiceSpec] = {
     "dictyoglyc": DtuServiceSpec(
@@ -284,8 +293,55 @@ def list_dtu_services(
     return values
 
 
+def _dtu_dataset_metadata(service: DtuServiceSpec) -> DatasetMetadata:
+    task_classes = {
+        "ptm": "ptms",
+        "structure": "structure",
+        "dataset": "structure",
+        "sorting": "function",
+        "immunology": "binding",
+    }
+    metric = (
+        "f1"
+        if service.objective == "binary"
+        else "macro_f1"
+        if service.objective in {"multiclass", "multilabel"}
+        else "spearmanr"
+    )
+    task_class = task_classes.get(service.category, service.category)
+    return DatasetMetadata(
+        id=f"dtu:{service.name}",
+        name=service.name,
+        display_name=service.description,
+        collection="dtu",
+        source="DTU Health Tech",
+        category=service.category,
+        task_class=task_class,
+        preferred_metric=metric,
+        description=(
+            f"Source: DTU Health Tech service catalog. Class: {task_class}. "
+            "Split system: catalog-only; no local loader."
+        ),
+        level=service.level,
+        objective=service.objective,
+        target=service.target,
+        status="catalog_only",
+        homepage=service.url,
+        dataset_url=service.dataset_url,
+        tags=("dtu", service.category, service.level, service.objective),
+        notes=service.notes,
+    )
+
+
+DTU_DATASETS: tuple[DatasetMetadata, ...] = tuple(
+    _dtu_dataset_metadata(service) for service in DTU_PROBING_CATALOG.values()
+)
+
+
 __all__ = [
     "DTU_PROBING_CATALOG",
+    "DTU_COLLECTION_METADATA",
+    "DTU_DATASETS",
     "DTU_SERVICES_BASE_URL",
     "DtuServiceCategory",
     "DtuServiceSpec",

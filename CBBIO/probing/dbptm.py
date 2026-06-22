@@ -11,6 +11,7 @@ import urllib.request
 
 from CBBIO.embeddings import EmbeddingInputError
 
+from .collection_types import CollectionMetadata, DatasetMetadata, residue_dataset_metadata
 from .datasets import ResidueDataset, ResidueExample, SplitName
 
 
@@ -133,6 +134,57 @@ DBPTM_BENCHMARKS: dict[str, DbptmBenchmarkMetadata] = {
         ),
     )
 }
+
+DBPTM_COLLECTION_METADATA = CollectionMetadata(
+    id="dbptm",
+    display_name="dbPTM",
+    description="Curated post-translational modification datasets and benchmarks.",
+    homepage="https://biomics.lab.nycu.edu.tw/dbPTM/",
+    tags=("ptm", "residue", "benchmark"),
+)
+DBPTM_DATASETS: tuple[DatasetMetadata, ...] = (
+    residue_dataset_metadata(
+        dataset_id="dbptm:all",
+        name="dbptm",
+        display_name="dbPTM",
+        source="dbPTM",
+        category="ptm",
+        objective="binary",
+        target="ptm_site",
+        status="adapter",
+        homepage="https://biomics.lab.nycu.edu.tw/dbPTM/",
+        description=(
+            "Source: dbPTM. Class: ptms. Split system: adapter-defined until exported "
+            "site annotations are imported."
+        ),
+        import_adapter="load_interval_residue_tsv",
+        tags=("residue", "ptm", "dbptm"),
+    ),
+    *tuple(
+        residue_dataset_metadata(
+            dataset_id=f"dbptm:{benchmark.name}",
+            name=benchmark.name,
+            display_name=benchmark.display_name,
+            source="dbPTM",
+            category="ptm",
+            objective="binary",
+            target=benchmark.target,
+            status="ready",
+            homepage="https://biomics.lab.nycu.edu.tw/dbPTM/download.php",
+            description=(
+                f"Source: dbPTM benchmark archive {benchmark.archive_name}. Class: ptms. "
+                "Split system: archive-provided positive and negative windows."
+            ),
+            download_url=benchmark.url,
+            download_adapter="download_dbptm_benchmark",
+            import_adapter="load_dbptm_benchmark_archive",
+            loader="load_dbptm_benchmark_dataset",
+            tags=("ptm", "dbptm", "benchmark"),
+            notes=f"{benchmark.protein_count} proteins.",
+        )
+        for benchmark in DBPTM_BENCHMARKS.values()
+    ),
+)
 
 
 def get_dbptm_benchmark(name: str) -> DbptmBenchmarkMetadata:
@@ -295,6 +347,8 @@ def _iter_fasta_text(text: str) -> Iterable[tuple[str, str]]:
 __all__ = [
     "DBPTM_BENCHMARKS",
     "DBPTM_BENCHMARK_BASE_URL",
+    "DBPTM_COLLECTION_METADATA",
+    "DBPTM_DATASETS",
     "DbptmBenchmarkMetadata",
     "DbptmBenchmarkSpec",
     "download_dbptm_benchmark",

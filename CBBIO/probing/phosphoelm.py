@@ -11,10 +11,41 @@ from typing import Any, Literal, cast
 
 from CBBIO.embeddings import EmbeddingInputError
 
+from .collection_types import CollectionMetadata, DatasetMetadata, residue_dataset_metadata
 from .datasets import ResidueDataset, ResidueExample, SplitName
 
 
 PhosphoElmSourceFilter = Literal["all", "LTP", "HTP"]
+
+PHOSPHOELM_COLLECTION_METADATA = CollectionMetadata(
+    id="phosphoelm",
+    display_name="PhosphoELM",
+    description="Experimentally validated eukaryotic phosphorylation sites.",
+    homepage="http://phospho.elm.eu.org/",
+    tags=("ptm", "phosphorylation", "residue"),
+)
+
+PHOSPHOELM_DATASETS: tuple[DatasetMetadata, ...] = tuple(
+    residue_dataset_metadata(
+        dataset_id=f"phosphoelm:{suffix}",
+        name=f"phosphoelm_{suffix}",
+        display_name=f"PhosphoELM {label}",
+        source="Phospho.ELM",
+        category="ptm",
+        objective="binary",
+        target="phosphorylation_site",
+        status="ready",
+        homepage="http://phospho.elm.eu.org/",
+        description=(
+            "Source: Phospho.ELM. Class: ptms. Split system: deterministic splits "
+            f"stratified by species and positive residue type. Evidence: {label}."
+        ),
+        import_adapter="load_phosphoelm_dataset",
+        loader="load_residue_source_dataset",
+        tags=("residue", "ptm", f"phosphoelm_{suffix}"),
+    )
+    for suffix, label in (("all", "all"), ("ltp", "LTP"), ("htp", "HTP"))
+)
 
 
 def load_phosphoelm_dataset(
@@ -305,4 +336,9 @@ def _positive_residue_stratum(counts: Mapping[str, int]) -> str:
     return "+".join(codes) if codes else "none"
 
 
-__all__ = ["PhosphoElmSourceFilter", "load_phosphoelm_dataset"]
+__all__ = [
+    "PHOSPHOELM_COLLECTION_METADATA",
+    "PHOSPHOELM_DATASETS",
+    "PhosphoElmSourceFilter",
+    "load_phosphoelm_dataset",
+]

@@ -12,6 +12,7 @@ import urllib.request
 
 from CBBIO.embeddings import EmbeddingInputError
 
+from .collection_types import CollectionMetadata, DatasetMetadata, residue_dataset_metadata
 from .datasets import ResidueDataset, ResidueExample, SplitName
 
 
@@ -23,6 +24,36 @@ DISPROT_SPLIT_RATIOS: tuple[tuple[SplitName, float], ...] = (
     ("train", 0.8),
     ("val", 0.1),
     ("test", 0.1),
+)
+
+DISPROT_COLLECTION_METADATA = CollectionMetadata(
+    id="disprot",
+    display_name="DisProt",
+    description="Curated intrinsically disordered protein regions.",
+    homepage="https://disprot.org/download",
+    tags=("disorder", "residue"),
+)
+DISPROT_DATASETS: tuple[DatasetMetadata, ...] = (
+    residue_dataset_metadata(
+        dataset_id="disprot:all",
+        name="disprot",
+        display_name="DisProt",
+        source="DisProt",
+        category="disorder",
+        objective="binary",
+        target="disorder",
+        status="ready",
+        homepage="https://disprot.org/download",
+        description=(
+            "Source: DisProt. Class: structure. Split system: deterministic splits use "
+            "disorder content and dataset tags."
+        ),
+        download_url=DISPROT_CURRENT_JSON_URL,
+        download_adapter="download_residue_source",
+        import_adapter="load_disprot_tsv",
+        loader="load_residue_source_dataset",
+        tags=("residue", "disorder", "disprot"),
+    ),
 )
 
 
@@ -514,8 +545,10 @@ def _mark_interval(labels: list[int], *, start: int, end: int) -> None:
 
 
 __all__ = [
+    "DISPROT_COLLECTION_METADATA",
     "DISPROT_CURRENT_JSON_URL",
     "DISPROT_CURRENT_TSV_URL",
+    "DISPROT_DATASETS",
     "DISPROT_SPLIT_RATIOS",
     "download_disprot_current_json",
     "download_disprot_current_tsv",

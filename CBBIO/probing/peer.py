@@ -16,6 +16,7 @@ import zipfile
 
 from CBBIO.embeddings import EmbeddingDependencyError, EmbeddingInputError
 
+from .collection_types import CollectionMetadata, DatasetMetadata, DatasetStatus
 from .datasets import ObjectiveName, ProteinDataset, ProteinExample, ResidueDataset, ResidueExample, SplitName
 from .flip import load_flip_dataset
 
@@ -27,6 +28,14 @@ PEER_CITATION = (
     "Yangtian and Ma, Chang and Liu, Runcheng and Tang, Jian. "
     "PEER: A Comprehensive and Multi-Task Benchmark for Protein Sequence Understanding. "
     "arXiv preprint arXiv:2206.02096, 2022."
+)
+
+PEER_COLLECTION_METADATA = CollectionMetadata(
+    id="peer",
+    display_name="PEER",
+    description="Comprehensive protein sequence understanding benchmark tasks.",
+    citation=PEER_CITATION,
+    tags=("benchmark", "protein"),
 )
 
 
@@ -876,8 +885,60 @@ def _extract_archive(path: Path, output_dir: Path) -> None:
     raise EmbeddingInputError(f"Unsupported PEER archive format: {path}.")
 
 
+def _peer_dataset_metadata(task: PeerTaskMetadata) -> DatasetMetadata:
+    status: DatasetStatus = (
+        "ready"
+        if task.current_loader is not None or task.level in {"protein", "residue"}
+        else "blocked"
+    )
+    task_class = (
+        "structure"
+        if task.category == "structure_prediction"
+        else "binding"
+        if "interaction" in task.category
+        else "fitness"
+        if task.name in {"gb1", "aav", "beta_lactamase"}
+        else "function"
+    )
+    split_text = (
+        "Split system: cataloged but not currently loadable."
+        if status == "blocked"
+        else "Split system: native benchmark splits are used when available."
+    )
+    return DatasetMetadata(
+        id=f"peer:{task.name}",
+        name=task.name,
+        display_name=task.display_name,
+        collection="peer",
+        source=task.source,
+        category=task.category,
+        task_class=task_class,
+        preferred_metric=task.metric,
+        description=(
+            f"Source: {task.source} / PEER. Class: {task_class}. {split_text}"
+        ),
+        level=task.level,
+        objective=task.objective,
+        target=task.target,
+        status=status,
+        metrics=(task.metric,),
+        split_counts=task.split_counts,
+        loader=task.current_loader or "load_peer_dataset",
+        citation=PEER_CITATION,
+        tags=("peer", task.short_name.lower(), task.level, task.objective),
+        notes=f"PEER dataset class: {task.dataset_class}.",
+    )
+
+
+PEER_DATASETS: tuple[DatasetMetadata, ...] = tuple(
+    _peer_dataset_metadata(task) for task in PEER_TASKS.values()
+)
+
+
 __all__ = [
     "PEER_CITATION",
+    "PEER_COLLECTION_METADATA",
+    "PEER_DATASETS",
     "PEER_TASKS",
     "PEER_TASK_ALIASES",
     "PeerTaskLevel",

@@ -11,11 +11,39 @@ import urllib.request
 
 from CBBIO.embeddings import EmbeddingInputError
 
+from .collection_types import CollectionMetadata, DatasetMetadata, residue_dataset_metadata
 from .datasets import ResidueDataset, ResidueExample, SplitName
 
 
 MUSITEDEEP_TESTDATA_API_URL = (
     "https://api.github.com/repos/duolinwang/MusiteDeep/contents/testdata?ref=master"
+)
+
+MUSITEDEEP_COLLECTION_METADATA = CollectionMetadata(
+    id="musitedeep",
+    display_name="MusiteDeep",
+    description="Residue-level post-translational modification annotations.",
+    homepage="https://www.musite.net/",
+    tags=("ptm", "residue"),
+)
+MUSITEDEEP_DATASETS: tuple[DatasetMetadata, ...] = (
+    residue_dataset_metadata(
+        dataset_id="musitedeep:all",
+        name="musitedeep",
+        display_name="MusiteDeep",
+        source="MusiteDeep",
+        category="ptm",
+        objective="binary",
+        target="ptm_site",
+        status="adapter",
+        homepage="https://www.musite.net/",
+        description=(
+            "Source: MusiteDeep. Class: ptms. Split system: adapter-defined until "
+            "annotated FASTA files are imported."
+        ),
+        import_adapter="load_musitedeep_fasta",
+        tags=("residue", "ptm", "musitedeep"),
+    ),
 )
 
 
@@ -191,6 +219,8 @@ def _parse_marked_sequence(raw_sequence: str) -> tuple[str, list[int]]:
 
 
 __all__ = [
+    "MUSITEDEEP_COLLECTION_METADATA",
+    "MUSITEDEEP_DATASETS",
     "MUSITEDEEP_TESTDATA_API_URL",
     "download_musitedeep_testdata",
     "load_musitedeep_fasta",

@@ -11,6 +11,7 @@ from typing import Any, Literal, cast
 
 from CBBIO.embeddings import EmbeddingInputError
 
+from .collection_types import CollectionMetadata, DatasetMetadata, residue_dataset_metadata
 from .datasets import ResidueDataset, ResidueExample, SplitName
 
 
@@ -19,6 +20,45 @@ BioLipLigandClass = Literal["all", "dna", "rna", "pep", "other"]
 BIOLIP_DOWNLOAD_URLS = (
     "https://zhanggroup.org/BioLiP/download/BioLiP_nr.txt.gz",
     "https://zhanggroup.org/BioLiP/data/protein_nr.fasta.gz",
+)
+
+BIOLIP_COLLECTION_METADATA = CollectionMetadata(
+    id="biolip",
+    display_name="BioLiP",
+    description="Structure-derived biologically relevant ligand-protein interactions.",
+    homepage="https://zhanggroup.org/BioLiP/download.html",
+    tags=("binding", "structure", "residue"),
+)
+
+_BIOLIP_VARIANTS = (
+    ("all", "biolip_all", "ligand_binding_site", "all ligands"),
+    ("dna", "biolip_dna", "dna_binding_site", "DNA"),
+    ("rna", "biolip_rna", "rna_binding_site", "RNA"),
+    ("pep", "biolip_pep", "peptide_binding_site", "peptides"),
+    ("other", "biolip_other", "other_ligand_binding_site", "other ligands"),
+)
+BIOLIP_DATASETS: tuple[DatasetMetadata, ...] = tuple(
+    residue_dataset_metadata(
+        dataset_id=f"biolip:{suffix}",
+        name=name,
+        display_name=f"BioLiP {label}",
+        source="BioLiP",
+        category="binding",
+        objective="binary",
+        target=target,
+        status="ready",
+        homepage="https://zhanggroup.org/BioLiP/download.html",
+        description=(
+            "Source: BioLiP. Class: binding. Split system: deterministic splits are "
+            f"assigned when absent. Ligand subset: {label}."
+        ),
+        download_url=BIOLIP_DOWNLOAD_URLS[0],
+        download_adapter="download_residue_source",
+        import_adapter="load_biolip_dataset",
+        loader="load_residue_source_dataset",
+        tags=("residue", "binding", name),
+    )
+    for suffix, name, target, label in _BIOLIP_VARIANTS
 )
 
 
@@ -210,6 +250,8 @@ def _stable_hash(value: str) -> str:
 
 __all__ = [
     "BIOLIP_DOWNLOAD_URLS",
+    "BIOLIP_COLLECTION_METADATA",
+    "BIOLIP_DATASETS",
     "BioLipLigandClass",
     "load_biolip_dataset",
 ]
