@@ -17,7 +17,6 @@ from .. import (
 )
 from ..utils.pooler import PoolerInput
 from ..utils.torch import BasePreprocessor, DefaultPostprocessor, framework_versions, normalize_requested_layers
-from ._esm_hf import HfEsmEmbeddingGenerator
 
 
 ESMC_HF_MODEL_NAMES: Dict[str, str] = {
@@ -161,11 +160,11 @@ class EsmcPostprocessor(DefaultPostprocessor):
     """Postprocessing for ESM-C outputs without pooling."""
 
 
-class EsmcEmbeddingGenerator(HfEsmEmbeddingGenerator):
+class EsmcEmbeddingGenerator(EmbeddingGenerator):
     """Concrete embedding generator for ESM-C family models."""
 
     GENERATOR_CLASS = "esmc"
-    GENERATOR_ALIASES = ("esm-c", "esmc3", "esm3c")
+    GENERATOR_ALIASES = ("esmC", "esm-c", "esmc3", "esm3-C", "esm3c")
     MODEL_ALIASES = ESMC_HF_MODEL_NAMES
     DEFAULT_MODEL_NAME = "esmc_600m"
     FAMILY_MODELS = ["esmc_300m", "esmc_600m", "biohub/ESMC-300M", "biohub/ESMC-600M", "biohub/ESMC-6B"]
@@ -186,27 +185,6 @@ class EsmcEmbeddingGenerator(HfEsmEmbeddingGenerator):
         model_reference = _resolve_model_reference(model_name)
         sdk_model_name = _resolve_sdk_model_name(model_name)
         resolved_client = client if client is not None else model
-        is_hf_alias = str(model_name).strip().lower() in ESMC_HF_MODEL_NAMES
-
-        if resolved_client is None and is_hf_alias:
-            register_hf_esmc_architecture()
-            layer_count = ESMC_LAYER_SPECS.get(model_reference)
-            HfEsmEmbeddingGenerator.__init__(
-                self,
-                model_name=model_name,
-                model_reference=model_reference,
-                context="ESM-C preprocessing",
-                provider="huggingface-transformers",
-                device=device,
-                dtype=dtype,
-                tokenizer=tokenizer,
-                tokenizer_trust_remote_code=True,
-                from_pretrained_kwargs=from_pretrained_kwargs,
-                layer_count_hint=None if layer_count is None else max(0, int(layer_count) - 1),
-            )
-            if self.model_metadata.parameters is not None:
-                self.model_metadata.parameters["available_layer_count_hint"] = layer_count
-            return
 
         _ = dtype, tokenizer
 

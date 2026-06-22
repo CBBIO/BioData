@@ -318,6 +318,7 @@ def test_factory_catalog_reports_available_classes_and_models() -> None:
         ("pglm", ProteinGlmEmbeddingGenerator),
         ("proteinglm_mlm", ProteinGlmEmbeddingGenerator),
         ("esmc", EsmcEmbeddingGenerator),
+        ("esmC", EsmcEmbeddingGenerator),
         ("esm-c", EsmcEmbeddingGenerator),
         ("esmc3", EsmcEmbeddingGenerator),
         ("ESM3c", EsmcEmbeddingGenerator),
