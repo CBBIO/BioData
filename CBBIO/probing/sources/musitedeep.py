@@ -11,8 +11,8 @@ import urllib.request
 
 from CBBIO.embeddings import EmbeddingInputError
 
-from .collection_types import CollectionMetadata, DatasetMetadata, residue_dataset_metadata
-from .datasets import ResidueDataset, ResidueExample, SplitName
+from ..collection_types import CollectionMetadata, DatasetMetadata, residue_dataset_metadata
+from ..datasets import ResidueDataset, ResidueExample, SplitName
 
 
 MUSITEDEEP_TESTDATA_API_URL = (

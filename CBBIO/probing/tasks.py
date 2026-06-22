@@ -8,6 +8,7 @@ from typing import Literal
 
 from CBBIO.embeddings import EmbeddingInputError
 
+from .backends import ProbeBackend
 from .datasets import ObjectiveName, ProteinDataset, ResidueDataset, TaskLevel
 
 
@@ -71,7 +72,7 @@ class Task:
     name: str
     dataset: ProteinDataset | ResidueDataset
     prediction: PredictionSpec
-    probe: ProbeSpec = ProbeSpec()
+    probe: ProbeSpec | ProbeBackend = ProbeSpec()
 
     def __post_init__(self) -> None:
         if not self.name.strip():

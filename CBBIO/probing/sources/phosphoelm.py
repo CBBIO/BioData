@@ -11,8 +11,8 @@ from typing import Any, Literal, cast
 
 from CBBIO.embeddings import EmbeddingInputError
 
-from .collection_types import CollectionMetadata, DatasetMetadata, residue_dataset_metadata
-from .datasets import ResidueDataset, ResidueExample, SplitName
+from ..collection_types import CollectionMetadata, DatasetMetadata, residue_dataset_metadata
+from ..datasets import ResidueDataset, ResidueExample, SplitName
 
 
 PhosphoElmSourceFilter = Literal["all", "LTP", "HTP"]

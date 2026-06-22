@@ -12,8 +12,8 @@ import urllib.request
 from CBBIO.embeddings import EmbeddingInputError
 
 from .biolip import BIOLIP_DOWNLOAD_URLS, BioLipLigandClass, load_biolip_dataset
-from .collection_types import CollectionMetadata, DatasetMetadata, residue_dataset_metadata
-from .datasets import ObjectiveName, ResidueDataset, SplitName
+from ..collection_types import CollectionMetadata, DatasetMetadata, residue_dataset_metadata
+from ..datasets import ObjectiveName, ResidueDataset, SplitName
 from .dbptm import (
     DBPTM_BENCHMARKS,
     DbptmBenchmarkSpec,
@@ -37,7 +37,7 @@ from .musitedeep import (
     load_musitedeep_testdata_dataset,
 )
 from .phosphoelm import PhosphoElmSourceFilter, load_phosphoelm_dataset
-from .residue_tables import load_interval_residue_tsv, load_residue_label_table
+from ._tables import load_interval_residue_tsv, load_residue_label_table
 
 
 ResidueSourceName = Literal[
@@ -259,7 +259,7 @@ ADAPTER_COLLECTION_METADATA: tuple[CollectionMetadata, ...] = (
     CollectionMetadata("scannet", "ScanNet", "Protein binding-site datasets."),
     CollectionMetadata("netsurfp", "NetSurfP", "Protein structure annotation datasets."),
 )
-ADAPTER_DATASETS: tuple[DatasetMetadata, ...] = (
+ADAPTER_DATASETS: tuple[DatasetMetadata, ...] = tuple(
     residue_dataset_metadata(
         dataset_id=dataset_id,
         name=name,

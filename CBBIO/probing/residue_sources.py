@@ -1,6 +1,6 @@
 """Compatibility facade for residue-level dataset sources and table loaders."""
 
-from .residue_registry import (
+from .sources._registry import (
     DBPTM_BENCHMARKS,
     DISPROT_CURRENT_JSON_URL,
     DISPROT_CURRENT_TSV_URL,

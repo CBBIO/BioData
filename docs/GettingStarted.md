@@ -200,10 +200,11 @@ from CBBIO import (
     Generator,
     FastaBatcher,
     EmbeddingWriter,
+    LinearProbe,
     run_embedding_generation,
-    load_residue_source_dataset,
+    load_dbptm_benchmark_dataset,
     PredictionSpec,
-    ProbeSpec,
+    ResidueDataset,
     Task,
     run_task_on_layer,
 )
@@ -220,19 +221,34 @@ embeddings = {r.id: r.embedding for r in writer.records}
 
 # --- Step 2: load a dataset ---
 # dbPTM CDK phosphorylation benchmark (residue-level binary task)
-dataset = load_residue_source_dataset("dbptm_cdk", split="test")
+train_dataset = load_dbptm_benchmark_dataset(
+    "/data/probing",
+    name="phosphorylation_by_cdk",
+    split="train",
+    download=True,
+)
+test_dataset = load_dbptm_benchmark_dataset(
+    "/data/probing",
+    name="phosphorylation_by_cdk",
+    split="test",
+)
+dataset = ResidueDataset([*train_dataset.examples, *test_dataset.examples])
 
 # --- Step 3: define and run the task ---
 task = Task(
     name="cdk_phospho",
     dataset=dataset,
-    prediction=PredictionSpec(target="ptm_site", objective="binary", level="residue"),
-    probe=ProbeSpec(kind="linear", epochs=100),
+    prediction=PredictionSpec(
+        target="phosphorylation_by_cdk",
+        objective="binary",
+        level="residue",
+    ),
+    probe=LinearProbe(epochs=100),
 )
 
 result = run_task_on_layer(task=task, embeddings=embeddings, layer_index=33)
 print(result.metrics)
-# → {"accuracy": 0.84, "f1": 0.71, "auc": 0.89, ...}
+# → {"accuracy": 0.84, "f1": 0.71, "auroc": 0.89, ...}
 ```
 
 For the full probing reference, catalog of built-in datasets, and layer sweep examples see [Probing.md](Probing.md).

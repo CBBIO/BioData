@@ -10,7 +10,7 @@ from typing import Any, cast
 
 from CBBIO.embeddings import EmbeddingInputError
 
-from .datasets import ResidueDataset, ResidueExample, SplitName
+from ..datasets import ResidueDataset, ResidueExample, SplitName
 
 
 def load_interval_residue_tsv(

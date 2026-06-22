@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import List, Tuple, cast
+from typing import List, cast
 
 from CBBIO.embeddings import EmbeddingInputError
 
@@ -15,17 +15,15 @@ from .collection_types import (
     DatasetMetadata,
     DatasetStatus,
 )
-from .biolip import BIOLIP_COLLECTION_METADATA, BIOLIP_DATASETS
-from .datasets import ObjectiveName, ProteinDataset, ResidueDataset, SplitName
-from .dbptm import DBPTM_COLLECTION_METADATA, DBPTM_DATASETS
-from .disprot import DISPROT_COLLECTION_METADATA, DISPROT_DATASETS
-from .dtu import DTU_COLLECTION_METADATA, DTU_DATASETS
-from .musitedeep import MUSITEDEEP_COLLECTION_METADATA, MUSITEDEEP_DATASETS
-from .peer import PEER_COLLECTION_METADATA, PEER_DATASETS
-from .phosphoelm import PHOSPHOELM_COLLECTION_METADATA, PHOSPHOELM_DATASETS
-from .residue_registry import ADAPTER_COLLECTION_METADATA, ADAPTER_DATASETS
-
-
+from .datasets import ProteinDataset, ResidueDataset, SplitName
+from .sources.biolip import BIOLIP_COLLECTION_METADATA, BIOLIP_DATASETS
+from .sources.dbptm import DBPTM_COLLECTION_METADATA, DBPTM_DATASETS
+from .sources.disprot import DISPROT_COLLECTION_METADATA, DISPROT_DATASETS
+from .sources.dtu import DTU_COLLECTION_METADATA, DTU_DATASETS
+from .sources.musitedeep import MUSITEDEEP_COLLECTION_METADATA, MUSITEDEEP_DATASETS
+from .sources.peer import PEER_COLLECTION_METADATA, PEER_DATASETS
+from .sources.phosphoelm import PHOSPHOELM_COLLECTION_METADATA, PHOSPHOELM_DATASETS
+from .sources._registry import ADAPTER_COLLECTION_METADATA, ADAPTER_DATASETS
 
 class PeerCollection(DatasetCollection):
     """Expose PEER benchmark tasks as one dataset collection."""
@@ -44,7 +42,7 @@ class PeerCollection(DatasetCollection):
         force: bool = False,
     ) -> List[Path]:
         """Download one native PEER dataset."""
-        from .peer import download_peer_dataset
+        from .sources.peer import download_peer_dataset
 
         dataset = self.get_dataset(name)
         return [download_peer_dataset(root, name=dataset.name, force=force)]
@@ -60,7 +58,7 @@ class PeerCollection(DatasetCollection):
         max_examples_per_split: Mapping[str, int | None] | None = None,
     ) -> ProteinDataset | ResidueDataset:
         """Load one PEER dataset."""
-        from .peer import load_peer_dataset
+        from .sources.peer import load_peer_dataset
 
         if target is not None:
             raise EmbeddingInputError("PEER collection datasets define their target metadata.")

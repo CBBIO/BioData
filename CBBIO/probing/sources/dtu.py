@@ -7,8 +7,8 @@ from typing import Dict, List, Literal
 
 from CBBIO.embeddings import EmbeddingInputError
 
-from .collection_types import CollectionMetadata, DatasetMetadata
-from .datasets import ObjectiveName, TaskLevel
+from ..collection_types import CollectionMetadata, DatasetMetadata
+from ..datasets import ObjectiveName, TaskLevel
 
 
 DtuServiceCategory = Literal["ptm", "structure", "sorting", "immunology", "dataset"]

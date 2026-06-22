@@ -45,10 +45,10 @@ from CBBIO import ProteinDataset, ResidueDataset, ProteinExample, ResidueExample
 | `labels` | `Mapping[str, Sequence[Any]]` | Per-residue labels (e.g. `{"ptm_site": [0, 0, 1, 0, ...]}`) |
 | `mask` | `Sequence[bool] \| None` | `True` for positions to include; `None` means include all |
 
-### Task, PredictionSpec, ProbeSpec
+### Task and Probes
 
 ```python
-from CBBIO import Task, PredictionSpec, ProbeSpec
+from CBBIO import LinearProbe, MlpProbe, PredictionSpec, Task
 ```
 
 **`PredictionSpec`** describes what you are predicting:
@@ -60,16 +60,15 @@ from CBBIO import Task, PredictionSpec, ProbeSpec
 | `level` | `TaskLevel` | `"protein"` or `"residue"` |
 | `classes` | `Sequence[str] \| None` | Class names for multiclass (optional, for display) |
 
-**`ProbeSpec`** describes the probe architecture and training:
+`LinearProbe` and `MlpProbe` implement the built-in probe backends. They share these training
+parameters:
 
 | Field | Default | Description |
 |---|---|---|
-| `kind` | `"linear"` | `"linear"` (single linear layer) or `"mlp"` (linear → ReLU → linear) |
 | `epochs` | `100` | Training epochs |
 | `learning_rate` | `0.01` | Adam learning rate |
 | `batch_size` | `None` | Batch size; `None` uses the full training set |
 | `weight_decay` | `0.0` | L2 regularization strength |
-| `hidden_dim` | `64` | Hidden layer size (MLP only) |
 | `seed` | `7` | Random seed for reproducibility |
 
 **`Task`** bundles everything together:
@@ -83,9 +82,15 @@ task = Task(
         objective="binary",
         level="residue",
     ),
-    probe=ProbeSpec(kind="linear", epochs=200),
+    probe=LinearProbe(epochs=200),
 )
 ```
+
+`MlpProbe` adds `hidden_dim`, which defaults to `64`. Use `MlpProbe(hidden_dim=128)` to select the
+built-in MLP architecture. For XGBoost, CNNs, and other estimators, see
+[Custom Probes](CustomProbes.md).
+
+`ProbeSpec` remains available as a compatibility configuration for existing code.
 
 ---
 
@@ -98,12 +103,17 @@ for collection in list_dataset_collections():
     print(collection.id, len(collection.list_datasets()))
 
 residue_ready = list_dataset_catalog(level="residue", status="ready")
-dataset = load_dataset("disprot:all", "/data/probing", split="test")
+dataset = load_dataset("disprot:all", "/data/probing", split="test", download=True)
 ```
 
-Collections own dataset metadata, downloads, and loading. The catalog flattens their `DatasetMetadata`
-objects into one searchable index. `load_dataset()` resolves the qualified ID and delegates to its
-owning collection.
+Each data provider publishes collection metadata and metadata for its datasets. A collection exposes
+that provider through one interface for discovery, download, and loading. The catalog combines the
+collections into one searchable index. `load_dataset()` resolves a qualified dataset ID and delegates
+to the owning collection.
+
+Source-specific functions such as `load_peer_dataset()` and `load_residue_source_dataset()` remain
+available as compatibility facades. New code can use `load_dataset()` when it does not need a
+provider-specific option.
 
 Key `DatasetMetadata` fields:
 
@@ -123,6 +133,7 @@ Key `DatasetMetadata` fields:
 from CBBIO import get_dataset_collection
 
 biolip = get_dataset_collection("biolip")
+print(biolip.metadata.homepage)
 print([dataset.id for dataset in biolip.list_datasets()])
 ```
 
@@ -139,8 +150,10 @@ print([dataset.id for dataset in biolip.list_datasets()])
 | `phosphoelm` | PhosphoELM evidence subsets |
 | `dtu` | DTU in-house annotation services |
 
-`DatasetCatalogEntry` remains as a compatibility alias for `DatasetMetadata`. Source-specific
-functions such as `load_peer_dataset()` and `load_residue_source_dataset()` remain available.
+`DatasetCatalogEntry` remains as a compatibility alias for `DatasetMetadata`.
+
+See [Adding a Probing Data Source](AddingProbingDataSource.md) to implement and register another
+provider.
 
 ---
 
@@ -148,7 +161,27 @@ functions such as `load_peer_dataset()` and `load_residue_source_dataset()` rema
 
 ### dbPTM Benchmarks
 
-Kinase-specific phosphorylation benchmarks from dbPTM with pre-defined train/test splits.
+```python
+from CBBIO import list_dbptm_benchmarks, load_dbptm_benchmark_dataset
+
+for benchmark in list_dbptm_benchmarks():
+    print(benchmark.name, benchmark.positive_sites, "positive sites")
+
+train_dataset = load_dbptm_benchmark_dataset(
+    "/data/probing",
+    name="phosphorylation_by_cdk",
+    split="train",
+    download=True,
+)
+test_dataset = load_dbptm_benchmark_dataset(
+    "/data/probing",
+    name="phosphorylation_by_cdk",
+    split="test",
+)
+```
+
+These dbPTM benchmarks provide kinase-specific phosphorylation labels with predefined train and test
+splits.
 
 Available benchmarks:
 
@@ -160,48 +193,42 @@ Available benchmarks:
 | `phosphorylation_by_pkc` | PKC phosphorylation sites |
 | `phosphorylation_by_ck2` | CK2 phosphorylation sites |
 
-```python
-from CBBIO import list_dbptm_benchmarks, load_dbptm_benchmark_dataset
-
-# See all benchmark names
-for bench in list_dbptm_benchmarks():
-    print(bench.name, bench.positive_sites, "positive sites")
-
-# Load train and test splits
-train_dataset = load_dbptm_benchmark_dataset("phosphorylation_by_cdk", split="train")
-test_dataset  = load_dbptm_benchmark_dataset("phosphorylation_by_cdk", split="test")
-```
-
 ### Residue Sources
-
-Broader PTM and structural annotation sources. List them, download, then load:
 
 ```python
 from CBBIO import list_residue_sources, download_residue_source, load_residue_source_dataset
 
-# List available sources with their categories
 for spec in list_residue_sources():
     print(spec.name, spec.category, spec.objective)
 
-# Download a source to a local directory (idempotent)
 download_residue_source("/data/probing", name="disprot")
-
-# Load into a ResidueDataset
-dataset = load_residue_source_dataset("disprot", split="test")
+dataset = load_residue_source_dataset(
+    "/data/probing",
+    name="disprot",
+    split="test",
+)
 ```
 
-### PEER Tasks
+Residue sources cover broader PTM and structural annotations. The download operation is idempotent.
 
-Protein-level fitness and function benchmarks from the PEER benchmark:
+### PEER Tasks
 
 ```python
 from CBBIO import load_peer_dataset, list_peer_tasks
 
-for task_meta in list_peer_tasks(objective="regression"):
-    print(task_meta.name, task_meta.preferred_metric)
+for task_metadata in list_peer_tasks():
+    if task_metadata.objective == "regression":
+        print(task_metadata.name, task_metadata.preferred_metric)
 
-dataset = load_peer_dataset("thermostability", split="train")
+dataset = load_peer_dataset(
+    "/data/probing",
+    name="beta_lactamase",
+    split="train",
+    download=True,
+)
 ```
+
+PEER provides protein-level fitness and function benchmarks as well as residue-level tasks.
 
 ---
 
@@ -216,8 +243,8 @@ from CBBIO import (
     EmbeddingWriter,
     run_embedding_generation,
     load_dbptm_benchmark_dataset,
+    LinearProbe,
     PredictionSpec,
-    ProbeSpec,
     Task,
     run_task_on_layer,
 )
@@ -226,8 +253,17 @@ from CBBIO import (
 generator = Generator(model_class="esm2", device="cuda:0")
 
 # Get all protein sequences from both splits
-train_ds = load_dbptm_benchmark_dataset("phosphorylation_by_cdk", split="train")
-test_ds  = load_dbptm_benchmark_dataset("phosphorylation_by_cdk", split="test")
+train_ds = load_dbptm_benchmark_dataset(
+    "/data/probing",
+    name="phosphorylation_by_cdk",
+    split="train",
+    download=True,
+)
+test_ds = load_dbptm_benchmark_dataset(
+    "/data/probing",
+    name="phosphorylation_by_cdk",
+    split="test",
+)
 
 # Write sequences to a temporary FASTA (or load from disk if already done)
 import tempfile, pathlib
@@ -252,8 +288,12 @@ dataset = ResidueDataset(examples)
 task = Task(
     name="cdk_phospho_esm2_l33",
     dataset=dataset,
-    prediction=PredictionSpec(target="ptm_site", objective="binary", level="residue"),
-    probe=ProbeSpec(kind="linear", epochs=100),
+    prediction=PredictionSpec(
+        target="phosphorylation_by_cdk",
+        objective="binary",
+        level="residue",
+    ),
+    probe=LinearProbe(epochs=100),
 )
 
 result = run_task_on_layer(
@@ -264,7 +304,7 @@ result = run_task_on_layer(
 )
 
 print(f"Accuracy: {result.metrics['accuracy']:.3f}")
-print(f"AUC:      {result.metrics['auc']:.3f}")
+print(f"AUROC:    {result.metrics['auroc']:.3f}")
 print(f"F1:       {result.metrics['f1']:.3f}")
 print(f"Elapsed:  {result.elapsed_seconds:.1f}s")
 ```
@@ -285,9 +325,9 @@ for layer in range(34):   # ESM-2 650M has 33 transformer layers + layer 0
     )
     results.append(result)
 
-# Print AUC per layer
+# Print AUROC per layer
 for r in results:
-    print(f"Layer {r.layer_index:2d}  AUC={r.metrics['auc']:.3f}")
+    print(f"Layer {r.layer_index:2d}  AUROC={r.metrics['auroc']:.3f}")
 ```
 
 If you can keep all layers in memory, extract them all in one pass:

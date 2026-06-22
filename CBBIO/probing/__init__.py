@@ -1,5 +1,11 @@
 """Supervised probing helpers for evaluating embedding layers."""
 
+from .backends import (
+    ProbeBackend,
+    ProbeBackendInput,
+    ProbeBackendOutput,
+    evaluate_probe_backend_output,
+)
 from .datasets import (
     MmseqsRedundancyHit,
     MmseqsRedundancyReport,
@@ -39,7 +45,7 @@ from .collections import (
     get_dataset_collection,
     list_dataset_collections,
 )
-from .dtu import (
+from .sources.dtu import (
     DTU_PROBING_CATALOG,
     DTU_SERVICES_BASE_URL,
     DtuServiceCategory,
@@ -47,8 +53,8 @@ from .dtu import (
     get_dtu_service,
     list_dtu_services,
 )
-from .flip import FLIP_DATASETS, FlipDatasetName, FlipDatasetSpec, load_flip_csv, load_flip_dataset
-from .peer import (
+from .sources.flip import FLIP_DATASETS, FlipDatasetName, FlipDatasetSpec, load_flip_csv, load_flip_dataset
+from .sources.peer import (
     PEER_CITATION,
     PEER_TASKS,
     PEER_TASK_ALIASES,
@@ -65,7 +71,16 @@ from .peer import (
     list_residue_dataset_catalog,
     load_peer_dataset,
 )
-from .probes import ProbeEvaluation, ResidueDataFlat, compute_residue_feature_stats, compute_residue_flat_data, train_and_evaluate_probe, train_and_evaluate_residue_probe
+from .probes import (
+    LinearProbe,
+    MlpProbe,
+    ProbeEvaluation,
+    ResidueDataFlat,
+    compute_residue_feature_stats,
+    compute_residue_flat_data,
+    train_and_evaluate_probe,
+    train_and_evaluate_residue_probe,
+)
 from .residue_sources import (
     DBPTM_BENCHMARKS,
     DISPROT_CURRENT_JSON_URL,
@@ -124,6 +139,8 @@ __all__ = [
     "FLIP_DATASETS",
     "FlipDatasetName",
     "FlipDatasetSpec",
+    "LinearProbe",
+    "MlpProbe",
     "PredictionSpec",
     "PEER_CITATION",
     "PEER_COLLECTION",
@@ -141,6 +158,9 @@ __all__ = [
     "DISPROT_CURRENT_TSV_URL",
     "DbptmBenchmarkSpec",
     "PhosphoElmSourceFilter",
+    "ProbeBackend",
+    "ProbeBackendInput",
+    "ProbeBackendOutput",
     "ProbeEvaluation",
     "ProbeKind",
     "ProbeSpec",
@@ -163,6 +183,7 @@ __all__ = [
     "download_musitedeep_testdata",
     "download_peer_dataset",
     "download_residue_source",
+    "evaluate_probe_backend_output",
     "filter_redundant_to_test_mmseqs",
     "get_dataset_catalog_entry",
     "get_dataset_collection",

@@ -5,15 +5,21 @@ import gzip
 import json
 from pathlib import Path
 import subprocess
+import sys
 import tarfile
 
 import pytest
 
 from CBBIO import (
     EmbeddingDependencyError,
+    LinearProbe,
+    MlpProbe,
     MmseqsRedundancyHit,
     MmseqsRedundancyReport,
     PredictionSpec,
+    ProbeBackend,
+    ProbeBackendInput,
+    ProbeBackendOutput,
     ProbeSpec,
     ProteinDataset,
     ProteinExample,
@@ -60,13 +66,212 @@ from CBBIO import (
     search_dataset_catalog,
     train_and_evaluate_residue_probe,
 )
-import CBBIO.probing.peer as peer_module
 from CBBIO.probing.metrics import binary_metrics
 from CBBIO.probing.metrics import spearmanr
 from CBBIO.embeddings import EmbeddingInputError
 
 
 torch = pytest.importorskip("torch")
+peer_module = sys.modules[load_peer_dataset.__module__]
+
+
+class _FixedProbeBackend(ProbeBackend):
+    def __init__(self, output: ProbeBackendOutput) -> None:
+        self.output = output
+        self.data: ProbeBackendInput | None = None
+
+    def fit_predict(self, data: ProbeBackendInput) -> ProbeBackendOutput:
+        """Capture canonical input and return fixed predictions."""
+        self.data = data
+        return self.output
+
+
+def test_custom_probe_backend_uses_canonical_protein_splits_and_metrics() -> None:
+    dataset = ProteinDataset(
+        [
+            ProteinExample("train_0", "ACDE", {"active": 0}, "train"),
+            ProteinExample("train_1", "FGHI", {"active": 1}, "train"),
+            ProteinExample("test_0", "KLMN", {"active": 0}, "test"),
+            ProteinExample("test_1", "PQRS", {"active": 1}, "test"),
+        ]
+    )
+    backend = _FixedProbeBackend(
+        ProbeBackendOutput(
+            predictions={"test_0": 0, "test_1": 1},
+            scores={"test_0": 0.1, "test_1": 0.9},
+        )
+    )
+    task = Task(
+        name="custom_binary",
+        dataset=dataset,
+        prediction=PredictionSpec(target="active", objective="binary"),
+        probe=backend,
+    )
+
+    result = run_task_on_layer(
+        task=task,
+        embeddings={
+            "train_0": [0.0, 0.1],
+            "train_1": [0.9, 1.0],
+            "test_0": [0.1, 0.2],
+            "test_1": [0.8, 0.9],
+        },
+    )
+
+    assert backend.data is not None
+    assert backend.data.train_ids == ("train_0", "train_1")
+    assert backend.data.test_ids == ("test_0", "test_1")
+    assert result.metrics["accuracy"] == pytest.approx(1.0)
+    assert result.metrics["auroc"] == pytest.approx(1.0)
+    assert result.predictions == {"test_0": 0, "test_1": 1}
+
+
+def test_custom_probe_backend_applies_residue_masks_before_evaluation() -> None:
+    dataset = ResidueDataset(
+        [
+            ResidueExample("train", "ACD", {"site": [0, 1, 0]}, "train"),
+            ResidueExample(
+                "test",
+                "EFG",
+                {"site": [0, 0, 1]},
+                "test",
+                mask=[True, False, True],
+            ),
+        ]
+    )
+    backend = _FixedProbeBackend(
+        ProbeBackendOutput(
+            predictions={"test": [0, 1, 1]},
+            scores={"test": [0.1, 0.9, 0.8]},
+        )
+    )
+    task = Task(
+        name="custom_residue_binary",
+        dataset=dataset,
+        prediction=PredictionSpec(target="site", objective="binary", level="residue"),
+        probe=backend,
+    )
+
+    result = run_task_on_layer(
+        task=task,
+        embeddings={
+            "train": [[0.0], [1.0], [0.0]],
+            "test": [[0.0], [1.0], [1.0]],
+        },
+    )
+
+    assert result.metrics["accuracy"] == pytest.approx(1.0)
+    assert result.predictions == {"test:1": 0, "test:3": 1}
+    assert result.scores == {"test:1": 0.1, "test:3": 0.8}
+
+
+def test_custom_binary_probe_raises_when_scores_are_missing() -> None:
+    dataset = ProteinDataset(
+        [
+            ProteinExample("train", "ACDE", {"active": 0}, "train"),
+            ProteinExample("test", "FGHI", {"active": 1}, "test"),
+        ]
+    )
+    task = Task(
+        name="custom_binary_without_scores",
+        dataset=dataset,
+        prediction=PredictionSpec(target="active", objective="binary"),
+        probe=_FixedProbeBackend(ProbeBackendOutput(predictions={"test": 1})),
+    )
+
+    with pytest.raises(EmbeddingInputError, match="scores"):
+        run_task_on_layer(
+            task=task,
+            embeddings={"train": [0.0], "test": [1.0]},
+        )
+
+
+def test_custom_regression_probe_normalizes_predictions_and_metrics() -> None:
+    dataset = ProteinDataset(
+        [
+            ProteinExample("train", "ACDE", {"value": 1.0}, "train"),
+            ProteinExample("test", "FGHI", {"value": 2.5}, "test"),
+        ]
+    )
+    task = Task(
+        name="custom_regression",
+        dataset=dataset,
+        prediction=PredictionSpec(target="value", objective="regression"),
+        probe=_FixedProbeBackend(
+            ProbeBackendOutput(predictions={"test": "2.5"})
+        ),
+    )
+
+    result = run_task_on_layer(
+        task=task,
+        embeddings={"train": [0.0], "test": [1.0]},
+    )
+
+    assert result.predictions == {"test": 2.5}
+    assert result.metrics["mae"] == pytest.approx(0.0)
+
+
+def test_custom_multiclass_probe_returns_canonical_class_names() -> None:
+    dataset = ProteinDataset(
+        [
+            ProteinExample("train_0", "ACDE", {"class": "alpha"}, "train"),
+            ProteinExample("train_1", "FGHI", {"class": "beta"}, "train"),
+            ProteinExample("test", "KLMN", {"class": "beta"}, "test"),
+        ]
+    )
+    task = Task(
+        name="custom_multiclass",
+        dataset=dataset,
+        prediction=PredictionSpec(target="class", objective="multiclass"),
+        probe=_FixedProbeBackend(ProbeBackendOutput(predictions={"test": 1})),
+    )
+
+    result = run_task_on_layer(
+        task=task,
+        embeddings={"train_0": [0.0], "train_1": [1.0], "test": [1.0]},
+    )
+
+    assert result.predictions == {"test": "beta"}
+    assert result.metrics["accuracy"] == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize(
+    "probe",
+    [
+        pytest.param(LinearProbe(epochs=2), id="linear"),
+        pytest.param(MlpProbe(epochs=2, hidden_dim=4), id="mlp"),
+    ],
+)
+def test_builtin_probe_backends_use_the_canonical_task_interface(
+    probe: ProbeBackend,
+) -> None:
+    dataset = ProteinDataset(
+        [
+            ProteinExample("train_0", "ACDE", {"active": 0}, "train"),
+            ProteinExample("train_1", "FGHI", {"active": 1}, "train"),
+            ProteinExample("test_0", "KLMN", {"active": 0}, "test"),
+            ProteinExample("test_1", "PQRS", {"active": 1}, "test"),
+        ]
+    )
+    task = Task(
+        name="built_in_backend",
+        dataset=dataset,
+        prediction=PredictionSpec(target="active", objective="binary"),
+        probe=probe,
+    )
+
+    result = run_task_on_layer(
+        task=task,
+        embeddings={
+            "train_0": [0.0, 0.1],
+            "train_1": [0.9, 1.0],
+            "test_0": [0.1, 0.2],
+            "test_1": [0.8, 0.9],
+        },
+    )
+
+    assert set(result.predictions) == {"test_0", "test_1"}
+    assert "accuracy" in result.metrics
 
 
 def test_spearmanr_handles_ranks_reverse_ranks_and_ties() -> None:

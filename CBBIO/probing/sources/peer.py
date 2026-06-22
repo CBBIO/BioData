@@ -16,8 +16,8 @@ import zipfile
 
 from CBBIO.embeddings import EmbeddingDependencyError, EmbeddingInputError
 
-from .collection_types import CollectionMetadata, DatasetMetadata, DatasetStatus
-from .datasets import ObjectiveName, ProteinDataset, ProteinExample, ResidueDataset, ResidueExample, SplitName
+from ..collection_types import CollectionMetadata, DatasetMetadata, DatasetStatus
+from ..datasets import ObjectiveName, ProteinDataset, ProteinExample, ResidueDataset, ResidueExample, SplitName
 from .flip import load_flip_dataset
 
 

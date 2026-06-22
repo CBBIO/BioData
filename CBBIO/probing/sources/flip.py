@@ -13,7 +13,7 @@ from urllib.request import urlretrieve
 
 from CBBIO.embeddings import EmbeddingInputError
 
-from .datasets import ProteinDataset, ProteinExample, SplitName
+from ..datasets import ProteinDataset, ProteinExample, SplitName
 
 
 FlipDatasetName = Literal["aav", "gb1", "thermostability"]

@@ -7,11 +7,15 @@ from dataclasses import dataclass
 import time
 from typing import Any, Dict, cast
 
-from CBBIO.embeddings import EmbeddingInputError
-
-from .datasets import ProteinDataset, ResidueDataset
-from .probes import train_and_evaluate_probe, train_and_evaluate_residue_probe
-from .tasks import Task
+from .backends import (
+    ProbeBackend,
+    ProbeBackendInput,
+    ProbeLabel,
+    evaluate_probe_backend_output,
+)
+from .datasets import ResidueDataset
+from .probes import LinearProbe, MlpProbe, ProbeEvaluation
+from .tasks import ProbeSpec, Task
 
 
 @dataclass(frozen=True)
@@ -42,39 +46,19 @@ def run_task_on_layer(
     """Train and evaluate one task against one model/layer embedding matrix."""
 
     started = time.perf_counter()
-    if task.prediction.level == "protein":
-        if not isinstance(task.dataset, ProteinDataset):
-            raise EmbeddingInputError("Protein-level tasks require a ProteinDataset.")
-        train_examples, test_examples = task.dataset.require_training_and_test_splits()
-        labels = task.dataset.target_values(task.prediction.target)
-        evaluation = train_and_evaluate_probe(
-            train_ids=[example.id for example in train_examples],
-            test_ids=[example.id for example in test_examples],
-            embeddings=cast(Mapping[str, Sequence[float]], embeddings),
-            labels=labels,
-            prediction=task.prediction,
-            probe=task.probe,
-        )
-    elif task.prediction.level == "residue":
-        if not isinstance(task.dataset, ResidueDataset):
-            raise EmbeddingInputError("Residue-level tasks require a ResidueDataset.")
-        train_examples, test_examples = task.dataset.require_training_and_test_splits()
-        labels = task.dataset.target_values(task.prediction.target)
-        masks = {example.id: example.mask for example in task.dataset.examples}
-        evaluation = train_and_evaluate_residue_probe(
-            train_ids=[example.id for example in train_examples],
-            test_ids=[example.id for example in test_examples],
-            embeddings=cast(Mapping[str, Sequence[Sequence[float]]], embeddings),
-            labels=labels,
-            masks=masks,
-            prediction=task.prediction,
-            probe=task.probe,
-            feature_mean=feature_mean,
-            feature_std=feature_std,
-            flat_data=flat_data,
-        )
-    else:
-        raise EmbeddingInputError(f"Unsupported task level: {task.prediction.level!r}.")
+    backend = (
+        task.probe
+        if isinstance(task.probe, ProbeBackend)
+        else _backend_from_spec(task.probe)
+    )
+    evaluation = _run_backend(
+        task,
+        embeddings=embeddings,
+        backend=backend,
+        feature_mean=feature_mean,
+        feature_std=feature_std,
+        flat_data=flat_data,
+    )
     split_counts = task.dataset.split_counts()
     return TaskLayerResult(
         task_name=task.name,
@@ -87,6 +71,58 @@ def run_task_on_layer(
         val_count=split_counts["val"],
         test_count=split_counts["test"],
         elapsed_seconds=time.perf_counter() - started,
+    )
+
+
+def _run_backend(
+    task: Task,
+    *,
+    embeddings: Mapping[str, Sequence[float] | Sequence[Sequence[float]]],
+    backend: ProbeBackend,
+    feature_mean: Any,
+    feature_std: Any,
+    flat_data: Any,
+) -> ProbeEvaluation:
+    train_examples, test_examples = task.dataset.require_training_and_test_splits()
+    labels = task.dataset.target_values(task.prediction.target)
+    masks = (
+        {example.id: example.mask for example in task.dataset.examples}
+        if isinstance(task.dataset, ResidueDataset)
+        else {}
+    )
+    data = ProbeBackendInput(
+        level=task.prediction.level,
+        prediction=task.prediction,
+        train_ids=tuple(example.id for example in train_examples),
+        test_ids=tuple(example.id for example in test_examples),
+        embeddings=embeddings,
+        labels=cast(Mapping[str, ProbeLabel], labels),
+        masks=masks,
+        feature_mean=feature_mean,
+        feature_std=feature_std,
+        flat_data=flat_data,
+    )
+    output = backend.fit_predict(data)
+    metrics, predictions, scores = evaluate_probe_backend_output(data, output)
+    return ProbeEvaluation(metrics=metrics, predictions=predictions, scores=scores)
+
+
+def _backend_from_spec(probe: ProbeSpec) -> ProbeBackend:
+    if probe.kind == "linear":
+        return LinearProbe(
+            epochs=probe.epochs,
+            learning_rate=probe.learning_rate,
+            batch_size=probe.batch_size,
+            weight_decay=probe.weight_decay,
+            seed=probe.seed,
+        )
+    return MlpProbe(
+        epochs=probe.epochs,
+        learning_rate=probe.learning_rate,
+        batch_size=probe.batch_size,
+        weight_decay=probe.weight_decay,
+        seed=probe.seed,
+        hidden_dim=probe.hidden_dim,
     )
 
 

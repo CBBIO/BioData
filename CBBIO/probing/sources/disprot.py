@@ -12,8 +12,8 @@ import urllib.request
 
 from CBBIO.embeddings import EmbeddingInputError
 
-from .collection_types import CollectionMetadata, DatasetMetadata, residue_dataset_metadata
-from .datasets import ResidueDataset, ResidueExample, SplitName
+from ..collection_types import CollectionMetadata, DatasetMetadata, residue_dataset_metadata
+from ..datasets import ResidueDataset, ResidueExample, SplitName
 
 
 _DISPROT_API_URL = "https://disprot.org/api/v2/download"

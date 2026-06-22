@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 import numpy as _np
@@ -9,9 +10,10 @@ from typing import Any, Dict, List, Tuple, cast
 
 from CBBIO.embeddings import EmbeddingDependencyError, EmbeddingInputError
 
+from .backends import ProbeBackend, ProbeBackendInput, ProbeBackendOutput, ProbePrediction
 from .datasets import ObjectiveName
 from .metrics import binary_metrics, multiclass_metrics, regression_metrics
-from .tasks import PredictionSpec, ProbeSpec
+from .tasks import PredictionSpec, ProbeKind, ProbeSpec
 
 
 DEFAULT_RESIDUE_BATCH_SIZE = 8192
@@ -23,6 +25,100 @@ class ProbeEvaluation:
     metrics: Dict[str, float]
     predictions: Dict[str, float | int | str]
     scores: Dict[str, float] | None = None
+
+
+@dataclass(frozen=True)
+class _TorchProbeBackend(ProbeBackend, ABC):
+    """Shared training configuration for built-in PyTorch probes."""
+
+    epochs: int = 100
+    learning_rate: float = 0.01
+    batch_size: int | None = None
+    weight_decay: float = 0.0
+    seed: int = 7
+
+    def __post_init__(self) -> None:
+        self._probe_spec()
+
+    @property
+    @abstractmethod
+    def kind(self) -> ProbeKind:
+        """Return the built-in probe architecture name."""
+        raise NotImplementedError
+
+    def fit_predict(self, data: ProbeBackendInput) -> ProbeBackendOutput:
+        """Train the built-in probe and return canonical test outputs."""
+        probe = self._probe_spec()
+        if data.level == "protein":
+            evaluation = train_and_evaluate_probe(
+                train_ids=data.train_ids,
+                test_ids=data.test_ids,
+                embeddings=cast(Mapping[str, Sequence[float]], data.embeddings),
+                labels=cast(Mapping[str, object], data.labels),
+                prediction=data.prediction,
+                probe=probe,
+            )
+            return ProbeBackendOutput(
+                predictions=evaluation.predictions,
+                scores=evaluation.scores,
+            )
+        if data.level == "residue":
+            evaluation = train_and_evaluate_residue_probe(
+                train_ids=data.train_ids,
+                test_ids=data.test_ids,
+                embeddings=cast(
+                    Mapping[str, Sequence[Sequence[float]]],
+                    data.embeddings,
+                ),
+                labels=cast(Mapping[str, Sequence[object]], data.labels),
+                masks=data.masks,
+                prediction=data.prediction,
+                probe=probe,
+                feature_mean=data.feature_mean,
+                feature_std=data.feature_std,
+                flat_data=cast(ResidueDataFlat | None, data.flat_data),
+            )
+            return _expand_residue_evaluation(data, evaluation)
+        raise EmbeddingInputError(f"Unsupported built-in probe level: {data.level!r}.")
+
+    def _probe_spec(self) -> ProbeSpec:
+        return ProbeSpec(
+            kind=self.kind,
+            epochs=self.epochs,
+            learning_rate=self.learning_rate,
+            batch_size=self.batch_size,
+            weight_decay=self.weight_decay,
+            hidden_dim=self._resolved_hidden_dim(),
+            seed=self.seed,
+        )
+
+    def _resolved_hidden_dim(self) -> int:
+        return 64
+
+
+@dataclass(frozen=True)
+class LinearProbe(_TorchProbeBackend):
+    """Train a linear probe through the common backend interface."""
+
+    @property
+    def kind(self) -> ProbeKind:
+        """Return the linear architecture name."""
+        return "linear"
+
+
+@dataclass(frozen=True)
+class MlpProbe(_TorchProbeBackend):
+    """Train an MLP probe through the common backend interface."""
+
+    hidden_dim: int = 64
+
+    @property
+    def kind(self) -> ProbeKind:
+        """Return the MLP architecture name."""
+        return "mlp"
+
+    def _resolved_hidden_dim(self) -> int:
+        return self.hidden_dim
 
 
 @dataclass(frozen=True)
@@ -700,7 +796,44 @@ def _evaluate_outputs(
     raise EmbeddingInputError(f"Unsupported probe objective: {objective!r}.")
 
 
+def _expand_residue_evaluation(
+    data: ProbeBackendInput,
+    evaluation: ProbeEvaluation,
+) -> ProbeBackendOutput:
+    predictions: dict[str, list[ProbePrediction]] = {}
+    scores: dict[str, list[float]] | None = (
+        {} if evaluation.scores is not None else None
+    )
+    for item in data.test_ids:
+        label_values = data.labels[item]
+        if not isinstance(label_values, Sequence) or isinstance(label_values, str | bytes):
+            raise EmbeddingInputError(
+                f"Residue labels for {item!r} must be a sequence."
+            )
+        label_sequence = cast(Sequence[object], label_values)
+        item_predictions: list[ProbePrediction] = [0] * len(label_sequence)
+        item_scores = [0.0] * len(label_sequence) if scores is not None else None
+        mask = data.masks.get(item)
+        for index in range(len(label_sequence)):
+            if mask is not None and not bool(mask[index]):
+                continue
+            residue_id = f"{item}:{index + 1}"
+            if residue_id not in evaluation.predictions:
+                raise EmbeddingInputError(
+                    f"Built-in probe did not return a prediction for {residue_id!r}."
+                )
+            item_predictions[index] = evaluation.predictions[residue_id]
+            if item_scores is not None and evaluation.scores is not None:
+                item_scores[index] = evaluation.scores[residue_id]
+        predictions[item] = item_predictions
+        if scores is not None and item_scores is not None:
+            scores[item] = item_scores
+    return ProbeBackendOutput(predictions=predictions, scores=scores)
+
+
 __all__ = [
+    "LinearProbe",
+    "MlpProbe",
     "ProbeEvaluation",
     "ResidueDataFlat",
     "compute_residue_feature_stats",
