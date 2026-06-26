@@ -17,6 +17,7 @@ from .collections import (
     list_dataset_collections,
 )
 from .datasets import ObjectiveName, ProteinDataset, ResidueDataset
+from .splitters import DatasetSplitter
 
 
 DatasetCatalogEntry = DatasetMetadata
@@ -165,6 +166,7 @@ def load_dataset(
     target: str | None = None,
     download: bool = False,
     max_examples_per_split: Mapping[str, int | None] | None = None,
+    splitter: DatasetSplitter | None = None,
 ) -> ProteinDataset | ResidueDataset:
     """Load a catalog dataset through its owning collection."""
     dataset = get_dataset_catalog_entry(dataset_id)
@@ -180,6 +182,7 @@ def load_dataset(
         target=target,
         download=download,
         max_examples_per_split=max_examples_per_split,
+        splitter=splitter,
     )
 
 

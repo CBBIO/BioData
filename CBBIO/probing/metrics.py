@@ -87,6 +87,59 @@ def multiclass_metrics(y_true: Sequence[int], y_pred: Sequence[int], *, class_co
     return {"accuracy": accuracy, "macro_f1": macro_f1}
 
 
+def multilabel_metrics(
+    y_true: Sequence[Sequence[int]],
+    y_pred: Sequence[Sequence[int]],
+    y_score: Sequence[Sequence[float]],
+) -> Dict[str, float]:
+    """Compute multilabel classification metrics for indicator matrices."""
+    _require_same_non_empty_length(y_true, y_pred)
+    _require_same_non_empty_length(y_true, y_score)
+    class_count = len(y_true[0])
+    if class_count < 1:
+        raise ValueError("Multilabel metric inputs must contain at least one class.")
+    for true_row, pred_row, score_row in zip(y_true, y_pred, y_score):
+        if len(true_row) != class_count or len(pred_row) != class_count or len(score_row) != class_count:
+            raise ValueError("Multilabel metric rows must have the same class count.")
+
+    exact_match = sum(
+        1 for true_row, pred_row in zip(y_true, y_pred)
+        if [int(value) for value in true_row] == [int(value) for value in pred_row]
+    ) / float(len(y_true))
+    macro_f1_values: List[float] = []
+    average_precision_values: List[float] = []
+    micro_tp = 0
+    micro_fp = 0
+    micro_fn = 0
+    for class_index in range(class_count):
+        true_values = [int(row[class_index]) for row in y_true]
+        pred_values = [int(row[class_index]) for row in y_pred]
+        score_values = [float(row[class_index]) for row in y_score]
+        tp = sum(1 for true, pred in zip(true_values, pred_values) if true == 1 and pred == 1)
+        fp = sum(1 for true, pred in zip(true_values, pred_values) if true == 0 and pred == 1)
+        fn = sum(1 for true, pred in zip(true_values, pred_values) if true == 1 and pred == 0)
+        precision = float(tp) / float(tp + fp) if tp + fp else 0.0
+        recall = float(tp) / float(tp + fn) if tp + fn else 0.0
+        macro_f1_values.append(2.0 * precision * recall / (precision + recall) if precision + recall else 0.0)
+        average_precision_values.append(_binary_auprc(true_values, score_values))
+        micro_tp += tp
+        micro_fp += fp
+        micro_fn += fn
+    micro_precision = float(micro_tp) / float(micro_tp + micro_fp) if micro_tp + micro_fp else 0.0
+    micro_recall = float(micro_tp) / float(micro_tp + micro_fn) if micro_tp + micro_fn else 0.0
+    micro_f1 = (
+        2.0 * micro_precision * micro_recall / (micro_precision + micro_recall)
+        if micro_precision + micro_recall
+        else 0.0
+    )
+    return {
+        "exact_match": exact_match,
+        "micro_f1": micro_f1,
+        "macro_f1": sum(macro_f1_values) / float(class_count),
+        "average_precision": sum(average_precision_values) / float(class_count),
+    }
+
+
 def _binary_auroc(y_true: Sequence[int], y_score: Sequence[float]) -> float:
     positives = sum(1 for value in y_true if int(value) == 1)
     negatives = len(y_true) - positives
@@ -177,4 +230,4 @@ def _require_same_non_empty_length(a: Sequence[object], b: Sequence[object]) -> 
         raise ValueError("Metric inputs must have the same length.")
 
 
-__all__ = ["binary_metrics", "multiclass_metrics", "regression_metrics", "spearmanr"]
+__all__ = ["binary_metrics", "multiclass_metrics", "multilabel_metrics", "regression_metrics", "spearmanr"]

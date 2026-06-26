@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any, TypeAlias, cast
 from CBBIO.embeddings import EmbeddingInputError
 
 from .datasets import TaskLevel
-from .metrics import binary_metrics, multiclass_metrics, regression_metrics
+from .metrics import binary_metrics, multiclass_metrics, multilabel_metrics, regression_metrics
 
 if TYPE_CHECKING:
     from .tasks import PredictionSpec
@@ -59,23 +59,28 @@ class ProbeBackend(ABC):
 def evaluate_probe_backend_output(
     data: ProbeBackendInput,
     output: ProbeBackendOutput,
-) -> tuple[dict[str, float], dict[str, ProbePrediction], dict[str, float] | None]:
+) -> tuple[dict[str, float], dict[str, ProbePredictionOutput], dict[str, ProbeScoreOutput] | None]:
     """Validate custom backend output and compute canonical probe metrics."""
 
-    if data.prediction.objective == "multilabel":
-        raise EmbeddingInputError("Custom probe backends do not support multilabel evaluation.")
     if data.level == "protein":
         return _evaluate_protein_output(data, output)
+    if data.prediction.objective == "multilabel":
+        raise EmbeddingInputError("Custom residue probe backends do not support multilabel evaluation.")
     if data.level == "residue":
-        return _evaluate_residue_output(data, output)
+        return cast(
+            tuple[dict[str, float], dict[str, ProbePredictionOutput], dict[str, ProbeScoreOutput] | None],
+            _evaluate_residue_output(data, output),
+        )
     raise EmbeddingInputError(f"Unsupported custom probe level: {data.level!r}.")
 
 
 def _evaluate_protein_output(
     data: ProbeBackendInput,
     output: ProbeBackendOutput,
-) -> tuple[dict[str, float], dict[str, ProbePrediction], dict[str, float] | None]:
+) -> tuple[dict[str, float], dict[str, ProbePredictionOutput], dict[str, ProbeScoreOutput] | None]:
     _require_output_ids(data.test_ids, output.predictions, name="predictions")
+    if data.prediction.objective == "multilabel":
+        return _evaluate_protein_multilabel_output(data, output)
     predictions = {
         item: _require_scalar(output.predictions[item], item=item, name="prediction")
         for item in data.test_ids
@@ -92,7 +97,44 @@ def _evaluate_protein_output(
         predictions=predictions,
         scores=scores,
     )
-    return metrics, predictions, scores
+    return (
+        metrics,
+        cast(dict[str, ProbePredictionOutput], predictions),
+        cast(dict[str, ProbeScoreOutput] | None, scores),
+    )
+
+
+def _evaluate_protein_multilabel_output(
+    data: ProbeBackendInput,
+    output: ProbeBackendOutput,
+) -> tuple[dict[str, float], dict[str, ProbePredictionOutput], dict[str, ProbeScoreOutput] | None]:
+    classes = _multilabel_names(data)
+    class_index = {name: index for index, name in enumerate(classes)}
+    predictions: dict[str, ProbePredictionOutput] = {}
+    true_matrix: list[list[int]] = []
+    pred_matrix: list[list[int]] = []
+    score_matrix: list[list[float]] = []
+    if output.scores is None:
+        raise EmbeddingInputError("Multilabel custom probe backends must return scores for every test example.")
+    _require_output_ids(data.test_ids, output.scores, name="scores")
+    scores: dict[str, ProbeScoreOutput] = {}
+    for item in data.test_ids:
+        true_labels = _multilabel_values(data.labels[item], item=item, name="labels")
+        predicted_labels = _multilabel_values(output.predictions[item], item=item, name="predictions")
+        score_values = _require_float_sequence(output.scores[item], item=item)
+        if len(score_values) != len(classes):
+            raise EmbeddingInputError(
+                f"Custom probe score length {len(score_values)} does not match "
+                f"class count {len(classes)} for {item!r}."
+            )
+        true_row = _multilabel_indicator(true_labels, item=item, indices=class_index, name="label")
+        pred_row = _multilabel_indicator(predicted_labels, item=item, indices=class_index, name="prediction")
+        predictions[item] = list(predicted_labels)
+        scores[item] = [float(value) for value in score_values]
+        true_matrix.append(true_row)
+        pred_matrix.append(pred_row)
+        score_matrix.append([float(value) for value in score_values])
+    return multilabel_metrics(true_matrix, pred_matrix, score_matrix), predictions, scores
 
 
 def _evaluate_residue_output(
@@ -251,6 +293,39 @@ def _multiclass_names(data: ProbeBackendInput) -> list[str]:
     if len(classes) < 2:
         raise EmbeddingInputError("Multiclass custom probes require at least two classes.")
     return classes
+
+
+def _multilabel_names(data: ProbeBackendInput) -> list[str]:
+    if data.prediction.classes is not None:
+        classes = [str(value) for value in data.prediction.classes]
+    else:
+        values: set[str] = set()
+        for item in (*data.train_ids, *data.test_ids):
+            values.update(_multilabel_values(data.labels[item], item=item, name="labels"))
+        classes = sorted(values)
+    if not classes:
+        raise EmbeddingInputError("Multilabel custom probes require at least one class.")
+    return classes
+
+
+def _multilabel_values(value: object, *, item: str, name: str) -> list[str]:
+    values = _require_sequence(value, item=item, name=name)
+    return sorted({str(label).strip() for label in values if str(label).strip()})
+
+
+def _multilabel_indicator(
+    values: Sequence[str],
+    *,
+    item: str,
+    indices: Mapping[str, int],
+    name: str,
+) -> list[int]:
+    row = [0] * len(indices)
+    for value in values:
+        if value not in indices:
+            raise EmbeddingInputError(f"Unknown multilabel {name} {value!r} for example {item!r}.")
+        row[indices[value]] = 1
+    return row
 
 
 def _class_index(

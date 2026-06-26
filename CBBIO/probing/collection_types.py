@@ -11,6 +11,7 @@ from typing import Literal
 from CBBIO.embeddings import EmbeddingInputError
 
 from .datasets import ObjectiveName, ProteinDataset, ResidueDataset
+from .splitters import DatasetSplitter
 
 
 DatasetLevel = Literal[
@@ -128,6 +129,7 @@ class DatasetCollection(ABC):
         target: str | None = None,
         download: bool = False,
         max_examples_per_split: Mapping[str, int | None] | None = None,
+        splitter: DatasetSplitter | None = None,
     ) -> ProteinDataset | ResidueDataset:
         """Load one dataset into the canonical in-memory representation."""
 

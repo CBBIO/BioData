@@ -3,16 +3,23 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 import numpy as _np
 from typing import Any, Dict, List, Tuple, cast
 
 from CBBIO.embeddings import EmbeddingDependencyError, EmbeddingInputError
 
-from .backends import ProbeBackend, ProbeBackendInput, ProbeBackendOutput, ProbePrediction
+from .backends import (
+    ProbeBackend,
+    ProbeBackendInput,
+    ProbeBackendOutput,
+    ProbePrediction,
+    ProbePredictionOutput,
+    ProbeScoreOutput,
+)
 from .datasets import ObjectiveName
-from .metrics import binary_metrics, multiclass_metrics, regression_metrics
+from .metrics import binary_metrics, multiclass_metrics, multilabel_metrics, regression_metrics
 from .tasks import PredictionSpec, ProbeKind, ProbeSpec
 
 
@@ -23,8 +30,8 @@ DEFAULT_RESIDUE_BATCH_SIZE = 8192
 class ProbeEvaluation:
     """Evaluation metrics, predictions, and optional scores from a probe."""
     metrics: Dict[str, float]
-    predictions: Dict[str, float | int | str]
-    scores: Dict[str, float] | None = None
+    predictions: Dict[str, ProbePredictionOutput]
+    scores: Dict[str, ProbeScoreOutput] | None = None
 
 
 @dataclass(frozen=True)
@@ -151,9 +158,6 @@ def train_and_evaluate_probe(
     """Train a small PyTorch probe and evaluate it on the test split."""
 
     torch = _import_torch()
-    if prediction.objective == "multilabel":
-        raise EmbeddingInputError("Multilabel probes are not supported in this first probing slice.")
-
     ordered_ids = list(train_ids) + list(test_ids)
     input_dim = _validate_embeddings(ordered_ids, embeddings)
     encoded_labels, output_dim, class_names = _encode_labels(
@@ -679,6 +683,8 @@ def _loss_fn(torch: Any, objective: ObjectiveName) -> Any:
         return torch.nn.MSELoss()
     if objective == "binary":
         return torch.nn.BCEWithLogitsLoss()
+    if objective == "multilabel":
+        return torch.nn.BCEWithLogitsLoss()
     if objective == "multiclass":
         return torch.nn.CrossEntropyLoss()
     raise EmbeddingInputError(f"Unsupported probe objective: {objective!r}.")
@@ -694,10 +700,17 @@ def _tensor_for_ids(torch: Any, ids: Sequence[str], embeddings: Mapping[str, Seq
     return torch.tensor([[float(value) for value in embeddings[item]] for item in ids], dtype=torch.float32)
 
 
-def _label_tensor(torch: Any, values: Sequence[float | int], objective: ObjectiveName) -> Any:
+def _label_tensor(torch: Any, values: Sequence[float | int | Sequence[float]], objective: ObjectiveName) -> Any:
     if objective in {"regression", "binary"}:
-        return torch.tensor([float(value) for value in values], dtype=torch.float32)
-    return torch.tensor([int(value) for value in values], dtype=torch.long)
+        scalar_values = cast(Sequence[float | int], values)
+        return torch.tensor([float(value) for value in scalar_values], dtype=torch.float32)
+    if objective == "multilabel":
+        return torch.tensor(
+            [[float(entry) for entry in cast(Sequence[float], value)] for value in values],
+            dtype=torch.float32,
+        )
+    scalar_values = cast(Sequence[float | int], values)
+    return torch.tensor([int(value) for value in scalar_values], dtype=torch.long)
 
 
 def _feature_standardization_stats(torch: Any, values: Any) -> Tuple[Any, Any]:
@@ -716,7 +729,7 @@ def _encode_labels(
     *,
     objective: ObjectiveName,
     classes: Sequence[str] | None,
-) -> Tuple[Dict[str, float | int], int, List[str] | None]:
+) -> Tuple[Dict[str, float | int | List[float]], int, List[str] | None]:
     if objective == "regression":
         return ({item: float(cast(float | int | str, labels[item])) for item in ids}, 1, None)
     if objective == "binary":
@@ -724,13 +737,26 @@ def _encode_labels(
     if objective == "multiclass":
         class_names = list(classes) if classes is not None else _infer_classes([labels[item] for item in ids])
         class_index = {name: index for index, name in enumerate(class_names)}
-        encoded: Dict[str, float | int] = {}
+        encoded: Dict[str, float | int | List[float]] = {}
         for item in ids:
             value = labels[item]
             key = str(value)
             if key not in class_index:
                 raise EmbeddingInputError(f"Unknown class label {value!r} for example {item!r}.")
             encoded[item] = class_index[key]
+        return encoded, len(class_names), class_names
+    if objective == "multilabel":
+        label_sets = {item: _as_multilabel(labels[item], item) for item in ids}
+        class_names = list(classes) if classes is not None else _infer_multilabel_classes(label_sets.values())
+        class_index = {name: index for index, name in enumerate(class_names)}
+        encoded: Dict[str, float | int | List[float]] = {}
+        for item, item_labels in label_sets.items():
+            vector = [0.0] * len(class_names)
+            for label in item_labels:
+                if label not in class_index:
+                    raise EmbeddingInputError(f"Unknown multilabel class {label!r} for example {item!r}.")
+                vector[class_index[label]] = 1.0
+            encoded[item] = vector
         return encoded, len(class_names), class_names
     raise EmbeddingInputError(f"Unsupported probe objective: {objective!r}.")
 
@@ -757,41 +783,83 @@ def _infer_classes(values: Sequence[object]) -> List[str]:
     return classes
 
 
+def _as_multilabel(value: object, example_id: str) -> List[str]:
+    if isinstance(value, str | bytes) or not isinstance(value, Sequence):
+        raise EmbeddingInputError(
+            f"Multilabel target for example {example_id!r} must be a sequence of labels."
+        )
+    raw_labels = cast(Sequence[object], value)
+    return sorted({str(label).strip() for label in raw_labels if str(label).strip()})
+
+
+def _infer_multilabel_classes(values: Iterable[Sequence[str]]) -> List[str]:
+    classes = sorted({label for labels in values for label in labels})
+    if not classes:
+        raise EmbeddingInputError("Multilabel objective requires at least one class.")
+    return classes
+
+
 def _evaluate_outputs(
     torch: Any,
     *,
     test_ids: Sequence[str],
     logits: Any,
-    labels: Mapping[str, float | int],
+    labels: Mapping[str, float | int | Sequence[float]],
     objective: ObjectiveName,
     class_names: Sequence[str] | None,
 ) -> ProbeEvaluation:
     if objective == "regression":
         values = cast(List[float], logits.reshape(-1).detach().cpu().tolist())
-        true_values = [float(labels[item]) for item in test_ids]
+        true_values = [float(cast(float | int, labels[item])) for item in test_ids]
         return ProbeEvaluation(
             metrics=regression_metrics(true_values, values),
             predictions={item: float(value) for item, value in zip(test_ids, values)},
         )
     if objective == "binary":
-        scores = cast(List[float], torch.sigmoid(logits.reshape(-1)).detach().cpu().tolist())
-        pred_labels = [1 if score >= 0.5 else 0 for score in scores]
-        true_labels = [int(labels[item]) for item in test_ids]
+        binary_scores = cast(List[float], torch.sigmoid(logits.reshape(-1)).detach().cpu().tolist())
+        pred_labels = [1 if score >= 0.5 else 0 for score in binary_scores]
+        true_labels = [int(cast(float | int, labels[item])) for item in test_ids]
         return ProbeEvaluation(
-            metrics=binary_metrics(true_labels, pred_labels, scores),
+            metrics=binary_metrics(true_labels, pred_labels, binary_scores),
             predictions={item: int(value) for item, value in zip(test_ids, pred_labels)},
-            scores={item: float(value) for item, value in zip(test_ids, scores)},
+            scores={item: float(value) for item, value in zip(test_ids, binary_scores)},
         )
     if objective == "multiclass":
         pred_indices = cast(List[int], torch.argmax(logits, dim=1).detach().cpu().tolist())
-        true_indices = [int(labels[item]) for item in test_ids]
+        true_indices = [int(cast(float | int, labels[item])) for item in test_ids]
         names = list(class_names or [])
-        predictions: Dict[str, float | int | str] = {}
+        predictions: Dict[str, ProbePredictionOutput] = {}
         for item, index in zip(test_ids, pred_indices):
             predictions[item] = names[index] if names else int(index)
         return ProbeEvaluation(
             metrics=multiclass_metrics(true_indices, pred_indices, class_count=max(1, len(names))),
             predictions=predictions,
+        )
+    if objective == "multilabel":
+        names = list(class_names or [])
+        if not names:
+            raise EmbeddingInputError("Multilabel evaluation requires class names.")
+        score_matrix = cast(List[List[float]], torch.sigmoid(logits).detach().cpu().tolist())
+        pred_matrix = [
+            [1 if score >= 0.5 else 0 for score in row]
+            for row in score_matrix
+        ]
+        true_matrix = [
+            [int(value) for value in cast(Sequence[float], labels[item])]
+            for item in test_ids
+        ]
+        predictions = {
+            item: [names[index] for index, value in enumerate(row) if value == 1]
+            for item, row in zip(test_ids, pred_matrix)
+        }
+        multilabel_scores: Dict[str, ProbeScoreOutput] = {
+            item: [float(value) for value in row]
+            for item, row in zip(test_ids, score_matrix)
+        }
+        return ProbeEvaluation(
+            metrics=multilabel_metrics(true_matrix, pred_matrix, score_matrix),
+            predictions=predictions,
+            scores=multilabel_scores,
         )
     raise EmbeddingInputError(f"Unsupported probe objective: {objective!r}.")
 
@@ -822,9 +890,9 @@ def _expand_residue_evaluation(
                 raise EmbeddingInputError(
                     f"Built-in probe did not return a prediction for {residue_id!r}."
                 )
-            item_predictions[index] = evaluation.predictions[residue_id]
+            item_predictions[index] = cast(ProbePrediction, evaluation.predictions[residue_id])
             if item_scores is not None and evaluation.scores is not None:
-                item_scores[index] = evaluation.scores[residue_id]
+                item_scores[index] = float(cast(float, evaluation.scores[residue_id]))
         predictions[item] = item_predictions
         if scores is not None and item_scores is not None:
             scores[item] = item_scores

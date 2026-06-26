@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 import csv
-import hashlib
 import json
 from pathlib import Path
 from typing import Any, cast
@@ -14,18 +13,13 @@ from CBBIO.embeddings import EmbeddingInputError
 
 from ..collection_types import CollectionMetadata, DatasetMetadata, residue_dataset_metadata
 from ..datasets import ResidueDataset, ResidueExample, SplitName
+from ..splitters import DatasetSplitter, StratifiedDatasetSplitter
 
 
 _DISPROT_API_URL = "https://disprot.org/api/v2/download"
 _DISPROT_API_QUERY = "release=current&term_ontology=IDPO&term_ontology=GO"
 DISPROT_CURRENT_TSV_URL = f"{_DISPROT_API_URL}?format=tsv&{_DISPROT_API_QUERY}"
 DISPROT_CURRENT_JSON_URL = f"{_DISPROT_API_URL}?format=json&{_DISPROT_API_QUERY}"
-DISPROT_SPLIT_RATIOS: tuple[tuple[SplitName, float], ...] = (
-    ("train", 0.8),
-    ("val", 0.1),
-    ("test", 0.1),
-)
-
 DISPROT_COLLECTION_METADATA = CollectionMetadata(
     id="disprot",
     display_name="DisProt",
@@ -82,12 +76,15 @@ def load_disprot_json(
     *,
     target: str = "disorder",
     split: SplitName | None = None,
+    splitter: DatasetSplitter | None = None,
 ) -> ResidueDataset:
     """Load DisProt JSON entries by expanding regions to residue labels."""
     payload = json.loads(Path(path).read_text(encoding="utf-8"))
     entries = _disprot_entries(payload)
     if _has_current_region_schema(entries):
-        return _load_current_json_entries(entries, target=target, split=split)
+        return _load_current_json_entries(entries, target=target, split=split, splitter=splitter)
+    if splitter is not None:
+        raise EmbeddingInputError("Legacy DisProt JSON loading does not accept splitter.")
 
     examples: list[ResidueExample] = []
     for index, entry in enumerate(entries):
@@ -269,6 +266,7 @@ def _load_current_json_entries(
     *,
     target: str,
     split: SplitName | None,
+    splitter: DatasetSplitter | None,
 ) -> ResidueDataset:
     grouped: dict[str, dict[str, Any]] = {}
     for entry in entries:
@@ -295,7 +293,12 @@ def _load_current_json_entries(
         raise EmbeddingInputError("No Structural state disorder rows found in DisProt JSON.")
     examples = _current_examples(grouped, target=target, split=split)
     if split is None:
-        examples = _assign_stratified_splits(examples)
+        resolved_splitter = splitter or StratifiedDatasetSplitter(
+            metadata_fields=("dataset_stratum", "disorder_content_bin"),
+            salt="disprot-split-v1",
+            fallback_metadata_fields=("disorder_content_bin",),
+        )
+        examples = resolved_splitter.split_examples(examples)
     return ResidueDataset(examples)
 
 
@@ -369,77 +372,6 @@ def _is_disorder_region(region: Mapping[str, Any]) -> bool:
     namespace = str(region.get("term_namespace") or "").strip().lower()
     term_name = str(region.get("term_name") or "").strip().lower()
     return namespace == "structural state" and term_name == "disorder"
-
-
-def _assign_stratified_splits(examples: Sequence[ResidueExample]) -> list[ResidueExample]:
-    primary_groups: dict[tuple[str, str], list[ResidueExample]] = {}
-    for example in examples:
-        metadata = example.metadata or {}
-        key = (
-            str(metadata.get("dataset_stratum") or "none"),
-            str(metadata.get("disorder_content_bin") or "unknown"),
-        )
-        primary_groups.setdefault(key, []).append(example)
-
-    assigned: list[ResidueExample] = []
-    rare_by_content: dict[str, list[ResidueExample]] = {}
-    for key, group in primary_groups.items():
-        if len(group) >= 10:
-            assigned.extend(_split_group(group))
-        else:
-            rare_by_content.setdefault(key[1], []).extend(group)
-    rare_global: list[ResidueExample] = []
-    for group in rare_by_content.values():
-        if len(group) >= 10:
-            assigned.extend(_split_group(group))
-        else:
-            rare_global.extend(group)
-    if rare_global:
-        assigned.extend(_split_group(rare_global))
-    return sorted(assigned, key=lambda example: example.id)
-
-
-def _split_group(group: Sequence[ResidueExample]) -> list[ResidueExample]:
-    ordered = sorted(group, key=lambda example: _stable_hash(example.id))
-    counts = _split_counts(len(ordered))
-    split_names: list[SplitName] = [
-        split_name for split_name, count in counts for _ in range(count)
-    ]
-    return [
-        ResidueExample(
-            id=example.id,
-            sequence=example.sequence,
-            labels=example.labels,
-            split=split_name,
-            mask=example.mask,
-            metadata=example.metadata,
-        )
-        for example, split_name in zip(ordered, split_names)
-    ]
-
-
-def _split_counts(total: int) -> list[tuple[SplitName, int]]:
-    if total <= 0:
-        return [("train", 0), ("val", 0), ("test", 0)]
-    validation = int(round(total * DISPROT_SPLIT_RATIOS[1][1]))
-    test = int(round(total * DISPROT_SPLIT_RATIOS[2][1]))
-    if total >= 10:
-        validation = max(1, validation)
-        test = max(1, test)
-    elif total >= 2:
-        test = max(1, test)
-    train = total - validation - test
-    while train < 1 and validation > 0:
-        validation -= 1
-        train += 1
-    while train < 1 and test > 0:
-        test -= 1
-        train += 1
-    return [("train", train), ("val", validation), ("test", test)]
-
-
-def _stable_hash(value: str) -> str:
-    return hashlib.sha256(f"disprot-split-v1:{value}".encode("utf-8")).hexdigest()
 
 
 def _disorder_content_bin(fraction: float) -> str:
@@ -549,7 +481,6 @@ __all__ = [
     "DISPROT_CURRENT_JSON_URL",
     "DISPROT_CURRENT_TSV_URL",
     "DISPROT_DATASETS",
-    "DISPROT_SPLIT_RATIOS",
     "download_disprot_current_json",
     "download_disprot_current_tsv",
     "load_disprot_json",

@@ -17,6 +17,8 @@ from CBBIO import (
     MmseqsRedundancyHit,
     MmseqsRedundancyReport,
     PredictionSpec,
+    HashDatasetSplitter,
+    HoldoutDatasetSplitter,
     ProbeBackend,
     ProbeBackendInput,
     ProbeBackendOutput,
@@ -25,6 +27,7 @@ from CBBIO import (
     ProteinExample,
     ResidueDataset,
     ResidueExample,
+    StratifiedDatasetSplitter,
     Task,
     get_dataset_collection,
     get_dataset_catalog_entry,
@@ -52,6 +55,7 @@ from CBBIO import (
     load_dbptm_benchmark_dataset,
     load_disprot_json,
     load_disprot_tsv,
+    load_ec_dataset,
     load_flip_csv,
     load_flip_dataset,
     load_interval_residue_tsv,
@@ -62,11 +66,13 @@ from CBBIO import (
     load_residue_label_table,
     load_residue_label_csv,
     load_residue_source_dataset,
+    read_ec_manifest,
     run_task_on_layer,
     search_dataset_catalog,
     train_and_evaluate_residue_probe,
 )
 from CBBIO.probing.metrics import binary_metrics
+from CBBIO.probing.metrics import multilabel_metrics
 from CBBIO.probing.metrics import spearmanr
 from CBBIO.embeddings import EmbeddingInputError
 
@@ -84,6 +90,240 @@ class _FixedProbeBackend(ProbeBackend):
         """Capture canonical input and return fixed predictions."""
         self.data = data
         return self.output
+
+
+def test_hash_dataset_splitter_assigns_stable_protein_splits() -> None:
+    examples = [
+        ProteinExample(f"protein_{index}", "ACDE", {"active": index % 2}, "train")
+        for index in range(12)
+    ]
+    splitter = HashDatasetSplitter(salt="test-split-v1")
+
+    first = splitter.split_examples(examples)
+    second = splitter.split_examples(examples)
+
+    assert ProteinDataset(first).split_counts() == {"train": 10, "val": 1, "test": 1}
+    assert {example.id: example.split for example in first} == {
+        example.id: example.split for example in second
+    }
+
+
+def test_hash_dataset_splitter_rebuilds_residue_dataset() -> None:
+    dataset = ResidueDataset(
+        ResidueExample(
+            f"residue_{index}",
+            "ACDE",
+            {"site": [0, 1, 0, 0]},
+            "train",
+        )
+        for index in range(12)
+    )
+
+    split_dataset = HashDatasetSplitter(salt="residue-split-v1").split_dataset(dataset)
+
+    assert isinstance(split_dataset, ResidueDataset)
+    assert split_dataset.split_counts() == {"train": 10, "val": 1, "test": 1}
+
+
+def test_stratified_dataset_splitter_balances_large_metadata_groups() -> None:
+    examples = [
+        ResidueExample(
+            f"{family}_{index}",
+            "ACDE",
+            {"site": [0, 1, 0, 0]},
+            "train",
+            metadata={"family": family},
+        )
+        for family in ("kinase", "phosphatase")
+        for index in range(10)
+    ]
+
+    split_examples = StratifiedDatasetSplitter(
+        metadata_fields=("family",),
+        salt="family-split-v1",
+    ).split_examples(examples)
+    families_by_split: dict[str, set[str]] = {"train": set(), "val": set(), "test": set()}
+    for example in split_examples:
+        assert example.metadata is not None
+        families_by_split[example.split].add(str(example.metadata["family"]))
+
+    assert ResidueDataset(split_examples).split_counts() == {"train": 16, "val": 2, "test": 2}
+    assert families_by_split == {
+        "train": {"kinase", "phosphatase"},
+        "val": {"kinase", "phosphatase"},
+        "test": {"kinase", "phosphatase"},
+    }
+
+
+def test_stratified_dataset_splitter_uses_fallback_for_rare_groups() -> None:
+    examples = [
+        ResidueExample(
+            f"{subfamily}_{index}",
+            "ACDE",
+            {"site": [0, 1, 0, 0]},
+            "train",
+            metadata={"family": "enzyme", "subfamily": subfamily},
+        )
+        for subfamily in ("a", "b")
+        for index in range(6)
+    ]
+
+    split_examples = StratifiedDatasetSplitter(
+        metadata_fields=("family", "subfamily"),
+        fallback_metadata_fields=("family",),
+        salt="rare-family-split-v1",
+    ).split_examples(examples)
+
+    assert ResidueDataset(split_examples).split_counts() == {"train": 10, "val": 1, "test": 1}
+
+
+def test_stratified_dataset_splitter_handles_missing_metadata() -> None:
+    examples = [
+        ResidueExample(
+            f"missing_{index}",
+            "ACDE",
+            {"site": [0, 1, 0, 0]},
+            "train",
+            metadata=None,
+        )
+        for index in range(12)
+    ]
+
+    split_examples = StratifiedDatasetSplitter(
+        metadata_fields=("family",),
+        salt="missing-metadata-split-v1",
+    ).split_examples(examples)
+
+    assert ResidueDataset(split_examples).split_counts() == {"train": 10, "val": 1, "test": 1}
+
+
+def test_holdout_dataset_splitter_assigns_metadata_matches_to_test() -> None:
+    examples = [
+        ProteinExample(
+            f"protein_{index}",
+            "ACDE",
+            {"active": index % 2},
+            "train",
+            metadata={"species": "heldout" if index < 3 else "trainable"},
+        )
+        for index in range(20)
+    ]
+    splitter = HoldoutDatasetSplitter(
+        metadata_field="species",
+        holdout_values=("heldout",),
+        salt="species-holdout-v1",
+    )
+
+    first = splitter.split_examples(examples)
+    second = splitter.split_examples(examples)
+    test_ids = {example.id for example in first if example.split == "test"}
+
+    assert test_ids == {"protein_0", "protein_1", "protein_2"}
+    assert ProteinDataset(first).split_counts() == {"train": 15, "val": 2, "test": 3}
+    assert {example.id: example.split for example in first} == {
+        example.id: example.split for example in second
+    }
+
+
+def test_holdout_dataset_splitter_selects_metadata_classes_deterministically() -> None:
+    examples = [
+        ProteinExample(
+            f"{species}_{index}",
+            "ACDE",
+            {"active": index % 2},
+            "train",
+            metadata={"species": species},
+        )
+        for species in ("human", "mouse", "yeast")
+        for index in range(4)
+    ]
+    splitter = HoldoutDatasetSplitter(
+        metadata_field="species",
+        salt="random-species-holdout-v1",
+        ratios={"train": 0.5, "val": 0.25, "test": 0.25},
+    )
+
+    first = splitter.split_examples(examples)
+    second = splitter.split_examples(examples)
+    heldout_species = {
+        str(example.metadata["species"])
+        for example in first
+        if example.metadata is not None and example.split == "test"
+    }
+
+    assert len(heldout_species) == 1
+    assert ProteinDataset(first).split_counts() == {"train": 5, "val": 3, "test": 4}
+    assert all(
+        str(example.metadata["species"]) in heldout_species
+        for example in first
+        if example.metadata is not None and example.split == "test"
+    )
+    assert {example.id: example.split for example in first} == {
+        example.id: example.split for example in second
+    }
+
+
+def test_holdout_dataset_splitter_selects_rarest_metadata_classes_first() -> None:
+    examples = [
+        *[
+            ProteinExample(
+                f"human_{index}",
+                "ACDE",
+                {"active": index % 2},
+                "train",
+                metadata={"species": "human"},
+            )
+            for index in range(8)
+        ],
+        *[
+            ProteinExample(
+                f"mouse_{index}",
+                "ACDE",
+                {"active": index % 2},
+                "train",
+                metadata={"species": "mouse"},
+            )
+            for index in range(3)
+        ],
+        ProteinExample("yeast_0", "ACDE", {"active": 1}, "train", metadata={"species": "yeast"}),
+    ]
+
+    split_examples = HoldoutDatasetSplitter(
+        metadata_field="species",
+        holdout_strategy="rarest_first",
+        salt="rarest-species-holdout-v1",
+        ratios={"train": 0.5, "val": 0.25, "test": 0.25},
+    ).split_examples(examples)
+    test_species = {
+        str(example.metadata["species"])
+        for example in split_examples
+        if example.metadata is not None and example.split == "test"
+    }
+
+    assert test_species == {"mouse", "yeast"}
+    assert ProteinDataset(split_examples).split_counts() == {"train": 5, "val": 3, "test": 4}
+
+
+def test_holdout_dataset_splitter_can_disable_class_holdout() -> None:
+    examples = [
+        ProteinExample(
+            f"protein_{index}",
+            "ACDE",
+            {"active": index % 2},
+            "train",
+            metadata={"species": "human" if index < 6 else "mouse"},
+        )
+        for index in range(12)
+    ]
+
+    split_examples = HoldoutDatasetSplitter(
+        metadata_field="species",
+        holdout_strategy="none",
+        salt="no-class-holdout-v1",
+        ratios={"train": 0.5, "val": 0.25, "test": 0.25},
+    ).split_examples(examples)
+
+    assert ProteinDataset(split_examples).split_counts() == {"train": 6, "val": 3, "test": 3}
 
 
 def test_custom_probe_backend_uses_canonical_protein_splits_and_metrics() -> None:
@@ -342,6 +582,67 @@ def test_binary_metrics_include_imbalance_aware_scores() -> None:
     assert metrics["mcc"] == pytest.approx(1 / 3**0.5)
     assert metrics["auroc"] == 1.0
     assert metrics["auprc"] == 1.0
+
+
+def test_multilabel_metrics_report_micro_and_macro_f1() -> None:
+    metrics = multilabel_metrics(
+        y_true=[[1, 0], [0, 1], [1, 1]],
+        y_pred=[[1, 0], [1, 0], [1, 1]],
+        y_score=[[0.9, 0.1], [0.6, 0.4], [0.8, 0.7]],
+    )
+
+    assert metrics["exact_match"] == pytest.approx(2.0 / 3.0)
+    assert metrics["micro_f1"] == pytest.approx(0.75)
+    assert metrics["macro_f1"] == pytest.approx((0.8 + 2.0 / 3.0) / 2.0)
+    assert metrics["average_precision"] == pytest.approx(1.0)
+
+
+def test_multilabel_task_trains_probe_with_label_sets() -> None:
+    dataset = ProteinDataset(
+        [
+            ProteinExample("none", "ACDE", {"terms": []}, "train"),
+            ProteinExample("a0", "ACDE", {"terms": ["a"]}, "train"),
+            ProteinExample("a1", "ACDE", {"terms": ["a"]}, "train"),
+            ProteinExample("b0", "ACDE", {"terms": ["b"]}, "train"),
+            ProteinExample("b1", "ACDE", {"terms": ["b"]}, "train"),
+            ProteinExample("ab0", "ACDE", {"terms": ["a", "b"]}, "train"),
+            ProteinExample("ab1", "ACDE", {"terms": ["a", "b"]}, "train"),
+            ProteinExample("test_a", "ACDE", {"terms": ["a"]}, "test"),
+            ProteinExample("test_b", "ACDE", {"terms": ["b"]}, "test"),
+            ProteinExample("test_ab", "ACDE", {"terms": ["a", "b"]}, "test"),
+        ]
+    )
+    embeddings = {
+        "none": [0.0, 0.0],
+        "a0": [2.0, 0.0],
+        "a1": [2.5, 0.1],
+        "b0": [0.0, 2.0],
+        "b1": [0.1, 2.5],
+        "ab0": [2.0, 2.0],
+        "ab1": [2.5, 2.5],
+        "test_a": [3.0, 0.0],
+        "test_b": [0.0, 3.0],
+        "test_ab": [3.0, 3.0],
+    }
+    task = Task(
+        name="multilabel_terms",
+        dataset=dataset,
+        prediction=PredictionSpec(target="terms", objective="multilabel"),
+        probe=ProbeSpec(epochs=300, learning_rate=0.1, seed=17),
+    )
+
+    result = run_task_on_layer(task=task, embeddings=embeddings)
+
+    assert result.metrics["exact_match"] == pytest.approx(1.0)
+    assert result.metrics["micro_f1"] == pytest.approx(1.0)
+    assert result.metrics["macro_f1"] == pytest.approx(1.0)
+    assert result.predictions == {
+        "test_a": ["a"],
+        "test_b": ["b"],
+        "test_ab": ["a", "b"],
+    }
+    assert result.scores is not None
+    assert set(result.scores) == {"test_a", "test_b", "test_ab"}
 
 
 def test_probe_standardizes_embedding_features_from_train_split() -> None:
@@ -752,6 +1053,159 @@ def test_residue_dataset_catalog_lists_ptm_and_binding_sources() -> None:
     assert {"biolip", "metalpdb", "scannet_binding"}.issubset(binding)
 
 
+def _write_ec_dataset_layout(root: Path) -> None:
+    ec_root = root / "ec_main_head"
+    manifest_dir = ec_root / "manifests"
+    manifest_dir.mkdir(parents=True)
+    for track in ("head", "main"):
+        (manifest_dir / f"ec_full_{track}.json").write_text(
+            json.dumps({"task": "ec_full", "track": track, "split_counts": {"train": 2}})
+            + "\n",
+            encoding="utf-8",
+        )
+        for split in ("train", "val", "test"):
+            split_dir = ec_root / "tasks" / "ec_full" / track
+            split_dir.mkdir(parents=True, exist_ok=True)
+            (split_dir / f"{split}.jsonl").write_text("", encoding="utf-8")
+    records = {
+        ("head", "train"): [
+            _ec_jsonl_record(
+                "ec_full:head:p1",
+                "ACDE",
+                ["1.1.1.1"],
+                ec_level1=["1"],
+                ec_level2=["1.1"],
+                ec_level3=["1.1.1"],
+            ),
+            _ec_jsonl_record(
+                "ec_full:head:p2",
+                "FGHI",
+                ["2.7.7.4", "3.5.4.10"],
+                ec_level1=["2", "3"],
+                ec_level2=["2.7", "3.5"],
+                ec_level3=["2.7.7", "3.5.4"],
+            ),
+            _ec_jsonl_record(
+                "ec_full:head:p5",
+                "TVWY",
+                ["1.1.1.5"],
+                ec_level1=["1"],
+                ec_level2=["1.1"],
+                ec_level3=["1.1.1"],
+            ),
+            _ec_jsonl_record(
+                "ec_full:head:p7",
+                "AAAA",
+                ["1.1.2.1"],
+                ec_level1=["1"],
+                ec_level2=["1.1"],
+                ec_level3=["1.1.2"],
+            ),
+            _ec_jsonl_record(
+                "ec_full:head:p8",
+                "CCCC",
+                ["1.2.1.1"],
+                ec_level1=["1"],
+                ec_level2=["1.2"],
+                ec_level3=["1.2.1"],
+            ),
+        ],
+        ("head", "test"): [
+            _ec_jsonl_record(
+                "ec_full:head:p6",
+                "LMNP",
+                ["1.1.1.6"],
+                ec_level1=["1"],
+                ec_level2=["1.1"],
+                ec_level3=["1.1.1"],
+            )
+        ],
+        ("main", "val"): [
+            _ec_jsonl_record(
+                "ec_full:main:p3",
+                "KLMN",
+                ["3.5.4.10"],
+                ec_level1=["3"],
+                ec_level2=["3.5"],
+                ec_level3=["3.5.4"],
+            )
+        ],
+        ("main", "test"): [
+            _ec_jsonl_record(
+                "ec_full:main:p4",
+                "PQRS",
+                ["1.1.1.1"],
+                ec_level1=["1"],
+                ec_level2=["1.1"],
+                ec_level3=["1.1.1"],
+            )
+        ],
+    }
+    for (track, split), split_records in records.items():
+        path = ec_root / "tasks" / "ec_full" / track / f"{split}.jsonl"
+        path.write_text(
+            "".join(json.dumps(record) + "\n" for record in split_records),
+            encoding="utf-8",
+        )
+
+
+def _write_ec_holdout_budget_layout(root: Path) -> None:
+    split_dir = root / "ec_main_head" / "tasks" / "ec_full" / "head"
+    split_dir.mkdir(parents=True)
+    for split in ("val", "test"):
+        (split_dir / f"{split}.jsonl").write_text("", encoding="utf-8")
+
+    records: list[dict[str, object]] = []
+    child_counts = {
+        "1.1.1.1": 1,
+        "1.1.1.2": 2,
+        "1.1.1.3": 3,
+        "1.1.1.4": 20,
+    }
+    index = 0
+    for exact_label, count in child_counts.items():
+        for _ in range(count):
+            index += 1
+            records.append(
+                _ec_jsonl_record(
+                    f"ec_full:head:budget{index}",
+                    "ACDE",
+                    [exact_label],
+                    ec_level1=["1"],
+                    ec_level2=["1.1"],
+                    ec_level3=["1.1.1"],
+                )
+            )
+    (split_dir / "train.jsonl").write_text(
+        "".join(json.dumps(record) + "\n" for record in records),
+        encoding="utf-8",
+    )
+
+
+def _ec_jsonl_record(
+    record_id: str,
+    sequence: str,
+    labels_exact: list[str],
+    *,
+    ec_level1: list[str],
+    ec_level2: list[str],
+    ec_level3: list[str],
+) -> dict[str, object]:
+    return {
+        "cluster_id": record_id.rpartition(":")[2],
+        "id": record_id,
+        "labels_exact": labels_exact,
+        "metadata": {
+            "ec_level1": ec_level1,
+            "ec_level2": ec_level2,
+            "ec_level3": ec_level3,
+            "track": record_id.split(":")[1],
+        },
+        "rep_accession": record_id.rpartition(":")[2],
+        "sequence": sequence,
+    }
+
+
 def test_dtu_catalog_lists_relevant_residue_services() -> None:
     residue_names = {service.name for service in list_dtu_services(level="residue")}
     ptm_names = {service.name for service in list_dtu_services(category="ptm")}
@@ -781,6 +1235,20 @@ def test_unified_dataset_catalog_is_filterable_and_searchable() -> None:
     assert get_dataset_catalog_entry("phosphoelm:ltp").preferred_metric == "f1"
     assert get_dataset_catalog_entry("peer:fold").task_class == "structure"
     assert get_dataset_catalog_entry("peer:fold").preferred_metric == "accuracy"
+    assert get_dataset_catalog_entry("ec:ec_1_head").split_counts == (28147, 3519, 3519)
+    assert get_dataset_catalog_entry("ec:ec_4_main").sample_count == 45405
+    assert get_dataset_catalog_entry("ec:ec_4_main").loader == "load_ec_dataset"
+    assert get_dataset_catalog_entry("ec_2_head").target == "ec_2"
+    assert get_dataset_catalog_entry("ec:single_ec_4_main").objective == "multiclass"
+    assert get_dataset_catalog_entry("single_ec_4_main").split_counts == (34213, 4368, 4376)
+    assert get_dataset_catalog_entry("ec:single_ec_1_head").target == "single_ec_1"
+    assert get_dataset_catalog_entry("ec:ec_3_subclass_holdout_main").objective == "multiclass"
+    assert get_dataset_catalog_entry("ec:ec_3_subclass_holdout_main").split_counts == (32143, 4040, 4021)
+    assert get_dataset_catalog_entry("ec_3_subclass_holdout_head").target == "ec_3"
+    assert get_dataset_catalog_entry("ec:ec_2_subclass_holdout_main").split_counts == (29773, 3771, 3738)
+    assert get_dataset_catalog_entry("ec_2_subclass_holdout_head").target == "ec_2"
+    assert get_dataset_catalog_entry("ec:ec_1_subclass_holdout_main").split_counts == (34592, 5057, 4485)
+    assert get_dataset_catalog_entry("ec_1_subclass_holdout_head").target == "ec_1"
     assert get_dataset_catalog_entry("source:phosphoelm_ltp").id == "phosphoelm:ltp"
     assert get_dataset_catalog_entry("secondary_structure").id == "peer:secondary_structure"
     for entry in list_dataset_catalog():
@@ -794,9 +1262,31 @@ def test_unified_dataset_catalog_is_filterable_and_searchable() -> None:
     assert "phosphoelm:all" in {entry.id for entry in ready_residue_ptm}
     assert "peer:fold" in {entry.id for entry in structure_tasks}
     assert "phosphoelm:ltp" in {entry.id for entry in f1_tasks}
+    assert "ec:ec_4_main" in {entry.id for entry in list_dataset_catalog(collection="ec")}
+    assert "ec:single_ec_4_main" in {entry.id for entry in list_dataset_catalog(collection="ec", objective="multiclass")}
+    assert "ec:ec_3_subclass_holdout_main" in {
+        entry.id for entry in list_dataset_catalog(collection="ec", objective="multiclass")
+    }
+    assert "ec:ec_2_subclass_holdout_main" in {
+        entry.id for entry in list_dataset_catalog(collection="ec", objective="multiclass")
+    }
+    assert "ec:ec_1_subclass_holdout_main" in {
+        entry.id for entry in list_dataset_catalog(collection="ec", objective="multiclass")
+    }
     assert search_results[0].id == "dbptm:phosphorylation_by_cdk"
     assert "peer:secondary_structure" in {entry.id for entry in search_dataset_catalog("secondary structure")}
     assert "phosphoelm:ltp" in {entry.id for entry in search_dataset_catalog("ptms f1 ltp")}
+    assert "ec:ec_3_head" in {entry.id for entry in search_dataset_catalog("enzyme commission ec 3 head")}
+    assert "ec:single_ec_3_head" in {entry.id for entry in search_dataset_catalog("single enzyme commission ec 3 head")}
+    assert "ec:ec_3_subclass_holdout_head" in {
+        entry.id for entry in search_dataset_catalog("ec 3 subclass holdout head")
+    }
+    assert "ec:ec_2_subclass_holdout_head" in {
+        entry.id for entry in search_dataset_catalog("ec 2 subclass holdout head")
+    }
+    assert "ec:ec_1_subclass_holdout_head" in {
+        entry.id for entry in search_dataset_catalog("ec 1 subclass holdout head")
+    }
 
 
 def test_dataset_catalog_is_flattened_from_registered_collections() -> None:
@@ -811,6 +1301,7 @@ def test_dataset_catalog_is_flattened_from_registered_collections() -> None:
     assert {collection.id for collection in collections} == {
         "peer",
         "dbptm",
+        "ec",
         "musitedeep",
         "disprot",
         "biolip",
@@ -851,6 +1342,138 @@ def test_load_dataset_routes_through_owning_collection(tmp_path: Path) -> None:
     dataset = load_dataset("disprot:all", tmp_path)
 
     assert dataset.target_values("disorder") == {"DP1": [1, 1, 1]}
+
+
+def test_load_ec_dataset_imports_generated_level_targets(tmp_path: Path) -> None:
+    _write_ec_dataset_layout(tmp_path)
+
+    level1 = load_dataset("ec:ec_1_head", tmp_path, split="train", download=True)
+    level4 = load_ec_dataset(tmp_path / "ec_main_head", name="ec_4_main", split=("val", "test"))
+
+    assert level1.split_counts() == {"train": 5, "val": 0, "test": 0}
+    assert level1.target_values("ec_1") == {
+        "ec_full:head:p1": ["1"],
+        "ec_full:head:p2": ["2", "3"],
+        "ec_full:head:p5": ["1"],
+        "ec_full:head:p7": ["1"],
+        "ec_full:head:p8": ["1"],
+    }
+    assert level4.split_counts() == {"train": 0, "val": 1, "test": 1}
+    assert level4.target_values("ec_4") == {
+        "ec_full:main:p3": ["3.5.4.10"],
+        "ec_full:main:p4": ["1.1.1.1"],
+    }
+
+
+def test_load_ec_dataset_imports_single_label_multiclass_targets(tmp_path: Path) -> None:
+    _write_ec_dataset_layout(tmp_path)
+
+    dataset = load_dataset("ec:single_ec_1_head", tmp_path, split="train", download=True)
+
+    assert dataset.split_counts() == {"train": 4, "val": 0, "test": 0}
+    assert dataset.target_values("single_ec_1") == {
+        "ec_full:head:p1": "1",
+        "ec_full:head:p5": "1",
+        "ec_full:head:p7": "1",
+        "ec_full:head:p8": "1",
+    }
+
+
+def test_load_ec_dataset_imports_ec3_subclass_holdout_targets(tmp_path: Path) -> None:
+    _write_ec_dataset_layout(tmp_path)
+
+    dataset = load_dataset("ec:ec_3_subclass_holdout_head", tmp_path, download=True)
+    exact_splits: dict[str, set[str]] = {}
+    for example in dataset.examples:
+        assert example.metadata is not None
+        exact_splits.setdefault(str(example.metadata["heldout_subclass"]), set()).add(example.split)
+
+    assert dataset.split_counts() == {"train": 1, "val": 1, "test": 1}
+    assert dataset.target_values("ec_3") == {
+        "ec_full:head:p1": "1.1.1",
+        "ec_full:head:p5": "1.1.1",
+        "ec_full:head:p6": "1.1.1",
+    }
+    assert all(len(splits) == 1 for splits in exact_splits.values())
+
+
+def test_load_ec_dataset_accumulates_subclass_holdouts_until_example_target(
+    tmp_path: Path,
+) -> None:
+    _write_ec_holdout_budget_layout(tmp_path)
+
+    dataset = load_dataset("ec:ec_3_subclass_holdout_head", tmp_path, download=True)
+    heldout_by_split: dict[str, set[str]] = {"train": set(), "val": set(), "test": set()}
+    for example in dataset.examples:
+        assert example.metadata is not None
+        heldout_by_split[example.split].add(str(example.metadata["heldout_subclass"]))
+
+    assert dataset.split_counts() == {"train": 20, "val": 3, "test": 3}
+    assert heldout_by_split["test"] == {"1.1.1.1", "1.1.1.2"}
+    assert heldout_by_split["val"] == {"1.1.1.3"}
+    assert heldout_by_split["train"] == {"1.1.1.4"}
+
+
+def test_load_ec_dataset_imports_ec2_subclass_holdout_targets(tmp_path: Path) -> None:
+    _write_ec_dataset_layout(tmp_path)
+
+    dataset = load_dataset("ec:ec_2_subclass_holdout_head", tmp_path, download=True)
+    subclass_splits: dict[str, set[str]] = {}
+    for example in dataset.examples:
+        assert example.metadata is not None
+        subclass_splits.setdefault(str(example.metadata["heldout_subclass"]), set()).add(example.split)
+
+    assert dataset.split_counts() == {"train": 3, "val": 0, "test": 1}
+    assert dataset.target_values("ec_2") == {
+        "ec_full:head:p1": "1.1",
+        "ec_full:head:p5": "1.1",
+        "ec_full:head:p6": "1.1",
+        "ec_full:head:p7": "1.1",
+    }
+    assert all(len(splits) == 1 for splits in subclass_splits.values())
+
+
+def test_load_ec_dataset_imports_ec1_subclass_holdout_targets(tmp_path: Path) -> None:
+    _write_ec_dataset_layout(tmp_path)
+
+    dataset = load_dataset("ec:ec_1_subclass_holdout_head", tmp_path, download=True)
+    subclass_splits: dict[str, set[str]] = {}
+    for example in dataset.examples:
+        assert example.metadata is not None
+        subclass_splits.setdefault(str(example.metadata["heldout_subclass"]), set()).add(example.split)
+
+    assert dataset.split_counts() == {"train": 4, "val": 0, "test": 1}
+    assert dataset.target_values("ec_1") == {
+        "ec_full:head:p1": "1",
+        "ec_full:head:p5": "1",
+        "ec_full:head:p6": "1",
+        "ec_full:head:p7": "1",
+        "ec_full:head:p8": "1",
+    }
+    assert all(len(splits) == 1 for splits in subclass_splits.values())
+
+
+def test_read_ec_manifest_reads_generated_track_metadata(tmp_path: Path) -> None:
+    _write_ec_dataset_layout(tmp_path)
+
+    manifest = read_ec_manifest(tmp_path, track="head")
+
+    assert manifest["task"] == "ec_full"
+    assert manifest["track"] == "head"
+
+
+def test_load_ec_dataset_raises_on_unsupported_target(tmp_path: Path) -> None:
+    _write_ec_dataset_layout(tmp_path)
+
+    with pytest.raises(EmbeddingInputError, match="only supports target"):
+        load_ec_dataset(tmp_path, name="ec_2_head", target="wrong")
+
+
+def test_load_ec_dataset_raises_on_unsupported_single_label_target(tmp_path: Path) -> None:
+    _write_ec_dataset_layout(tmp_path)
+
+    with pytest.raises(EmbeddingInputError, match="only supports target"):
+        load_ec_dataset(tmp_path, name="single_ec_2_head", target="ec_2")
 
 
 def test_load_dataset_raises_when_entry_is_catalog_only(tmp_path: Path) -> None:
@@ -1605,6 +2228,91 @@ def test_load_residue_source_dataset_imports_biolip_layout(tmp_path) -> None:
 
     assert dataset.split_counts() == {"train": 0, "val": 0, "test": 1}
     assert dataset.target_values("ligand_binding_site") == {"1abcA": [1, 0, 1, 0]}
+
+
+def test_load_dataset_accepts_splitter_for_generated_residue_source_splits(tmp_path) -> None:
+    data_dir = tmp_path / "biolip"
+    data_dir.mkdir()
+    rows = []
+    for index in range(12):
+        columns = [
+            f"{index:04d}",
+            "A",
+            "1.0",
+            "BS01",
+            "LIG",
+            "B",
+            "1",
+            "A100",
+            "A1",
+            "-",
+            "-",
+            "-",
+            "-",
+            "-",
+            "-",
+            "-",
+            "-",
+            f"P{index:05d}",
+            "123",
+            "1",
+            "ACDE",
+        ]
+        rows.append("\t".join(columns))
+    (data_dir / "BioLiP_nr.txt.gz").write_bytes(
+        gzip.compress(("\n".join(rows) + "\n").encode("utf-8"))
+    )
+
+    dataset = load_dataset(
+        "biolip:all",
+        tmp_path,
+        splitter=HashDatasetSplitter(
+            salt="custom-biolip-split-v1",
+            ratios={"train": 0.5, "val": 0.25, "test": 0.25},
+        ),
+    )
+
+    assert dataset.split_counts() == {"train": 6, "val": 3, "test": 3}
+
+
+def test_load_dataset_explicit_split_takes_precedence_over_splitter(tmp_path) -> None:
+    data_dir = tmp_path / "biolip"
+    data_dir.mkdir()
+    columns = [
+        "1abc",
+        "A",
+        "1.0",
+        "BS01",
+        "LIG",
+        "B",
+        "1",
+        "A100 C102",
+        "A1 C3",
+        "-",
+        "-",
+        "-",
+        "-",
+        "-",
+        "-",
+        "-",
+        "-",
+        "P12345",
+        "123",
+        "1",
+        "ACDE",
+    ]
+    (data_dir / "BioLiP_nr.txt.gz").write_bytes(
+        gzip.compress(("\t".join(columns) + "\n").encode("utf-8"))
+    )
+
+    dataset = load_dataset(
+        "biolip:all",
+        tmp_path,
+        split="test",
+        splitter=HashDatasetSplitter(salt="ignored-biolip-split-v1"),
+    )
+
+    assert dataset.split_counts() == {"train": 0, "val": 0, "test": 1}
 
 
 def test_load_residue_source_dataset_imports_biolip_variant_from_shared_layout(tmp_path) -> None:

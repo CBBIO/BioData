@@ -14,6 +14,7 @@ from CBBIO.embeddings import EmbeddingInputError
 from .biolip import BIOLIP_DOWNLOAD_URLS, BioLipLigandClass, load_biolip_dataset
 from ..collection_types import CollectionMetadata, DatasetMetadata, residue_dataset_metadata
 from ..datasets import ObjectiveName, ResidueDataset, SplitName
+from ..splitters import DatasetSplitter
 from .dbptm import (
     DBPTM_BENCHMARKS,
     DbptmBenchmarkSpec,
@@ -364,6 +365,7 @@ def load_residue_source_dataset(
     target: str | None = None,
     split: SplitName | None = None,
     download: bool = False,
+    splitter: DatasetSplitter | None = None,
 ) -> ResidueDataset:
     """Load a configured residue source when the adapter has enough native metadata."""
 
@@ -382,6 +384,7 @@ def load_residue_source_dataset(
             target=resolved_target,
             split=split,
             ligand_class=biolip_ligand_class,
+            splitter=splitter,
         )
     if spec.name == "disprot":
         json_path = (
@@ -390,7 +393,14 @@ def load_residue_source_dataset(
             else base / "disprot_current.json"
         )
         if json_path.exists():
-            return load_disprot_json(json_path, target=resolved_target, split=split)
+            return load_disprot_json(
+                json_path,
+                target=resolved_target,
+                split=split,
+                splitter=splitter,
+            )
+        if splitter is not None:
+            raise EmbeddingInputError("DisProt TSV region-mode loading does not accept splitter.")
         tsv_path = base / "disprot_current.tsv"
         return load_disprot_tsv(
             tsv_path,
@@ -405,6 +415,7 @@ def load_residue_source_dataset(
             target=resolved_target,
             split=split,
             source_filter=phosphoelm_filter,
+            splitter=splitter,
         )
     raise EmbeddingInputError(
         f"Residue source {spec.name!r} requires explicit input files. "

@@ -11,6 +11,8 @@ from .backends import (
     ProbeBackend,
     ProbeBackendInput,
     ProbeLabel,
+    ProbePredictionOutput,
+    ProbeScoreOutput,
     evaluate_probe_backend_output,
 )
 from .datasets import ResidueDataset
@@ -25,8 +27,8 @@ class TaskLayerResult:
     model_reference: str
     layer_index: int
     metrics: Dict[str, float]
-    predictions: Dict[str, float | int | str]
-    scores: Dict[str, float] | None
+    predictions: Dict[str, ProbePredictionOutput]
+    scores: Dict[str, ProbeScoreOutput] | None
     train_count: int
     val_count: int
     test_count: int

@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable
 import gzip
-import hashlib
 from pathlib import Path
 import re
 from typing import Any, Literal, cast
@@ -13,6 +12,7 @@ from CBBIO.embeddings import EmbeddingInputError
 
 from ..collection_types import CollectionMetadata, DatasetMetadata, residue_dataset_metadata
 from ..datasets import ResidueDataset, ResidueExample, SplitName
+from ..splitters import DatasetSplitter, HashDatasetSplitter
 
 
 BioLipLigandClass = Literal["all", "dna", "rna", "pep", "other"]
@@ -69,6 +69,7 @@ def load_biolip_dataset(
     target: str | None = None,
     split: SplitName | None = "train",
     ligand_class: BioLipLigandClass = "all",
+    splitter: DatasetSplitter | None = None,
 ) -> ResidueDataset:
     """Load BioLiP annotations into residue-level ligand-binding labels.
 
@@ -78,6 +79,7 @@ def load_biolip_dataset(
         target: Label name stored in each residue example.
         split: Dataset split, or ``None`` to assign deterministic splits.
         ligand_class: Ligand subset to retain.
+        splitter: Splitter used when ``split`` is ``None``.
 
     Returns:
         Residue-level ligand-binding dataset.
@@ -130,7 +132,8 @@ def load_biolip_dataset(
         for record_id, group in grouped.items()
     ]
     if split is None:
-        examples = _split_examples(examples)
+        resolved_splitter = splitter or HashDatasetSplitter(salt="biolip-split-v1")
+        examples = resolved_splitter.split_examples(examples)
     return ResidueDataset(examples)
 
 
@@ -203,49 +206,6 @@ def _mark_position(labels: list[int], *, position: int) -> None:
             f"Residue interval {position}-{position} is outside sequence length {len(labels)}."
         )
     labels[position - 1] = 1
-
-
-def _split_examples(examples: Sequence[ResidueExample]) -> list[ResidueExample]:
-    ordered = sorted(examples, key=lambda example: _stable_hash(example.id))
-    counts = _split_counts(len(ordered))
-    split_names: list[SplitName] = [
-        split_name for split_name, count in counts for _ in range(count)
-    ]
-    return [
-        ResidueExample(
-            id=example.id,
-            sequence=example.sequence,
-            labels=example.labels,
-            split=split_name,
-            mask=example.mask,
-            metadata=example.metadata,
-        )
-        for example, split_name in zip(ordered, split_names)
-    ]
-
-
-def _split_counts(total: int) -> list[tuple[SplitName, int]]:
-    if total <= 0:
-        return [("train", 0), ("val", 0), ("test", 0)]
-    validation = int(round(total * 0.1))
-    test = int(round(total * 0.1))
-    if total >= 10:
-        validation = max(1, validation)
-        test = max(1, test)
-    elif total >= 2:
-        test = max(1, test)
-    train = total - validation - test
-    while train < 1 and validation > 0:
-        validation -= 1
-        train += 1
-    while train < 1 and test > 0:
-        test -= 1
-        train += 1
-    return [("train", train), ("val", validation), ("test", test)]
-
-
-def _stable_hash(value: str) -> str:
-    return hashlib.sha256(f"biolip-split-v1:{value}".encode("utf-8")).hexdigest()
 
 
 __all__ = [

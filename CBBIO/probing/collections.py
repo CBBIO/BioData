@@ -16,10 +16,12 @@ from .collection_types import (
     DatasetStatus,
 )
 from .datasets import ProteinDataset, ResidueDataset, SplitName
+from .splitters import DatasetSplitter
 from .sources.biolip import BIOLIP_COLLECTION_METADATA, BIOLIP_DATASETS
 from .sources.dbptm import DBPTM_COLLECTION_METADATA, DBPTM_DATASETS
 from .sources.disprot import DISPROT_COLLECTION_METADATA, DISPROT_DATASETS
 from .sources.dtu import DTU_COLLECTION_METADATA, DTU_DATASETS
+from .sources.ec import EC_COLLECTION_METADATA, EC_DATASETS
 from .sources.musitedeep import MUSITEDEEP_COLLECTION_METADATA, MUSITEDEEP_DATASETS
 from .sources.peer import PEER_COLLECTION_METADATA, PEER_DATASETS
 from .sources.phosphoelm import PHOSPHOELM_COLLECTION_METADATA, PHOSPHOELM_DATASETS
@@ -56,12 +58,17 @@ class PeerCollection(DatasetCollection):
         target: str | None = None,
         download: bool = False,
         max_examples_per_split: Mapping[str, int | None] | None = None,
+        splitter: DatasetSplitter | None = None,
     ) -> ProteinDataset | ResidueDataset:
         """Load one PEER dataset."""
         from .sources.peer import load_peer_dataset
 
         if target is not None:
             raise EmbeddingInputError("PEER collection datasets define their target metadata.")
+        if splitter is not None:
+            raise EmbeddingInputError(
+                "PEER datasets use native benchmark splits and do not accept splitter."
+            )
         dataset = self.get_dataset(name)
         return load_peer_dataset(
             root,
@@ -108,6 +115,7 @@ class _ResidueDatasetCollection(DatasetCollection):
         target: str | None = None,
         download: bool = False,
         max_examples_per_split: Mapping[str, int | None] | None = None,
+        splitter: DatasetSplitter | None = None,
     ) -> ProteinDataset | ResidueDataset:
         """Load one residue annotation dataset."""
         from .residue_sources import load_residue_source_dataset
@@ -125,6 +133,7 @@ class _ResidueDatasetCollection(DatasetCollection):
             target=target,
             split=cast(SplitName | None, split),
             download=download,
+            splitter=splitter,
         )
 
 
@@ -161,6 +170,7 @@ class DbptmCollection(DatasetCollection):
         target: str | None = None,
         download: bool = False,
         max_examples_per_split: Mapping[str, int | None] | None = None,
+        splitter: DatasetSplitter | None = None,
     ) -> ProteinDataset | ResidueDataset:
         """Load one dbPTM source or benchmark dataset."""
         from .residue_sources import load_dbptm_benchmark_dataset, load_residue_source_dataset
@@ -180,6 +190,11 @@ class DbptmCollection(DatasetCollection):
                 target=target,
                 split=resolved_split,
                 download=download,
+                splitter=splitter,
+            )
+        if splitter is not None:
+            raise EmbeddingInputError(
+                "dbPTM benchmark datasets define fixed splits and do not accept splitter."
             )
         return load_dbptm_benchmark_dataset(
             root,
@@ -222,11 +237,59 @@ class DtuCollection(DatasetCollection):
         target: str | None = None,
         download: bool = False,
         max_examples_per_split: Mapping[str, int | None] | None = None,
+        splitter: DatasetSplitter | None = None,
     ) -> ProteinDataset | ResidueDataset:
         """Reject loading because DTU collection adapters are not implemented."""
-        _ = root, split, target, download, max_examples_per_split
+        _ = root, split, target, download, max_examples_per_split, splitter
         dataset = self.get_dataset(name)
         raise EmbeddingInputError(f"Dataset {dataset.id!r} is catalog-only and cannot be loaded.")
+
+
+class EcCollection(DatasetCollection):
+    """Expose generated enzyme commission prediction datasets."""
+
+    metadata = EC_COLLECTION_METADATA
+
+    def list_datasets(self) -> List[DatasetMetadata]:
+        """Return generated EC prediction dataset specifications."""
+        return list(EC_DATASETS)
+
+    def download(
+        self,
+        root: str | Path,
+        *,
+        name: str,
+        force: bool = False,
+    ) -> List[Path]:
+        """Reject downloads because generated EC datasets are local artifacts."""
+        _ = root, force
+        dataset = self.get_dataset(name)
+        raise EmbeddingInputError(
+            f"Dataset {dataset.id!r} does not have a download adapter. "
+            "Point load_dataset() at a generated ec_main_head directory."
+        )
+
+    def load(
+        self,
+        root: str | Path,
+        *,
+        name: str,
+        split: str | Sequence[str] | None = None,
+        target: str | None = None,
+        download: bool = False,
+        max_examples_per_split: Mapping[str, int | None] | None = None,
+        splitter: DatasetSplitter | None = None,
+    ) -> ProteinDataset | ResidueDataset:
+        """Load one generated EC prediction dataset."""
+        from .sources.ec import load_ec_dataset
+
+        _ = download
+        if max_examples_per_split is not None:
+            raise EmbeddingInputError("EC datasets do not support max_examples_per_split.")
+        if splitter is not None:
+            raise EmbeddingInputError("EC datasets define fixed splits and do not accept splitter.")
+        dataset = self.get_dataset(name)
+        return load_ec_dataset(root, name=dataset.name, split=split, target=target)
 
 
 def list_dataset_collections() -> List[DatasetCollection]:
@@ -258,6 +321,7 @@ _RESIDUE_DATASET_METADATA = (
 PEER_COLLECTION = PeerCollection()
 DBPTM_COLLECTION = DbptmCollection()
 DTU_COLLECTION = DtuCollection()
+EC_COLLECTION = EcCollection()
 
 _PROVIDER_COLLECTION_METADATA = (
     MUSITEDEEP_COLLECTION_METADATA,
@@ -274,6 +338,7 @@ _RESIDUE_COLLECTIONS = {
 DATASET_COLLECTIONS: dict[str, DatasetCollection] = {
     PEER_COLLECTION.id: PEER_COLLECTION,
     DBPTM_COLLECTION.id: DBPTM_COLLECTION,
+    EC_COLLECTION.id: EC_COLLECTION,
     **_RESIDUE_COLLECTIONS,
     DTU_COLLECTION.id: DTU_COLLECTION,
 }
@@ -283,12 +348,14 @@ __all__ = [
     "DATASET_COLLECTIONS",
     "DBPTM_COLLECTION",
     "DTU_COLLECTION",
+    "EC_COLLECTION",
     "DatasetCollection",
     "DatasetLevel",
     "DatasetMetadata",
     "DatasetStatus",
     "DbptmCollection",
     "DtuCollection",
+    "EcCollection",
     "PEER_COLLECTION",
     "PeerCollection",
     "get_dataset_collection",

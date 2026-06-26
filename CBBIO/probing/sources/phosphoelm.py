@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
 import csv
-import hashlib
 from pathlib import Path
 import tarfile
 from typing import Any, Literal, cast
@@ -13,6 +12,7 @@ from CBBIO.embeddings import EmbeddingInputError
 
 from ..collection_types import CollectionMetadata, DatasetMetadata, residue_dataset_metadata
 from ..datasets import ResidueDataset, ResidueExample, SplitName
+from ..splitters import DatasetSplitter, StratifiedDatasetSplitter
 
 
 PhosphoElmSourceFilter = Literal["all", "LTP", "HTP"]
@@ -55,6 +55,7 @@ def load_phosphoelm_dataset(
     split: SplitName | None = None,
     source_filter: PhosphoElmSourceFilter = "all",
     residue_codes: Sequence[str] = ("S", "T", "Y"),
+    splitter: DatasetSplitter | None = None,
 ) -> ResidueDataset:
     """Load a PhosphoELM dump as full-protein phosphorylation labels.
 
@@ -64,6 +65,7 @@ def load_phosphoelm_dataset(
         split: Dataset split, or ``None`` to assign deterministic splits.
         source_filter: Evidence subset to retain.
         residue_codes: Residues considered phosphorylation-site candidates.
+        splitter: Splitter used when ``split`` is ``None``.
 
     Returns:
         Residue-level phosphorylation dataset.
@@ -100,7 +102,12 @@ def load_phosphoelm_dataset(
         split=split,
     )
     if split is None:
-        examples = _assign_stratified_splits(examples)
+        resolved_splitter = splitter or StratifiedDatasetSplitter(
+            metadata_fields=("species", "positive_residue_stratum"),
+            salt="phosphoelm-split-v1",
+            fallback_metadata_fields=("species",),
+        )
+        examples = resolved_splitter.split_examples(examples)
     return ResidueDataset(examples)
 
 
@@ -247,79 +254,6 @@ def _iter_rows(path: str | Path) -> Iterable[dict[str, str]]:
         return
     with source.open("r", encoding="utf-8", newline="") as handle:
         yield from csv.DictReader(handle, delimiter="\t")
-
-
-def _assign_stratified_splits(
-    examples: Sequence[ResidueExample],
-) -> list[ResidueExample]:
-    primary_groups: dict[tuple[str, str], list[ResidueExample]] = {}
-    for example in examples:
-        metadata = example.metadata or {}
-        key = (
-            str(metadata.get("species") or "unknown"),
-            str(metadata.get("positive_residue_stratum") or "none"),
-        )
-        primary_groups.setdefault(key, []).append(example)
-
-    assigned: list[ResidueExample] = []
-    rare_by_species: dict[str, list[ResidueExample]] = {}
-    for key, group in primary_groups.items():
-        if len(group) >= 10:
-            assigned.extend(_split_group(group))
-        else:
-            rare_by_species.setdefault(key[0], []).extend(group)
-    rare_global: list[ResidueExample] = []
-    for group in rare_by_species.values():
-        if len(group) >= 10:
-            assigned.extend(_split_group(group))
-        else:
-            rare_global.extend(group)
-    if rare_global:
-        assigned.extend(_split_group(rare_global))
-    return sorted(assigned, key=lambda example: example.id)
-
-
-def _split_group(group: Sequence[ResidueExample]) -> list[ResidueExample]:
-    ordered = sorted(group, key=lambda example: _stable_hash(example.id))
-    counts = _split_counts(len(ordered))
-    split_names: list[SplitName] = [
-        split_name for split_name, count in counts for _ in range(count)
-    ]
-    return [
-        ResidueExample(
-            id=example.id,
-            sequence=example.sequence,
-            labels=example.labels,
-            split=split_name,
-            mask=example.mask,
-            metadata=example.metadata,
-        )
-        for example, split_name in zip(ordered, split_names)
-    ]
-
-
-def _split_counts(total: int) -> list[tuple[SplitName, int]]:
-    if total <= 0:
-        return [("train", 0), ("val", 0), ("test", 0)]
-    validation = int(round(total * 0.1))
-    test = int(round(total * 0.1))
-    if total >= 10:
-        validation = max(1, validation)
-        test = max(1, test)
-    elif total >= 2:
-        test = max(1, test)
-    train = total - validation - test
-    while train < 1 and validation > 0:
-        validation -= 1
-        train += 1
-    while train < 1 and test > 0:
-        test -= 1
-        train += 1
-    return [("train", train), ("val", validation), ("test", test)]
-
-
-def _stable_hash(value: str) -> str:
-    return hashlib.sha256(f"phosphoelm-split-v1:{value}".encode("utf-8")).hexdigest()
 
 
 def _positive_residue_counts(sequence: str, labels: Sequence[int]) -> dict[str, int]:
