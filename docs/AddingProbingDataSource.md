@@ -81,6 +81,7 @@ All loaders must follow the common collection inputs where they apply:
 | `target` | Optional label-key override |
 | `download` | Download missing source data before loading |
 | `max_examples_per_split` | Optional per-split limit |
+| `splitter` | Optional generated-split override |
 
 Provider-specific raw-data importers may expose additional keyword-only options. Keep those options
 on the source-specific function and preserve the common behavior through the collection.

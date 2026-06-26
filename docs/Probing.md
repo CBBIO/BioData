@@ -396,6 +396,127 @@ examples = [
 dataset = ResidueDataset(examples)
 ```
 
+## Assigning Dataset Splits
+
+```python
+from CBBIO import HashDatasetSplitter, ProteinDataset, ProteinExample
+
+examples = [
+    ProteinExample(
+        id=f"P{index:05d}",
+        sequence="MKTAYIAK",
+        labels={"active": index % 2},
+        split="train",
+    )
+    for index in range(20)
+]
+
+dataset = ProteinDataset(examples)
+splitter = HashDatasetSplitter(salt="activity-split-v1")
+split_dataset = splitter.split_dataset(dataset)
+
+print(split_dataset.split_counts())  # {"train": 16, "val": 2, "test": 2}
+```
+
+Use splitters when an upstream dataset does not already define train, validation, and test splits.
+Splitters sort examples by a salted hash of `example.id`.
+The same `salt` and example IDs produce the same split assignments.
+Change the `salt` only when you want a new split recipe.
+
+### Loader Overrides
+
+```python
+from CBBIO import HashDatasetSplitter, load_dataset
+
+dataset = load_dataset(
+    "biolip:all",
+    "/data/probing",
+    splitter=HashDatasetSplitter(
+        salt="biolip-custom-split-v1",
+        ratios={"train": 0.7, "val": 0.15, "test": 0.15},
+    ),
+)
+```
+
+Pass `splitter` to `load_dataset()` to override the default generated split recipe.
+The override applies only when `split` is `None`.
+Datasets with native benchmark splits reject `splitter`.
+
+### Stratified Splits
+
+```python
+from CBBIO import ResidueDataset, ResidueExample, StratifiedDatasetSplitter
+
+examples = [
+    ResidueExample(
+        id=f"HUMAN_{index}",
+        sequence="MSTYAS",
+        labels={"phosphorylation_site": [0, 1, 0, 0, 0, 0]},
+        split="train",
+        metadata={"species": "Homo sapiens", "site_type": "S"},
+    )
+    for index in range(12)
+]
+
+dataset = ResidueDataset(examples)
+splitter = StratifiedDatasetSplitter(
+    metadata_fields=("species", "site_type"),
+    salt="phosphorylation-split-v1",
+)
+split_dataset = splitter.split_dataset(dataset)
+```
+
+`StratifiedDatasetSplitter` keeps large metadata groups balanced across splits.
+Small groups are pooled by `fallback_metadata_fields`.
+The default fallback uses the first field in `metadata_fields`.
+
+### Holdout Splits
+
+```python
+from CBBIO import HoldoutDatasetSplitter, ProteinDataset, ProteinExample
+
+dataset = ProteinDataset(
+    [
+        ProteinExample(
+            id="P12345",
+            sequence="MKTAYIAK",
+            labels={"active": 1},
+            split="train",
+            metadata={"species": "Homo sapiens"},
+        ),
+        ProteinExample(
+            id="Q67890",
+            sequence="MAPLRTLL",
+            labels={"active": 0},
+            split="train",
+            metadata={"species": "Mus musculus"},
+        ),
+    ]
+)
+
+splitter = HoldoutDatasetSplitter(
+    metadata_field="species",
+    holdout_strategy="random",
+    salt="species-holdout-v1",
+)
+split_dataset = splitter.split_dataset(dataset)
+```
+
+`HoldoutDatasetSplitter` selects metadata classes by salted hash and assigns them to `test`.
+It adds whole classes until the held-out examples reach the test fraction.
+When the test fraction is zero, it uses the validation fraction.
+Use `holdout_strategy="rarest_first"` to hold out rare classes first.
+Use `holdout_strategy="none"` to disable class holdout.
+Pass `holdout_values` only when you need a fixed class list.
+It assigns the remaining examples to `train` and `val`.
+The default non-held-out ratios are `0.9`, `0.1`, and `0.0` for train, validation, and test.
+
+| Splitter | Use case |
+|---|---|
+| `HashDatasetSplitter` | Deterministic 80/10/10 splits without stratification |
+| `StratifiedDatasetSplitter` | Deterministic splits balanced by metadata fields |
+| `HoldoutDatasetSplitter` | Test set defined by a metadata class such as species or family |
+
 ---
 
 ## Reducing Train/Test Redundancy

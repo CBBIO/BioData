@@ -274,6 +274,7 @@ from pathlib import Path
 from CBBIO import (
     DatasetCollection,
     DatasetMetadata,
+    DatasetSplitter,
     ProteinDataset,
     ResidueDataset,
 )
@@ -304,6 +305,7 @@ class ExampleCollection(DatasetCollection):
         target: str | None = None,
         download: bool = False,
         max_examples_per_split: Mapping[str, int | None] | None = None,
+        splitter: DatasetSplitter | None = None,
     ) -> ProteinDataset | ResidueDataset:
         """Load one dataset into the canonical representation."""
 ```
