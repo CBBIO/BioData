@@ -79,6 +79,9 @@ def load_flip_csv(
             raise EmbeddingInputError(f"FLIP CSV {path} is missing sequence field {sequence_field!r}.")
 
         for row_index, row in enumerate(reader):
+            if not _flip_row_has_assigned_split(row):
+                continue
+
             sequence = str(row.get(sequence_field, "")).strip()
             if keep_mutation_region is not None:
                 start, end = keep_mutation_region
@@ -161,6 +164,12 @@ def _parse_flip_value(value: str | None) -> Any:
         return float(text)
     except ValueError:
         return text
+
+
+def _flip_row_has_assigned_split(row: Mapping[str, str]) -> bool:
+    raw_set = str(row.get("set", "")).strip().lower()
+    validation = str(row.get("validation", "")).strip()
+    return raw_set in {"train", "test"} or validation == "True"
 
 
 def _flip_row_split(row: Mapping[str, str]) -> SplitName:

@@ -2,8 +2,20 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 import math
-from typing import Dict, List, Sequence
+from pathlib import Path
+from typing import TYPE_CHECKING, Dict, List
+
+if TYPE_CHECKING:
+    from CBBIO.GO import GOOntology
+
+
+@dataclass(frozen=True)
+class _PreparedGoMetricInputs:
+    truth: Mapping[str, set[str]]
+    scores: Mapping[str, Mapping[str, float]]
 
 
 def regression_metrics(y_true: Sequence[float], y_pred: Sequence[float]) -> Dict[str, float]:
@@ -76,6 +88,7 @@ def multiclass_metrics(y_true: Sequence[int], y_pred: Sequence[int], *, class_co
     correct = sum(conf[c][c] for c in range(class_count))
     accuracy = float(correct) / float(len(y_true))
     f1_values: List[float] = []
+    supports: List[int] = []
     for c in range(class_count):
         tp = conf[c][c]
         fp = sum(conf[r][c] for r in range(class_count)) - tp
@@ -83,8 +96,15 @@ def multiclass_metrics(y_true: Sequence[int], y_pred: Sequence[int], *, class_co
         precision = float(tp) / float(tp + fp) if tp + fp else 0.0
         recall = float(tp) / float(tp + fn) if tp + fn else 0.0
         f1_values.append(2.0 * precision * recall / (precision + recall) if precision + recall else 0.0)
+        supports.append(sum(conf[c]))
     macro_f1 = sum(f1_values) / float(len(f1_values)) if f1_values else 0.0
-    return {"accuracy": accuracy, "macro_f1": macro_f1}
+    support_total = sum(supports)
+    weighted_f1 = (
+        sum(f1 * support for f1, support in zip(f1_values, supports)) / float(support_total)
+        if support_total
+        else 0.0
+    )
+    return {"accuracy": accuracy, "macro_f1": macro_f1, "weighted_f1": weighted_f1}
 
 
 def multilabel_metrics(
@@ -107,6 +127,7 @@ def multilabel_metrics(
         if [int(value) for value in true_row] == [int(value) for value in pred_row]
     ) / float(len(y_true))
     macro_f1_values: List[float] = []
+    supports: List[int] = []
     average_precision_values: List[float] = []
     micro_tp = 0
     micro_fp = 0
@@ -121,6 +142,7 @@ def multilabel_metrics(
         precision = float(tp) / float(tp + fp) if tp + fp else 0.0
         recall = float(tp) / float(tp + fn) if tp + fn else 0.0
         macro_f1_values.append(2.0 * precision * recall / (precision + recall) if precision + recall else 0.0)
+        supports.append(sum(true_values))
         average_precision_values.append(_binary_auprc(true_values, score_values))
         micro_tp += tp
         micro_fp += fp
@@ -132,12 +154,423 @@ def multilabel_metrics(
         if micro_precision + micro_recall
         else 0.0
     )
+    support_total = sum(supports)
+    weighted_f1 = (
+        sum(f1 * support for f1, support in zip(macro_f1_values, supports)) / float(support_total)
+        if support_total
+        else 0.0
+    )
     return {
         "exact_match": exact_match,
+        "f1": micro_f1,
         "micro_f1": micro_f1,
         "macro_f1": sum(macro_f1_values) / float(class_count),
+        "weighted_f1": weighted_f1,
         "average_precision": sum(average_precision_values) / float(class_count),
     }
+
+
+def go_protein_centric_metrics(
+    predicted_scores: Mapping[str, Sequence[float]],
+    *,
+    class_names: Sequence[str],
+    true_labels: Mapping[str, Sequence[str]],
+    ontology: GOOntology,
+    threshold_count: int = 101,
+) -> Dict[str, float]:
+    """Compute CAFA-style protein-centric F-max using propagated GO terms."""
+    prepared = _prepare_go_metric_inputs(
+        predicted_scores,
+        class_names=class_names,
+        true_labels=true_labels,
+        ontology=ontology,
+    )
+    propagated_truth = {
+        protein_id: labels
+        for protein_id, labels in prepared.truth.items()
+        if labels
+    }
+    if not propagated_truth:
+        raise ValueError("GO truth labels contain no non-root terms.")
+    propagated_scores = _select_score_rows(prepared.scores, propagated_truth)
+    thresholds = _score_thresholds(threshold_count)
+    return _go_unweighted_fmax(
+        propagated_truth=propagated_truth,
+        propagated_scores=propagated_scores,
+        thresholds=thresholds,
+    )
+
+
+def go_combined_protein_centric_metrics(
+    predicted_scores: Mapping[str, Sequence[float]],
+    *,
+    class_names: Sequence[str],
+    true_labels: Mapping[str, Sequence[str]],
+    ontology: GOOntology,
+    term_weights: Mapping[str, float] | None = None,
+    threshold_count: int = 101,
+) -> Dict[str, float]:
+    """Compute unweighted and optional IA-weighted GO F-max with shared propagation."""
+    prepared = _prepare_go_metric_inputs(
+        predicted_scores,
+        class_names=class_names,
+        true_labels=true_labels,
+        ontology=ontology,
+    )
+    propagated_truth = {
+        protein_id: labels
+        for protein_id, labels in prepared.truth.items()
+        if labels
+    }
+    if not propagated_truth:
+        raise ValueError("GO truth labels contain no non-root terms.")
+    thresholds = _score_thresholds(threshold_count)
+    metrics = _go_unweighted_fmax(
+        propagated_truth=propagated_truth,
+        propagated_scores=_select_score_rows(prepared.scores, propagated_truth),
+        thresholds=thresholds,
+    )
+    if term_weights is None:
+        return metrics
+    if not term_weights:
+        raise ValueError("GO weighted metrics require information-accretion weights.")
+    weighted_truth = {
+        protein_id: labels
+        for protein_id, labels in propagated_truth.items()
+        if _term_weight_sum(labels, term_weights=term_weights) > 0.0
+    }
+    if not weighted_truth:
+        raise ValueError("GO truth labels contain no positive-weight non-root terms.")
+    metrics.update(
+        _go_weighted_fmax(
+            propagated_truth=weighted_truth,
+            propagated_scores=_select_score_rows(prepared.scores, weighted_truth),
+            term_weights=term_weights,
+            thresholds=thresholds,
+        )
+    )
+    return metrics
+
+
+def go_fixed_threshold_protein_centric_metrics(
+    predicted_scores: Mapping[str, Sequence[float]],
+    *,
+    class_names: Sequence[str],
+    true_labels: Mapping[str, Sequence[str]],
+    ontology: GOOntology,
+    threshold: float,
+) -> Dict[str, float]:
+    """Compute propagated protein-centric GO F1 at one score threshold."""
+    if not 0.0 <= float(threshold) <= 1.0:
+        raise ValueError("GO fixed-threshold metrics require threshold between 0 and 1.")
+    prepared = _prepare_go_metric_inputs(
+        predicted_scores,
+        class_names=class_names,
+        true_labels=true_labels,
+        ontology=ontology,
+    )
+    propagated_truth = {
+        protein_id: labels
+        for protein_id, labels in prepared.truth.items()
+        if labels
+    }
+    if not propagated_truth:
+        raise ValueError("GO truth labels contain no non-root terms.")
+    propagated_scores = _select_score_rows(prepared.scores, propagated_truth)
+    return _go_unweighted_fixed_threshold(
+        propagated_truth=propagated_truth,
+        propagated_scores=propagated_scores,
+        threshold=float(threshold),
+    )
+
+
+def _go_unweighted_fmax(
+    *,
+    propagated_truth: Mapping[str, set[str]],
+    propagated_scores: Mapping[str, Mapping[str, float]],
+    thresholds: Sequence[float],
+) -> Dict[str, float]:
+    best = {
+        "go_fmax": -1.0,
+        "go_fmax_threshold": 0.0,
+        "go_precision_at_fmax": 0.0,
+        "go_recall_at_fmax": 0.0,
+        "go_evaluated_protein_count": float(len(propagated_truth)),
+    }
+    for threshold in thresholds:
+        precision_values: list[float] = []
+        recall_values: list[float] = []
+        for protein_id, truth in propagated_truth.items():
+            predicted = {
+                term
+                for term, score in propagated_scores[protein_id].items()
+                if score >= threshold
+            }
+            if predicted:
+                precision_values.append(len(predicted.intersection(truth)) / float(len(predicted)))
+            recall_values.append(len(predicted.intersection(truth)) / float(len(truth)))
+        precision = sum(precision_values) / float(len(precision_values)) if precision_values else 0.0
+        recall = sum(recall_values) / float(len(recall_values))
+        f_score = 2.0 * precision * recall / (precision + recall) if precision + recall else 0.0
+        if f_score > best["go_fmax"]:
+            best = {
+                "go_fmax": f_score,
+                "go_fmax_threshold": threshold,
+                "go_precision_at_fmax": precision,
+                "go_recall_at_fmax": recall,
+                "go_evaluated_protein_count": float(len(propagated_truth)),
+            }
+    return best
+
+
+def _go_unweighted_fixed_threshold(
+    *,
+    propagated_truth: Mapping[str, set[str]],
+    propagated_scores: Mapping[str, Mapping[str, float]],
+    threshold: float,
+) -> Dict[str, float]:
+    precision_values: list[float] = []
+    recall_values: list[float] = []
+    for protein_id, truth in propagated_truth.items():
+        predicted = {
+            term
+            for term, score in propagated_scores[protein_id].items()
+            if score >= threshold
+        }
+        if predicted:
+            precision_values.append(len(predicted.intersection(truth)) / float(len(predicted)))
+        recall_values.append(len(predicted.intersection(truth)) / float(len(truth)))
+    precision = sum(precision_values) / float(len(precision_values)) if precision_values else 0.0
+    recall = sum(recall_values) / float(len(recall_values))
+    f_score = 2.0 * precision * recall / (precision + recall) if precision + recall else 0.0
+    return {
+        "go_propagated_f1": f_score,
+        "go_propagated_precision": precision,
+        "go_propagated_recall": recall,
+        "go_propagated_threshold": threshold,
+        "go_propagated_evaluated_protein_count": float(len(propagated_truth)),
+    }
+
+
+def go_weighted_protein_centric_metrics(
+    predicted_scores: Mapping[str, Sequence[float]],
+    *,
+    class_names: Sequence[str],
+    true_labels: Mapping[str, Sequence[str]],
+    ontology: GOOntology,
+    term_weights: Mapping[str, float],
+    threshold_count: int = 101,
+) -> Dict[str, float]:
+    """Compute IA-weighted CAFA protein-centric F-max."""
+    if not term_weights:
+        raise ValueError("GO weighted metrics require information-accretion weights.")
+    prepared = _prepare_go_metric_inputs(
+        predicted_scores,
+        class_names=class_names,
+        true_labels=true_labels,
+        ontology=ontology,
+    )
+    propagated_truth = {
+        protein_id: labels
+        for protein_id, labels in prepared.truth.items()
+        if _term_weight_sum(labels, term_weights=term_weights) > 0.0
+    }
+    if not propagated_truth:
+        raise ValueError("GO truth labels contain no positive-weight non-root terms.")
+    return _go_weighted_fmax(
+        propagated_truth=propagated_truth,
+        propagated_scores=_select_score_rows(prepared.scores, propagated_truth),
+        term_weights=term_weights,
+        thresholds=_score_thresholds(threshold_count),
+    )
+
+
+def _go_weighted_fmax(
+    *,
+    propagated_truth: Mapping[str, set[str]],
+    propagated_scores: Mapping[str, Mapping[str, float]],
+    term_weights: Mapping[str, float],
+    thresholds: Sequence[float],
+) -> Dict[str, float]:
+    best = {
+        "go_weighted_fmax": -1.0,
+        "go_weighted_fmax_threshold": 0.0,
+        "go_weighted_precision_at_fmax": 0.0,
+        "go_weighted_recall_at_fmax": 0.0,
+        "go_weighted_evaluated_protein_count": float(len(propagated_truth)),
+    }
+    for threshold in thresholds:
+        precision_values: list[float] = []
+        recall_values: list[float] = []
+        for protein_id, truth in propagated_truth.items():
+            predicted = {
+                term
+                for term, score in propagated_scores[protein_id].items()
+                if score >= threshold
+            }
+            intersection_weight = _term_weight_sum(
+                predicted.intersection(truth),
+                term_weights=term_weights,
+            )
+            predicted_weight = _term_weight_sum(predicted, term_weights=term_weights)
+            truth_weight = _term_weight_sum(truth, term_weights=term_weights)
+            if predicted_weight > 0.0:
+                precision_values.append(intersection_weight / predicted_weight)
+            recall_values.append(intersection_weight / truth_weight if truth_weight > 0.0 else 0.0)
+        precision = sum(precision_values) / float(len(precision_values)) if precision_values else 0.0
+        recall = sum(recall_values) / float(len(recall_values))
+        f_score = 2.0 * precision * recall / (precision + recall) if precision + recall else 0.0
+        if f_score > best["go_weighted_fmax"]:
+            best = {
+                "go_weighted_fmax": f_score,
+                "go_weighted_fmax_threshold": threshold,
+                "go_weighted_precision_at_fmax": precision,
+                "go_weighted_recall_at_fmax": recall,
+                "go_weighted_evaluated_protein_count": float(len(propagated_truth)),
+            }
+    return best
+
+
+def read_information_accretion_weights(path: str | Path) -> Dict[str, float]:
+    """Read CAFA information-accretion weights from a local text file."""
+    weight_path = Path(path).expanduser()
+    if not weight_path.exists():
+        raise ValueError(f"Information-accretion weight file not found: {weight_path}.")
+    weights: dict[str, float] = {}
+    with weight_path.open("r", encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            text = line.strip()
+            if not text or text.startswith("#"):
+                continue
+            parts = text.replace(",", "\t").split()
+            if len(parts) < 2:
+                raise ValueError(
+                    f"Information-accretion weight file {weight_path} line {line_number} "
+                    "must contain a GO term and numeric weight."
+                )
+            term = parts[0].strip()
+            if not term:
+                raise ValueError(
+                    f"Information-accretion weight file {weight_path} line {line_number} "
+                    "has an empty GO term."
+                )
+            try:
+                weights[term] = float(parts[1])
+            except ValueError as exc:
+                raise ValueError(
+                    f"Information-accretion weight file {weight_path} line {line_number} "
+                    "has a non-numeric weight."
+                ) from exc
+    if not weights:
+        raise ValueError(f"Information-accretion weight file {weight_path} contains no weights.")
+    return weights
+
+
+def cafa6_weighted_fmax_mean(metrics_by_aspect: Mapping[str, Mapping[str, float]]) -> Dict[str, float]:
+    """Average CAFA6 IA-weighted F-max values across MF, BP, and CC."""
+    values: list[float] = []
+    for aspect in ("mf", "bp", "cc"):
+        metrics = _metrics_for_aspect(metrics_by_aspect, aspect)
+        if "go_weighted_fmax" not in metrics:
+            raise ValueError(f"CAFA6 {aspect} metrics are missing 'go_weighted_fmax'.")
+        values.append(float(metrics["go_weighted_fmax"]))
+    return {
+        "cafa6_weighted_fmax_mean": sum(values) / float(len(values)),
+        "cafa6_mf_weighted_fmax": values[0],
+        "cafa6_bp_weighted_fmax": values[1],
+        "cafa6_cc_weighted_fmax": values[2],
+    }
+
+
+def _propagate_go_terms(terms: Sequence[str], ontology: GOOntology) -> set[str]:
+    propagated: set[str] = set()
+    for term in terms:
+        normalized = str(term).strip()
+        if not normalized:
+            continue
+        propagated.update(ontology.ancestors(normalized, include_self=True))
+    propagated = {term for term in propagated if ontology.direct_parents(term)}
+    return propagated
+
+
+def _prepare_go_metric_inputs(
+    predicted_scores: Mapping[str, Sequence[float]],
+    *,
+    class_names: Sequence[str],
+    true_labels: Mapping[str, Sequence[str]],
+    ontology: GOOntology,
+) -> _PreparedGoMetricInputs:
+    if not predicted_scores:
+        raise ValueError("GO metric inputs must contain at least one prediction.")
+    if not class_names:
+        raise ValueError("GO metrics require at least one predicted GO class.")
+    if set(predicted_scores) != set(true_labels):
+        raise ValueError("GO prediction and truth identifiers must match.")
+    propagated_truth = {
+        protein_id: _propagate_go_terms(labels, ontology)
+        for protein_id, labels in true_labels.items()
+    }
+    propagated_scores = {
+        protein_id: _propagate_go_scores(scores, class_names=class_names, ontology=ontology)
+        for protein_id, scores in predicted_scores.items()
+    }
+    return _PreparedGoMetricInputs(truth=propagated_truth, scores=propagated_scores)
+
+
+def _select_score_rows(
+    propagated_scores: Mapping[str, Mapping[str, float]],
+    propagated_truth: Mapping[str, set[str]],
+) -> dict[str, Mapping[str, float]]:
+    return {
+        protein_id: propagated_scores[protein_id]
+        for protein_id in propagated_truth
+    }
+
+
+def _score_thresholds(threshold_count: int) -> list[float]:
+    count = int(threshold_count)
+    if count < 2:
+        raise ValueError("GO threshold_count must be at least 2.")
+    return [index / float(count - 1) for index in range(count)]
+
+
+def _propagate_go_scores(
+    scores: Sequence[float],
+    *,
+    class_names: Sequence[str],
+    ontology: GOOntology,
+) -> dict[str, float]:
+    if len(scores) != len(class_names):
+        raise ValueError("GO score rows must match the class count.")
+    propagated: dict[str, float] = {}
+    for term, value in zip(class_names, scores):
+        score = float(value)
+        for ancestor in ontology.ancestors(str(term), include_self=True):
+            if not ontology.direct_parents(ancestor):
+                continue
+            propagated[ancestor] = max(propagated.get(ancestor, 0.0), score)
+    return propagated
+
+
+def _term_weight_sum(terms: Sequence[str] | set[str], *, term_weights: Mapping[str, float]) -> float:
+    return sum(float(term_weights.get(term, 0.0)) for term in terms)
+
+
+def _metrics_for_aspect(metrics_by_aspect: Mapping[str, Mapping[str, float]], aspect: str) -> Mapping[str, float]:
+    for key in (
+        aspect,
+        f"go_{aspect}",
+        f"cafa5_{aspect}",
+        f"cafa6_{aspect}",
+        f"cafa:cafa5_{aspect}",
+        f"cafa:cafa6_{aspect}",
+        f"cafa5:cafa5_{aspect}",
+        f"cafa6:cafa6_{aspect}",
+    ):
+        metrics = metrics_by_aspect.get(key)
+        if metrics is not None:
+            return metrics
+    raise ValueError(f"CAFA6 metrics are missing aspect {aspect!r}.")
 
 
 def _binary_auroc(y_true: Sequence[int], y_score: Sequence[float]) -> float:
@@ -230,4 +663,16 @@ def _require_same_non_empty_length(a: Sequence[object], b: Sequence[object]) -> 
         raise ValueError("Metric inputs must have the same length.")
 
 
-__all__ = ["binary_metrics", "multiclass_metrics", "multilabel_metrics", "regression_metrics", "spearmanr"]
+__all__ = [
+    "binary_metrics",
+    "cafa6_weighted_fmax_mean",
+    "go_combined_protein_centric_metrics",
+    "go_fixed_threshold_protein_centric_metrics",
+    "go_protein_centric_metrics",
+    "go_weighted_protein_centric_metrics",
+    "multiclass_metrics",
+    "multilabel_metrics",
+    "read_information_accretion_weights",
+    "regression_metrics",
+    "spearmanr",
+]

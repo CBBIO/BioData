@@ -6,12 +6,23 @@ from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 import numpy as _np
-from typing import Any, Dict, List, Tuple, cast
+from typing import Any, Dict, List, Literal, Tuple, TypeAlias, cast
 
+from CBBIO.BioData import DriverDependencyError
 from CBBIO.embeddings import EmbeddingDependencyError, EmbeddingInputError
+from CBBIO.search.engines import build_search_state, search_state
+from CBBIO.search.utils import (
+    import_faiss,
+    preferred_cuvs_device,
+    preferred_faiss_device,
+    preferred_torch_device,
+)
+from CBBIO.search.types import ResolvedSearchBackend
+from CBBIO.types import DistanceMetric
 
 from .backends import (
     ProbeBackend,
+    ProbeFeature,
     ProbeBackendInput,
     ProbeBackendOutput,
     ProbePrediction,
@@ -24,6 +35,17 @@ from .tasks import PredictionSpec, ProbeKind, ProbeSpec
 
 
 DEFAULT_RESIDUE_BATCH_SIZE = 8192
+TransferDistance: TypeAlias = Literal["cosine", "euclidean"]
+TransferNeighborSelection: TypeAlias = Literal["knn", "all", "cutoff_distance"]
+TransferScoring: TypeAlias = Literal["voting", "weighted_voting"]
+TransferSearchBackend: TypeAlias = Literal[
+    "numpy",
+    "auto",
+    "faiss_cpu",
+    "faiss_gpu",
+    "cuvs_gpu",
+    "torch_gpu",
+]
 
 
 @dataclass(frozen=True)
@@ -32,6 +54,7 @@ class ProbeEvaluation:
     metrics: Dict[str, float]
     predictions: Dict[str, ProbePredictionOutput]
     scores: Dict[str, ProbeScoreOutput] | None = None
+    metadata: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -126,6 +149,249 @@ class MlpProbe(_TorchProbeBackend):
 
     def _resolved_hidden_dim(self) -> int:
         return self.hidden_dim
+
+
+@dataclass(frozen=True)
+class TransferProbe(ProbeBackend):
+    """Transfer labels from nearest training embeddings."""
+
+    k: int = 10
+    threshold: float | None = None
+    distance: TransferDistance = "cosine"
+    neighbor_selection: TransferNeighborSelection = "all"
+    distance_cutoff: float | None = None
+    scoring: TransferScoring = "weighted_voting"
+    search_backend: TransferSearchBackend = "numpy"
+    search_device: str | None = None
+    search_ann: bool = False
+    return_neighbors: bool = False
+
+    def __post_init__(self) -> None:
+        if self.k < 1:
+            raise EmbeddingInputError("TransferProbe.k must be >= 1.")
+        if self.threshold is not None and not 0.0 <= self.threshold <= 1.0:
+            raise EmbeddingInputError("TransferProbe.threshold must be between 0 and 1.")
+        if self.distance not in {"cosine", "euclidean"}:
+            raise EmbeddingInputError("TransferProbe.distance must be one of: cosine, euclidean.")
+        if self.neighbor_selection not in {"knn", "all", "cutoff_distance"}:
+            raise EmbeddingInputError(
+                "TransferProbe.neighbor_selection must be one of: knn, all, cutoff_distance."
+            )
+        if self.neighbor_selection == "cutoff_distance" and self.distance_cutoff is None:
+            raise EmbeddingInputError(
+                "TransferProbe.distance_cutoff is required when neighbor_selection='cutoff_distance'."
+            )
+        if self.distance_cutoff is not None and self.distance_cutoff < 0.0:
+            raise EmbeddingInputError("TransferProbe.distance_cutoff must be >= 0 when provided.")
+        if self.scoring not in {"voting", "weighted_voting"}:
+            raise EmbeddingInputError("TransferProbe.scoring must be one of: voting, weighted_voting.")
+        if self.search_backend not in {"numpy", "auto", "faiss_cpu", "faiss_gpu", "cuvs_gpu", "torch_gpu"}:
+            raise EmbeddingInputError(
+                "TransferProbe.search_backend must be one of: numpy, auto, faiss_cpu, faiss_gpu, cuvs_gpu, torch_gpu."
+            )
+        if self.search_backend != "numpy" and self.neighbor_selection != "knn":
+            raise EmbeddingInputError(
+                "TransferProbe accelerated search backends support neighbor_selection='knn' only."
+            )
+
+    def fit_predict(self, data: ProbeBackendInput) -> ProbeBackendOutput:
+        """Predict by transferred votes from selected training embeddings."""
+        if data.level != "protein":
+            raise EmbeddingInputError("TransferProbe supports protein-level tasks only.")
+        if data.prediction.objective == "regression":
+            return self._predict_regression(data)
+        if data.prediction.objective == "binary":
+            return self._predict_binary(data)
+        if data.prediction.objective == "multiclass":
+            return self._predict_multiclass(data)
+        if data.prediction.objective == "multilabel":
+            return self._predict_multilabel(data)
+        raise EmbeddingInputError(f"Unsupported TransferProbe objective: {data.prediction.objective!r}.")
+
+    def _predict_regression(self, data: ProbeBackendInput) -> ProbeBackendOutput:
+        predictions: Dict[str, ProbePredictionOutput] = {}
+        weighted_neighbors = self._weighted_neighbors(data)
+        for item, neighbor_weights in weighted_neighbors.items():
+            total = sum(weight for _neighbor_id, _distance, weight in neighbor_weights)
+            value = sum(
+                float(cast(float | int | str, data.labels[neighbor_id])) * weight
+                for neighbor_id, _distance, weight in neighbor_weights
+            ) / total
+            predictions[item] = float(value)
+        return ProbeBackendOutput(
+            predictions=predictions,
+            metadata=self._neighbor_metadata(data, weighted_neighbors) if self.return_neighbors else None,
+        )
+
+    def _predict_binary(self, data: ProbeBackendInput) -> ProbeBackendOutput:
+        predictions: Dict[str, ProbePredictionOutput] = {}
+        scores: Dict[str, ProbeScoreOutput] = {}
+        weighted_neighbors = self._weighted_neighbors(data)
+        for item, neighbor_weights in weighted_neighbors.items():
+            total = sum(weight for _neighbor_id, _distance, weight in neighbor_weights)
+            score = sum(
+                _as_binary(data.labels[neighbor_id], neighbor_id) * weight
+                for neighbor_id, _distance, weight in neighbor_weights
+            ) / total
+            threshold = 0.5 if self.threshold is None else self.threshold
+            scores[item] = float(score)
+            predictions[item] = 1 if score >= threshold else 0
+        return ProbeBackendOutput(
+            predictions=predictions,
+            scores=scores,
+            metadata=self._neighbor_metadata(data, weighted_neighbors) if self.return_neighbors else None,
+        )
+
+    def _predict_multiclass(self, data: ProbeBackendInput) -> ProbeBackendOutput:
+        classes = _transfer_classes(data)
+        predictions: Dict[str, ProbePredictionOutput] = {}
+        weighted_neighbors = self._weighted_neighbors(data)
+        for item, neighbor_weights in weighted_neighbors.items():
+            votes = dict.fromkeys(classes, 0.0)
+            for neighbor_id, _distance, weight in neighbor_weights:
+                label = str(data.labels[neighbor_id])
+                if label not in votes:
+                    raise EmbeddingInputError(
+                        f"Unknown multiclass label {label!r} for training example {neighbor_id!r}."
+                    )
+                votes[label] += weight
+            predictions[item] = max(classes, key=lambda label: (votes[label], -classes.index(label)))
+        return ProbeBackendOutput(
+            predictions=predictions,
+            metadata=self._neighbor_metadata(data, weighted_neighbors) if self.return_neighbors else None,
+        )
+
+    def _predict_multilabel(self, data: ProbeBackendInput) -> ProbeBackendOutput:
+        classes = _transfer_multilabel_classes(data)
+        predictions: Dict[str, ProbePredictionOutput] = {}
+        scores: Dict[str, ProbeScoreOutput] = {}
+        weighted_neighbors = self._weighted_neighbors(data)
+        for item, neighbor_weights in weighted_neighbors.items():
+            total = sum(weight for _neighbor_id, _distance, weight in neighbor_weights)
+            votes = dict.fromkeys(classes, 0.0)
+            for neighbor_id, _distance, weight in neighbor_weights:
+                for label in _as_multilabel(data.labels[neighbor_id], neighbor_id):
+                    if label not in votes:
+                        raise EmbeddingInputError(
+                            f"Unknown multilabel class {label!r} for training example {neighbor_id!r}."
+                        )
+                    votes[label] += weight
+            row = [votes[label] / total for label in classes]
+            scores[item] = [float(value) for value in row]
+            if self.threshold is None:
+                predictions[item] = [
+                    label for label, value in zip(classes, row) if value > 0.0
+                ]
+            else:
+                predictions[item] = [
+                    label for label, value in zip(classes, row) if value >= self.threshold
+                ]
+        return ProbeBackendOutput(
+            predictions=predictions,
+            scores=scores,
+            metadata=self._neighbor_metadata(data, weighted_neighbors) if self.return_neighbors else None,
+        )
+
+    def _weighted_neighbors(self, data: ProbeBackendInput) -> Dict[str, list[tuple[str, float, float]]]:
+        train_matrix = _embedding_matrix(data.train_ids, data.embeddings)
+        test_matrix = _embedding_matrix(data.test_ids, data.embeddings)
+        _validate_distance_matrix(train_matrix, "train", distance=self.distance)
+        _validate_distance_matrix(test_matrix, "test", distance=self.distance)
+        if self.search_backend != "numpy":
+            return self._weighted_neighbors_from_search(data, train_matrix=train_matrix, test_matrix=test_matrix)
+        distances_by_test = _distance_matrix(train_matrix, test_matrix, distance=self.distance)
+        weighted: Dict[str, list[tuple[str, float, float]]] = {}
+        for row_index, item in enumerate(data.test_ids):
+            distances = distances_by_test[row_index]
+            order = self._selected_neighbor_indices(distances, item=item)
+            selected_distances = distances[order]
+            weights = self._neighbor_weights(selected_distances)
+            weighted[item] = [
+                (data.train_ids[int(index)], float(distance), float(weight))
+                for index, distance, weight in zip(order, selected_distances, weights)
+                if float(weight) > 0.0
+            ]
+        return weighted
+
+    def _weighted_neighbors_from_search(
+        self,
+        data: ProbeBackendInput,
+        *,
+        train_matrix: Any,
+        test_matrix: Any,
+    ) -> Dict[str, list[tuple[str, float, float]]]:
+        metric: DistanceMetric = "cosine" if self.distance == "cosine" else "l2"
+        backend, device = _resolve_transfer_search_backend(self.search_backend, self.search_device)
+        try:
+            state = build_search_state(
+                backend=backend,
+                item_ids=data.train_ids,
+                vectors=train_matrix,
+                metric=metric,
+                device=device,
+                ann_requested=self.search_ann,
+            )
+            neighbors_by_test = search_state(
+                state,
+                query_ids=data.test_ids,
+                query_vectors=test_matrix,
+                k=self.k,
+            )
+        except DriverDependencyError as exc:
+            raise EmbeddingDependencyError(str(exc)) from exc
+        weighted: Dict[str, list[tuple[str, float, float]]] = {}
+        for item in data.test_ids:
+            neighbors = neighbors_by_test[str(item)]
+            distances = _np.asarray([neighbor.distance for neighbor in neighbors], dtype=_np.float32)
+            weights = self._neighbor_weights(distances)
+            weighted[str(item)] = [
+                (neighbor.protein_id, float(neighbor.distance), float(weight))
+                for neighbor, weight in zip(neighbors, weights)
+                if float(weight) > 0.0
+            ]
+        return weighted
+
+    def _neighbor_metadata(
+        self,
+        data: ProbeBackendInput,
+        weighted_neighbors: Mapping[str, Sequence[tuple[str, float, float]]],
+    ) -> dict[str, object]:
+        return {
+            "transfer_neighbors": {
+                item: [
+                    {
+                        "id": neighbor_id,
+                        "distance": float(distance),
+                        "weight": float(weight),
+                        "label": data.labels[neighbor_id],
+                    }
+                    for neighbor_id, distance, weight in weighted_neighbors[item]
+                ]
+                for item in data.test_ids
+            }
+        }
+
+    def _selected_neighbor_indices(self, distances: Any, *, item: str) -> Any:
+        order = _np.argsort(distances, kind="stable")
+        if self.neighbor_selection == "knn":
+            return order[: min(int(self.k), int(len(order)))]
+        if self.neighbor_selection == "all":
+            return order
+        cutoff = float(cast(float, self.distance_cutoff))
+        selected = order[distances[order] <= cutoff]
+        if int(len(selected)) < 1:
+            raise EmbeddingInputError(
+                f"TransferProbe found no neighbors within distance_cutoff={cutoff} for example {item!r}."
+            )
+        return selected
+
+    def _neighbor_weights(self, distances: Any) -> list[float]:
+        if self.scoring == "voting":
+            return [1.0] * int(len(distances))
+        exact = distances <= 1e-12
+        if bool(exact.any()):
+            return [1.0 if bool(value) else 0.0 for value in exact]
+        return [1.0 / max(float(distance), 1e-12) for distance in distances]
 
 
 @dataclass(frozen=True)
@@ -437,6 +703,119 @@ def _send_to_device(batch_cpu: Any, device: Any, x_pin: Any) -> Any:
     bsz = int(batch_cpu.shape[0])
     x_pin[:bsz].copy_(batch_cpu)
     return x_pin[:bsz].to(device, non_blocking=True)
+
+
+def _embedding_matrix(ids: Sequence[str], embeddings: Mapping[str, ProbeFeature]) -> Any:
+    missing = [item for item in ids if item not in embeddings]
+    if missing:
+        sample = ", ".join(missing[:5])
+        raise EmbeddingInputError(f"Missing embeddings for examples: {sample}.")
+    try:
+        matrix = _np.asarray(
+            [[float(value) for value in cast(Sequence[float], embeddings[item])] for item in ids],
+            dtype=_np.float32,
+        )
+    except (TypeError, ValueError) as exc:
+        raise EmbeddingInputError("TransferProbe embeddings must be numeric vectors.") from exc
+    if matrix.ndim != 2 or matrix.shape[1] < 1:
+        raise EmbeddingInputError("Embeddings must be non-empty vectors.")
+    return matrix
+
+
+def _validate_distance_matrix(
+    matrix: Any,
+    split_name: str,
+    *,
+    distance: TransferDistance,
+) -> None:
+    if not _np.isfinite(matrix).all():
+        raise EmbeddingInputError(f"TransferProbe {split_name} embeddings must contain finite values.")
+    if distance == "cosine":
+        norms = _np.linalg.norm(matrix, axis=1)
+        if bool((norms <= 0.0).any()):
+            raise EmbeddingInputError(
+                f"TransferProbe {split_name} embeddings must not contain zero vectors for cosine distance."
+            )
+
+
+def _distance_matrix(train_matrix: Any, test_matrix: Any, *, distance: TransferDistance) -> Any:
+    if distance == "cosine":
+        train_unit = _normalize_rows(train_matrix)
+        test_unit = _normalize_rows(test_matrix)
+        similarities = test_unit @ train_unit.T
+        return 1.0 - similarities
+    differences = test_matrix[:, None, :] - train_matrix[None, :, :]
+    return _np.linalg.norm(differences, axis=2)
+
+
+def _normalize_rows(matrix: Any) -> Any:
+    norms = _np.linalg.norm(matrix, axis=1, keepdims=True)
+    return matrix / norms
+
+
+def _resolve_transfer_search_backend(
+    backend: TransferSearchBackend,
+    device: str | None,
+) -> tuple[ResolvedSearchBackend, str]:
+    if backend == "auto":
+        faiss_device = preferred_faiss_device(device)
+        if faiss_device is not None:
+            return "faiss_gpu", faiss_device
+        cuvs_device = preferred_cuvs_device(device)
+        if cuvs_device is not None:
+            return "cuvs_gpu", cuvs_device
+        torch_device = preferred_torch_device(device)
+        if torch_device is not None:
+            return "torch_gpu", torch_device
+        if import_faiss(allow_missing=True) is not None:
+            return "faiss_cpu", "cpu"
+        raise EmbeddingDependencyError(
+            "TransferProbe search_backend='auto' could not find faiss, cuVS, or torch acceleration."
+        )
+    if backend == "faiss_cpu":
+        return "faiss_cpu", "cpu"
+    if backend == "faiss_gpu":
+        faiss_device = preferred_faiss_device(device)
+        if faiss_device is None:
+            raise EmbeddingDependencyError("TransferProbe search_backend='faiss_gpu' requires FAISS GPU.")
+        return "faiss_gpu", faiss_device
+    if backend == "cuvs_gpu":
+        cuvs_device = preferred_cuvs_device(device)
+        if cuvs_device is None:
+            raise EmbeddingDependencyError("TransferProbe search_backend='cuvs_gpu' requires cuVS and a CUDA device.")
+        return "cuvs_gpu", cuvs_device
+    if backend == "torch_gpu":
+        torch_device = preferred_torch_device(device)
+        if torch_device is None:
+            raise EmbeddingDependencyError("TransferProbe search_backend='torch_gpu' requires torch and an accelerator.")
+        return "torch_gpu", torch_device
+    raise EmbeddingInputError(f"Unsupported TransferProbe.search_backend: {backend!r}.")
+
+
+def _transfer_classes(data: ProbeBackendInput) -> list[str]:
+    if data.prediction.classes is not None:
+        classes = [str(value) for value in data.prediction.classes]
+    else:
+        classes = sorted({str(data.labels[item]) for item in (*data.train_ids, *data.test_ids)})
+    if len(classes) < 2:
+        raise EmbeddingInputError("Multiclass TransferProbe requires at least two classes.")
+    return classes
+
+
+def _transfer_multilabel_classes(data: ProbeBackendInput) -> list[str]:
+    if data.prediction.classes is not None:
+        classes = [str(value) for value in data.prediction.classes]
+    else:
+        classes = sorted(
+            {
+                label
+                for item in (*data.train_ids, *data.test_ids)
+                for label in _as_multilabel(data.labels[item], item)
+            }
+        )
+    if not classes:
+        raise EmbeddingInputError("Multilabel TransferProbe requires at least one class.")
+    return classes
 
 
 def _validate_embeddings(ids: Sequence[str], embeddings: Mapping[str, Sequence[float]]) -> int:
@@ -904,6 +1283,11 @@ __all__ = [
     "MlpProbe",
     "ProbeEvaluation",
     "ResidueDataFlat",
+    "TransferDistance",
+    "TransferNeighborSelection",
+    "TransferProbe",
+    "TransferScoring",
+    "TransferSearchBackend",
     "compute_residue_feature_stats",
     "compute_residue_flat_data",
     "train_and_evaluate_probe",

@@ -163,7 +163,7 @@ def residue_dataset_metadata(
     metrics = {
         "binary": "f1",
         "multiclass": "accuracy" if category == "structure" else "macro_f1",
-        "multilabel": "macro_f1",
+        "multilabel": "f1",
         "regression": "spearmanr",
     }
     return DatasetMetadata(

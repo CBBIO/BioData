@@ -14,7 +14,7 @@ from ..collection_types import CollectionMetadata, DatasetMetadata
 from ..datasets import ProteinDataset, ProteinExample, SplitName
 
 
-EcTrack = Literal["head", "main"]
+EcTrack = Literal["head", "main", "full"]
 EcLevel = Literal[1, 2, 3, 4]
 EcDatasetKind = Literal["multilabel", "single", "subclass_holdout"]
 
@@ -25,7 +25,7 @@ EC_COLLECTION_METADATA = CollectionMetadata(
     tags=("protein", "function", "enzyme", "ec"),
 )
 
-_EC_TRACKS: tuple[EcTrack, ...] = ("head", "main")
+_EC_TRACKS: tuple[EcTrack, ...] = ("head", "main", "full")
 _EC_LEVELS: tuple[EcLevel, ...] = (1, 2, 3, 4)
 _EC_SPLITS: tuple[SplitName, ...] = ("train", "val", "test")
 _EC_MANIFEST_NAME = "ec_full_{track}.json"
@@ -105,6 +105,42 @@ _EC_STATS: Mapping[str, Mapping[str, int | float | tuple[int, int, int]]] = {
         "support_max": 1732,
         "label_assignments": 48215,
     },
+    "ec_1_full": {
+        "split_counts": (48493, 6015, 6112),
+        "sample_count": 60620,
+        "class_count": 7,
+        "support_min": 1695,
+        "support_median": 5202,
+        "support_max": 23666,
+        "label_assignments": 62101,
+    },
+    "ec_2_full": {
+        "split_counts": (48493, 6015, 6112),
+        "sample_count": 60620,
+        "class_count": 75,
+        "support_min": 1,
+        "support_median": 269,
+        "support_max": 10190,
+        "label_assignments": 62646,
+    },
+    "ec_3_full": {
+        "split_counts": (48493, 6015, 6112),
+        "sample_count": 60620,
+        "class_count": 265,
+        "support_min": 1,
+        "support_median": 58,
+        "support_max": 3056,
+        "label_assignments": 63059,
+    },
+    "ec_4_full": {
+        "split_counts": (48493, 6015, 6112),
+        "sample_count": 60620,
+        "class_count": 5528,
+        "support_min": 1,
+        "support_median": 2.0,
+        "support_max": 1732,
+        "label_assignments": 66162,
+    },
     "single_ec_1_head": {
         "split_counts": (27551, 3473, 3471),
         "sample_count": 34495,
@@ -177,6 +213,42 @@ _EC_STATS: Mapping[str, Mapping[str, int | float | tuple[int, int, int]]] = {
         "support_max": 1674,
         "label_assignments": 42957,
     },
+    "single_ec_1_full": {
+        "split_counts": (47405, 5879, 5956),
+        "sample_count": 59240,
+        "class_count": 7,
+        "support_min": 1695,
+        "support_median": 4652,
+        "support_max": 22964,
+        "label_assignments": 59240,
+    },
+    "single_ec_2_full": {
+        "split_counts": (47059, 5829, 5920),
+        "sample_count": 58808,
+        "class_count": 74,
+        "support_min": 1,
+        "support_median": 279.5,
+        "support_max": 9698,
+        "label_assignments": 58808,
+    },
+    "single_ec_3_full": {
+        "split_counts": (46812, 5777, 5890),
+        "sample_count": 58479,
+        "class_count": 264,
+        "support_min": 1,
+        "support_median": 54.0,
+        "support_max": 2887,
+        "label_assignments": 58479,
+    },
+    "single_ec_4_full": {
+        "split_counts": (44971, 5548, 5646),
+        "sample_count": 56165,
+        "class_count": 4871,
+        "support_min": 1,
+        "support_median": 2,
+        "support_max": 1664,
+        "label_assignments": 56165,
+    },
     "ec_1_subclass_holdout_head": {
         "split_counts": (26968, 3809, 3499),
         "sample_count": 34276,
@@ -231,6 +303,33 @@ _EC_STATS: Mapping[str, Mapping[str, int | float | tuple[int, int, int]]] = {
         "support_max": 2349,
         "label_assignments": 40204,
     },
+    "ec_1_subclass_holdout_full": {
+        "split_counts": (46501, 5995, 6312),
+        "sample_count": 58808,
+        "class_count": 7,
+        "support_min": 1693,
+        "support_median": 4642,
+        "support_max": 22804,
+        "label_assignments": 58808,
+    },
+    "ec_2_subclass_holdout_full": {
+        "split_counts": (42572, 5449, 5339),
+        "sample_count": 53360,
+        "class_count": 43,
+        "support_min": 7,
+        "support_median": 650,
+        "support_max": 9516,
+        "label_assignments": 53360,
+    },
+    "ec_3_subclass_holdout_full": {
+        "split_counts": (44304, 5542, 5543),
+        "sample_count": 55389,
+        "class_count": 205,
+        "support_min": 2,
+        "support_median": 87,
+        "support_max": 2736,
+        "label_assignments": 55389,
+    },
 }
 
 
@@ -243,7 +342,7 @@ _EC_MULTILABEL_DATASETS: tuple[DatasetMetadata, ...] = tuple(
         source="UniRef50 EC annotations",
         category="function_prediction",
         task_class="function",
-        preferred_metric="macro_f1",
+        preferred_metric="f1",
         description=(
             "Source: UniRef50 EC annotations. "
             "Class: function_prediction. "
@@ -253,7 +352,7 @@ _EC_MULTILABEL_DATASETS: tuple[DatasetMetadata, ...] = tuple(
         objective="multilabel",
         target=f"ec_{level}",
         status="ready",
-        metrics=("macro_f1", "micro_f1", "average_precision"),
+        metrics=("f1", "macro_f1", "weighted_f1", "average_precision"),
         split_counts=cast(tuple[int, int, int], _EC_STATS[f"ec_{level}_{track}"]["split_counts"]),
         sample_count=cast(int, _EC_STATS[f"ec_{level}_{track}"]["sample_count"]),
         download_adapter=None,
@@ -294,7 +393,7 @@ _EC_SINGLE_DATASETS: tuple[DatasetMetadata, ...] = tuple(
         objective="multiclass",
         target=f"single_ec_{level}",
         status="ready",
-        metrics=("accuracy", "macro_f1"),
+        metrics=("accuracy", "macro_f1", "weighted_f1"),
         split_counts=cast(tuple[int, int, int], _EC_STATS[f"single_ec_{level}_{track}"]["split_counts"]),
         sample_count=cast(int, _EC_STATS[f"single_ec_{level}_{track}"]["sample_count"]),
         download_adapter=None,
@@ -335,7 +434,7 @@ _EC_SUBCLASS_HOLDOUT_DATASETS: tuple[DatasetMetadata, ...] = tuple(
         objective="multiclass",
         target=f"ec_{level}",
         status="ready",
-        metrics=("accuracy", "macro_f1"),
+        metrics=("accuracy", "macro_f1", "weighted_f1"),
         split_counts=cast(tuple[int, int, int], _EC_STATS[f"ec_{level}_subclass_holdout_{track}"]["split_counts"]),
         sample_count=cast(int, _EC_STATS[f"ec_{level}_subclass_holdout_{track}"]["sample_count"]),
         download_adapter=None,
@@ -451,7 +550,7 @@ def _parse_ec_dataset_name(name: str) -> tuple[EcDatasetKind, EcLevel, EcTrack]:
     if kind == "subclass_holdout" and level == 4:
         raise EmbeddingInputError("EC subclass holdout datasets support levels 1, 2, and 3.")
     if track not in _EC_TRACKS:
-        raise EmbeddingInputError("EC dataset track must be 'head' or 'main'.")
+        raise EmbeddingInputError("EC dataset track must be 'head', 'main', or 'full'.")
     return kind, level, track
 
 

@@ -48,7 +48,7 @@ from CBBIO import ProteinDataset, ResidueDataset, ProteinExample, ResidueExample
 ### Task and Probes
 
 ```python
-from CBBIO import LinearProbe, MlpProbe, PredictionSpec, Task
+from CBBIO import LinearProbe, MlpProbe, PredictionSpec, Task, TransferProbe
 ```
 
 **`PredictionSpec`** describes what you are predicting:
@@ -60,7 +60,7 @@ from CBBIO import LinearProbe, MlpProbe, PredictionSpec, Task
 | `level` | `TaskLevel` | `"protein"` or `"residue"` |
 | `classes` | `Sequence[str] \| None` | Class names for multiclass (optional, for display) |
 
-`LinearProbe` and `MlpProbe` implement the built-in probe backends. They share these training
+`LinearProbe` and `MlpProbe` implement the built-in Torch probe backends. They share these training
 parameters:
 
 | Field | Default | Description |
@@ -87,7 +87,32 @@ task = Task(
 ```
 
 `MlpProbe` adds `hidden_dim`, which defaults to `64`. Use `MlpProbe(hidden_dim=128)` to select the
-built-in MLP architecture. For XGBoost, CNNs, and other estimators, see
+built-in MLP architecture.
+
+`TransferProbe()` is a no-training transfer head for protein-level tasks. By default, it scores
+classes from all training examples with inverse cosine-distance weighted votes and returns the full
+score vector. For multilabel tasks, `threshold=None` transfers every class with nonzero support so
+GO/Fmax metrics can choose their threshold from the scores.
+
+Transfer controls:
+
+| Field | Default | Values |
+|---|---|---|
+| `distance` | `"cosine"` | `"cosine"`, `"euclidean"` |
+| `neighbor_selection` | `"all"` | `"all"`, `"knn"`, `"cutoff_distance"` |
+| `k` | `10` | Used when `neighbor_selection="knn"` |
+| `distance_cutoff` | `None` | Required when `neighbor_selection="cutoff_distance"` |
+| `scoring` | `"weighted_voting"` | `"weighted_voting"`, `"voting"` |
+| `threshold` | `None` | Binary uses `0.5`; multilabel transfers all nonzero scores |
+| `search_backend` | `"numpy"` | `"numpy"`, `"auto"`, `"faiss_cpu"`, `"faiss_gpu"`, `"cuvs_gpu"`, `"torch_gpu"` |
+| `search_device` | `None` | Accelerator device for non-NumPy backends |
+| `search_ann` | `False` | Enables ANN where the selected backend supports it |
+| `return_neighbors` | `False` | Adds transferred neighbor ids, distances, weights, and labels to result metadata |
+
+Non-NumPy transfer backends support `neighbor_selection="knn"`. The default NumPy backend remains
+available for exact `"all"` and `"cutoff_distance"` transfer.
+
+For XGBoost, CNNs, and other estimators, see
 [Custom Probes](CustomProbes.md).
 
 `ProbeSpec` remains available as a compatibility configuration for existing code.
@@ -148,6 +173,9 @@ print([dataset.id for dataset in biolip.list_datasets()])
 | `scannet` | ScanNet binding annotations |
 | `netsurfp` | NetSurfP structure annotations |
 | `phosphoelm` | PhosphoELM evidence subsets |
+| `ec` | Generated Enzyme Commission function-prediction tasks |
+| `go` | Generated Gene Ontology function-prediction tasks |
+| `cafa` | CAFA5 and CAFA6 Kaggle Gene Ontology prediction training data |
 | `dtu` | DTU in-house annotation services |
 
 `DatasetCatalogEntry` remains as a compatibility alias for `DatasetMetadata`.
@@ -229,6 +257,178 @@ dataset = load_peer_dataset(
 ```
 
 PEER provides protein-level fitness and function benchmarks as well as residue-level tasks.
+
+### Gene Ontology Tasks
+
+```python
+from CBBIO import load_dataset
+
+dataset = load_dataset(
+    "go:go_bp_head",
+    "/data/function_datasets/output/go_main_head",
+    split=("train", "test"),
+)
+```
+
+The generated GO collection provides nine protein-level multilabel tasks. Dataset IDs use
+`go:<aspect>_<track>`, where `aspect` is `go_bp`, `go_cc`, or `go_mf`, and `track` is `head`
+`main`, or `full`.
+
+The `head` and `main` tracks apply class minimum-support filters. The `full` track keeps every
+asserted class for proteins that have at least one label in the requested GO aspect. Full splits
+use a deterministic hash over `tax_id` and `cluster_id`.
+
+Training targets are the task's asserted GO terms. The loader retains each protein's propagated
+terms and the generated `go.obo` path in metadata. When you run a GO task with
+`run_task_on_layer()`, CBBIO propagates predicted term scores to their GO ancestors and evaluates
+them against those propagated annotations.
+Ontology-root terms are excluded, and proteins annotated only with a root term do not contribute
+to the GO metric.
+
+The preferred GO metric is `go_fmax`. It follows CAFA protein-centric evaluation: CBBIO sweeps
+prediction-score thresholds, averages precision over proteins that have predictions at each
+threshold, averages recall over all proteins, and reports the highest F-score. The result also
+contains `go_fmax_threshold`, `go_precision_at_fmax`, `go_recall_at_fmax`, and
+`go_evaluated_protein_count`.
+
+GO tasks also report fixed-threshold propagated metrics when the probe has a known prediction
+threshold. For `TransferProbe(threshold=0.25)`, CBBIO reports `go_propagated_f1`,
+`go_propagated_precision`, `go_propagated_recall`, and `go_propagated_threshold` at `0.25`.
+These metrics use the same propagated GO score and truth sets as `go_fmax`, but they do not sweep
+thresholds.
+
+```python
+from CBBIO import go_fixed_threshold_protein_centric_metrics, load_go
+
+ontology = load_go("/data/probing/go.obo")
+metrics = go_fixed_threshold_protein_centric_metrics(
+    {"P12345": [0.1, 0.8]},
+    class_names=["GO:0008151", "GO:0009987"],
+    true_labels={"P12345": ["GO:0009987"]},
+    ontology=ontology,
+    threshold=0.25,
+)
+print(metrics["go_propagated_f1"])
+```
+
+### CAFA6 Kaggle Tasks
+
+```python
+from CBBIO import load_dataset
+
+dataset = load_dataset(
+    "cafa:cafa6_bp",
+    "/data/probing",
+    split=("train", "test"),
+    download=True,
+)
+```
+
+The CAFA collection downloads with the Kaggle CLI when `download=True`, then loads
+`Train/train_terms.tsv` and `Train/train_sequences.fasta`. Dataset IDs are `cafa:cafa5_bp`,
+`cafa:cafa5_cc`, `cafa:cafa5_mf`, `cafa:cafa6_bp`, `cafa:cafa6_cc`, and `cafa:cafa6_mf`; each
+uses deterministic hash splits over the labeled training proteins.
+
+Install `kaggle` and configure Kaggle credentials before using `download=True`. The downloader
+passes through `KAGGLE_API_TOKEN` when set, or reads `~/.kaggle/access_token` when that file exists.
+If `go-basic.obo` or `go.obo` and `IA.txt` are present beside `Train/`, the loader records them in
+example metadata so GO tasks can report the challenge metric, `go_weighted_fmax`, with
+`go_weighted_precision_at_fmax` and `go_weighted_recall_at_fmax`. The unweighted propagated
+`go_fmax` is still reported for comparison.
+
+```python
+from CBBIO import cafa6_weighted_fmax_mean
+
+summary = cafa6_weighted_fmax_mean(
+    {
+        "mf": mf_result.metrics,
+        "bp": bp_result.metrics,
+        "cc": cc_result.metrics,
+    }
+)
+```
+
+`cafa6_weighted_fmax_mean()` computes the arithmetic mean of the three subontology maximum
+weighted F-measures. Evaluate MF, BP, and CC separately, then pass the three result metric mappings
+to compute the CAFA6 three-aspect score.
+
+### Enzyme Commission Tasks
+
+```python
+from CBBIO import load_dataset
+
+dataset = load_dataset(
+    "ec:ec_4_main",
+    "/data/function_datasets/output/ec_main_head",
+    split=("train", "test"),
+)
+```
+
+The generated EC collection provides multilabel EC-level tasks, single-label variants, and
+subclass-holdout variants. Multilabel dataset IDs use `ec:ec_<level>_<track>`, where `level` is
+`1` through `4` and `track` is `head`, `main`, or `full`. These tasks report `f1`, `macro_f1`,
+`weighted_f1`, and `average_precision`.
+
+The `head` and `main` tracks apply class minimum-support filters. The `full` track keeps every
+exact EC class for proteins that have at least one EC annotation. Full splits use a deterministic
+hash over `tax_id` and `cluster_id`.
+
+Single-label variants use `ec:single_ec_<level>_<track>` and keep proteins with one label at the
+requested level.
+
+Subclass-holdout variants use `ec:ec_<level>_subclass_holdout_<track>` for levels `1` through
+`3`. They predict a parent EC label while assigning complete child subclasses to one split. No
+protein from a held-out child subclass appears in training.
+
+| Dataset level | Predicted label | Held-out subclass |
+|---|---|---|
+| `ec_1_subclass_holdout_*` | EC level 1 | EC level 2 |
+| `ec_2_subclass_holdout_*` | EC level 2 | EC level 3 |
+| `ec_3_subclass_holdout_*` | EC level 3 | Exact EC level 4 |
+
+For each parent label, CBBIO keeps at least one child subclass in training. It ranks eligible
+child subclasses by frequency and deterministically assigns rare subclasses to test, then
+validation, until each reaches about 10% of eligible examples. The task metadata records the
+held-out child in `heldout_subclass` and the source split in `original_split`.
+
+### EC Benchmark Tasks
+
+```python
+from CBBIO import load_dataset
+
+dataset = load_dataset(
+    "clean:ec_4_split30_fold0_halogenase",
+    "/data/probing",
+)
+```
+
+CBBIO also exposes CLEAN and EC-Bench as separate collections because they have their own source
+files and evaluation protocols. Both collections derive multilabel targets from exact EC
+annotations. Dataset IDs keep the provider first, then the EC level, then the training protocol,
+then the optional named test set.
+
+| Collection | Dataset ID pattern |
+|---|---|
+| CLEAN native split | `clean:ec_<level>_split<threshold>_fold<fold>` |
+| CLEAN named test set | `clean:ec_<level>_split<threshold>_fold<fold>_<test_set>` |
+| EC-Bench native split | `ecbench:ec_<level>_train_<size>` |
+| EC-Bench named test set | `ecbench:ec_<level>_train_<size>_<test_set>` |
+
+CLEAN thresholds are `10`, `30`, `50`, `70`, and `100`. CLEAN folds are `0` through `4`.
+EC-Bench train sizes are `30` and `100`. Named test sets are `halogenase`, `price`, and `new`.
+The native test split is used when the dataset ID has no test-set suffix.
+
+EC level labels are derived by truncating exact EC annotations:
+
+| Target | Example label |
+|---|---|
+| `ec_1` | `3` |
+| `ec_2` | `3.1` |
+| `ec_3` | `3.1.3` |
+| `ec_4` | `3.1.3.43` |
+
+Rows with multiple EC annotations keep a deduplicated list at the requested level. Rows with
+incomplete EC labels are skipped only when the requested level includes the incomplete segment.
 
 ---
 
@@ -526,30 +726,13 @@ Use `filter_redundant_to_test_mmseqs` to remove training sequences that are sequ
 ```python
 from CBBIO import filter_redundant_to_test_mmseqs
 
-train_ids = [ex.id for ex in dataset.by_split("train")]
-test_ids  = [ex.id for ex in dataset.by_split("test")]
-
-# Sequences dict: {id: amino_acid_sequence}
-sequences = {ex.id: ex.sequence for ex in dataset.examples}
-
-report = filter_redundant_to_test_mmseqs(
-    train_ids=train_ids,
-    test_ids=test_ids,
-    sequences=sequences,
-    cutoff=0.3,          # 30% sequence identity threshold
-    min_coverage=0.3,
+filtered_dataset, report = filter_redundant_to_test_mmseqs(
+    dataset,
+    cutoff=30.0,
+    min_coverage=0.8,
 )
 
-print(f"Removed {report.removed_count} train sequences")
-print(f"Retained {report.retained_count} train sequences")
-
-# Build a filtered dataset
-safe_train_ids = set(train_ids) - {hit.removed_id for hit in report.removed}
-filtered_examples = [
-    ex for ex in dataset.examples
-    if ex.split != "train" or ex.id in safe_train_ids
-]
-clean_dataset = ResidueDataset(filtered_examples)
+print(report.removed_count)
 ```
 
 ---
@@ -562,9 +745,11 @@ clean_dataset = ResidueDataset(filtered_examples)
 |---|---|
 | `accuracy` | Fraction of correct predictions |
 | `f1` | F1 score (harmonic mean of precision and recall) |
+| `macro_f1` | Mean of positive-class and negative-class F1 |
+| `balanced_accuracy` | Mean of sensitivity and specificity |
 | `precision` | Positive predictive value |
 | `recall` | True positive rate (sensitivity) |
-| `auc` | Area under the ROC curve |
+| `auroc` | Area under the ROC curve |
 | `auprc` | Area under the precision-recall curve (more informative for imbalanced tasks) |
 | `mcc` | Matthews Correlation Coefficient |
 
@@ -573,8 +758,8 @@ clean_dataset = ResidueDataset(filtered_examples)
 | Metric | Description |
 |---|---|
 | `accuracy` | Fraction correct |
-| `f1_macro` | Macro-averaged F1 across all classes |
-| `f1_weighted` | Weighted-average F1 |
+| `macro_f1` | Macro-averaged F1 across all classes |
+| `weighted_f1` | Support-weighted F1 across all classes |
 
 ### Regression
 
@@ -583,12 +768,23 @@ clean_dataset = ResidueDataset(filtered_examples)
 | `r2` | Coefficient of determination (R²) |
 | `rmse` | Root mean squared error |
 | `mae` | Mean absolute error |
-| `spearman` | Spearman rank correlation |
-| `pearson` | Pearson correlation coefficient |
+| `spearmanr` | Spearman rank correlation |
 
 ### Multilabel
 
-Same as binary but computed per-label and averaged.
+| Metric | Description |
+|---|---|
+| `exact_match` | Fraction of examples whose predicted label set exactly matches the true label set |
+| `f1` | Alias for `micro_f1` |
+| `micro_f1` | Global F1 over all labels and examples |
+| `macro_f1` | Unweighted mean F1 over labels |
+| `weighted_f1` | Support-weighted mean F1 over labels |
+| `average_precision` | Mean per-label area under the precision-recall curve |
+
+GO tasks additionally report propagated, protein-centric metrics. `go_fmax`,
+`go_precision_at_fmax`, and `go_recall_at_fmax` use the best swept threshold. `go_propagated_f1`,
+`go_propagated_precision`, and `go_propagated_recall` use the probe's fixed prediction threshold
+when one is available. Use `go_fmax` to compare GO probes against CAFA-style reports.
 
 ---
 
@@ -602,7 +798,8 @@ class TaskLayerResult:
     layer_index: int
     metrics: dict[str, float]        # metric name → value
     predictions: dict[str, Any]      # protein_id → predicted value
-    scores: dict[str, float] | None  # probability scores (classification only)
+    scores: dict[str, float | list[float]] | None
+    metadata: Mapping[str, Any] | None
     train_count: int
     val_count: int
     test_count: int

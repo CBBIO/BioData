@@ -88,6 +88,10 @@ reports residue predictions with IDs such as `P12345:42`.
 Binary probes must return probability-like `scores` as well as class predictions. CBBIO uses those
 scores for AUROC and AUPRC. Regression and multiclass probes do not require scores.
 
+Custom probes can also return `metadata` in `ProbeBackendOutput`. CBBIO passes it through to
+`TaskLayerResult.metadata`. Use this for per-example diagnostics such as transferred neighbor IDs
+or model explanations.
+
 ## XGBoost
 
 ```python
@@ -285,21 +289,23 @@ metrics and converts the output to position-qualified prediction IDs.
 ## Choosing an Integration
 
 ```python
-from CBBIO import LinearProbe, MlpProbe, ProbeSpec
+from CBBIO import LinearProbe, MlpProbe, ProbeSpec, TransferProbe
 
 linear = LinearProbe(epochs=100)
 mlp = MlpProbe(hidden_dim=128, epochs=100)
+transfer = TransferProbe()
 compatible = ProbeSpec(kind="mlp", hidden_dim=128)
 ```
 
-Use `LinearProbe` and `MlpProbe` for built-in Torch probes. `ProbeSpec` remains compatible and
-resolves to the corresponding backend. Use a custom backend class for external estimators or
-sequence-aware architectures.
+Use `LinearProbe` and `MlpProbe` for built-in Torch probes. Use `TransferProbe` for a no-training
+transfer head. `ProbeSpec` remains compatible and resolves to the corresponding Torch backend.
+Use a custom backend class for external estimators or sequence-aware architectures.
 
 | Probe | `Task.probe` value | Evaluation |
 |---|---|---|
 | Linear | `LinearProbe(...)` | Canonical |
 | MLP | `MlpProbe(...)` | Canonical |
+| Transfer | `TransferProbe()` | Canonical |
 | XGBoost, random forest, SVM | Custom backend instance | Canonical |
 | CNN, RNN, transformer head | Custom backend instance | Canonical |
 

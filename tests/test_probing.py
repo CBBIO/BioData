@@ -7,6 +7,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tarfile
+import zipfile
 
 import pytest
 
@@ -29,9 +30,12 @@ from CBBIO import (
     ResidueExample,
     StratifiedDatasetSplitter,
     Task,
+    cafa6_weighted_fmax_mean,
     get_dataset_collection,
     get_dataset_catalog_entry,
     download_dbptm_benchmark,
+    download_cafa5_dataset,
+    download_cafa6_dataset,
     download_disprot_current_json,
     download_disprot_current_tsv,
     download_musitedeep_testdata,
@@ -50,14 +54,20 @@ from CBBIO import (
     list_residue_dataset_catalog,
     list_residue_sources,
     load_biolip_dataset,
+    load_cafa5_dataset,
+    load_cafa6_dataset,
+    load_clean_dataset,
     load_dataset,
     load_dbptm_benchmark_archive,
     load_dbptm_benchmark_dataset,
     load_disprot_json,
     load_disprot_tsv,
     load_ec_dataset,
+    load_ecbench_dataset,
+    load_go_dataset,
     load_flip_csv,
     load_flip_dataset,
+    load_go,
     load_interval_residue_tsv,
     load_musitedeep_fasta,
     load_musitedeep_testdata_dataset,
@@ -67,18 +77,27 @@ from CBBIO import (
     load_residue_label_csv,
     load_residue_source_dataset,
     read_ec_manifest,
+    read_go_manifest,
+    read_information_accretion_weights,
     run_task_on_layer,
     search_dataset_catalog,
     train_and_evaluate_residue_probe,
+    TransferProbe,
 )
 from CBBIO.probing.metrics import binary_metrics
+from CBBIO.probing.metrics import go_combined_protein_centric_metrics
+from CBBIO.probing.metrics import go_fixed_threshold_protein_centric_metrics
+from CBBIO.probing.metrics import go_protein_centric_metrics
+from CBBIO.probing.metrics import go_weighted_protein_centric_metrics
 from CBBIO.probing.metrics import multilabel_metrics
+from CBBIO.probing.metrics import multiclass_metrics
 from CBBIO.probing.metrics import spearmanr
 from CBBIO.embeddings import EmbeddingInputError
 
 
 torch = pytest.importorskip("torch")
 peer_module = sys.modules[load_peer_dataset.__module__]
+cafa_download_module = sys.modules[download_cafa6_dataset.__globals__["download_cafa_dataset"].__module__]
 
 
 class _FixedProbeBackend(ProbeBackend):
@@ -475,6 +494,293 @@ def test_custom_multiclass_probe_returns_canonical_class_names() -> None:
     assert result.metrics["accuracy"] == pytest.approx(1.0)
 
 
+def test_transfer_probe_scores_multilabel_classes_by_inverse_cosine_distance() -> None:
+    dataset = ProteinDataset(
+        [
+            ProteinExample("near", "ACDE", {"terms": ["a"]}, "train"),
+            ProteinExample("far", "FGHI", {"terms": ["b"]}, "train"),
+            ProteinExample("test", "KLMN", {"terms": ["a"]}, "test"),
+        ]
+    )
+    task = Task(
+        name="transfer_multilabel",
+        dataset=dataset,
+        prediction=PredictionSpec(
+            target="terms",
+            objective="multilabel",
+            classes=("a", "b"),
+        ),
+        probe=TransferProbe(k=2, threshold=0.6),
+    )
+
+    result = run_task_on_layer(
+        task=task,
+        embeddings={
+            "near": [0.9, 0.4358898944],
+            "far": [0.8, 0.6],
+            "test": [1.0, 0.0],
+        },
+    )
+
+    assert result.scores == {"test": pytest.approx([2.0 / 3.0, 1.0 / 3.0])}
+    assert result.predictions == {"test": ["a"]}
+
+
+def test_transfer_probe_transfers_all_multilabel_scores_by_default() -> None:
+    dataset = ProteinDataset(
+        [
+            ProteinExample("a", "ACDE", {"terms": ["a"]}, "train"),
+            ProteinExample("b", "FGHI", {"terms": ["b"]}, "train"),
+            ProteinExample("test", "KLMN", {"terms": ["a"]}, "test"),
+        ]
+    )
+    task = Task(
+        name="transfer_all_multilabel",
+        dataset=dataset,
+        prediction=PredictionSpec(
+            target="terms",
+            objective="multilabel",
+            classes=("a", "b"),
+        ),
+        probe=TransferProbe(scoring="voting"),
+    )
+
+    result = run_task_on_layer(
+        task=task,
+        embeddings={
+            "a": [1.0, 0.0],
+            "b": [0.0, 1.0],
+            "test": [1.0, 0.0],
+        },
+    )
+
+    assert result.scores == {"test": pytest.approx([0.5, 0.5])}
+    assert result.predictions == {"test": ["a", "b"]}
+
+
+def test_transfer_probe_uses_ten_neighbors_for_knn_selection() -> None:
+    dataset = ProteinDataset(
+        [
+            *[
+                ProteinExample(f"positive_{index}", "ACDE", {"active": 1}, "train")
+                for index in range(10)
+            ],
+            ProteinExample("negative", "FGHI", {"active": 0}, "train"),
+            ProteinExample("test", "KLMN", {"active": 1}, "test"),
+        ]
+    )
+    task = Task(
+        name="transfer_default_k",
+        dataset=dataset,
+        prediction=PredictionSpec(target="active", objective="binary"),
+        probe=TransferProbe(neighbor_selection="knn"),
+    )
+    embeddings = {
+        **{
+            f"positive_{index}": [1.0, float(index + 1) / 100.0]
+            for index in range(10)
+        },
+        "negative": [-1.0, 0.0],
+        "test": [1.0, 0.0],
+    }
+
+    result = run_task_on_layer(task=task, embeddings=embeddings)
+
+    assert result.predictions == {"test": 1}
+    assert result.scores == {"test": pytest.approx(1.0)}
+
+
+def test_transfer_probe_returns_neighbor_metadata_when_requested() -> None:
+    dataset = ProteinDataset(
+        [
+            ProteinExample("near", "ACDE", {"active": 1}, "train"),
+            ProteinExample("far", "FGHI", {"active": 0}, "train"),
+            ProteinExample("test", "KLMN", {"active": 1}, "test"),
+        ]
+    )
+    task = Task(
+        name="transfer_neighbors",
+        dataset=dataset,
+        prediction=PredictionSpec(target="active", objective="binary"),
+        probe=TransferProbe(
+            distance="euclidean",
+            neighbor_selection="knn",
+            k=2,
+            scoring="voting",
+            return_neighbors=True,
+        ),
+    )
+
+    result = run_task_on_layer(
+        task=task,
+        embeddings={
+            "near": [0.1, 0.0],
+            "far": [2.0, 0.0],
+            "test": [0.0, 0.0],
+        },
+    )
+
+    assert result.metadata is not None
+    neighbors = result.metadata["transfer_neighbors"]["test"]
+    assert neighbors[0] == {"id": "near", "distance": pytest.approx(0.1), "weight": 1.0, "label": 1}
+    assert neighbors[1] == {"id": "far", "distance": pytest.approx(2.0), "weight": 1.0, "label": 0}
+
+
+def test_transfer_probe_uses_faiss_cpu_for_knn_selection_when_requested() -> None:
+    pytest.importorskip("faiss")
+    dataset = ProteinDataset(
+        [
+            ProteinExample("near", "ACDE", {"active": 1}, "train"),
+            ProteinExample("far", "FGHI", {"active": 0}, "train"),
+            ProteinExample("test", "KLMN", {"active": 1}, "test"),
+        ]
+    )
+    task = Task(
+        name="transfer_faiss_cpu",
+        dataset=dataset,
+        prediction=PredictionSpec(target="active", objective="binary"),
+        probe=TransferProbe(
+            neighbor_selection="knn",
+            k=1,
+            search_backend="faiss_cpu",
+        ),
+    )
+
+    result = run_task_on_layer(
+        task=task,
+        embeddings={
+            "near": [1.0, 0.0],
+            "far": [0.0, 1.0],
+            "test": [0.9, 0.1],
+        },
+    )
+
+    assert result.scores == {"test": pytest.approx(1.0)}
+    assert result.predictions == {"test": 1}
+
+
+def test_transfer_probe_scores_all_neighbors_with_unweighted_votes() -> None:
+    dataset = ProteinDataset(
+        [
+            ProteinExample("positive", "ACDE", {"active": 1}, "train"),
+            ProteinExample("negative", "FGHI", {"active": 0}, "train"),
+            ProteinExample("test", "KLMN", {"active": 0}, "test"),
+        ]
+    )
+    task = Task(
+        name="transfer_all_voting",
+        dataset=dataset,
+        prediction=PredictionSpec(target="active", objective="binary"),
+        probe=TransferProbe(
+            distance="euclidean",
+            neighbor_selection="all",
+            scoring="voting",
+            threshold=0.6,
+        ),
+    )
+
+    result = run_task_on_layer(
+        task=task,
+        embeddings={
+            "positive": [0.0, 0.0],
+            "negative": [10.0, 0.0],
+            "test": [0.1, 0.0],
+        },
+    )
+
+    assert result.scores == {"test": pytest.approx(0.5)}
+    assert result.predictions == {"test": 0}
+
+
+def test_transfer_probe_selects_neighbors_by_distance_cutoff() -> None:
+    dataset = ProteinDataset(
+        [
+            ProteinExample("near", "ACDE", {"active": 1}, "train"),
+            ProteinExample("far", "FGHI", {"active": 0}, "train"),
+            ProteinExample("test", "KLMN", {"active": 1}, "test"),
+        ]
+    )
+    task = Task(
+        name="transfer_cutoff",
+        dataset=dataset,
+        prediction=PredictionSpec(target="active", objective="binary"),
+        probe=TransferProbe(
+            distance="euclidean",
+            neighbor_selection="cutoff_distance",
+            distance_cutoff=0.2,
+            scoring="voting",
+        ),
+    )
+
+    result = run_task_on_layer(
+        task=task,
+        embeddings={
+            "near": [0.1, 0.0],
+            "far": [10.0, 0.0],
+            "test": [0.0, 0.0],
+        },
+    )
+
+    assert result.scores == {"test": pytest.approx(1.0)}
+    assert result.predictions == {"test": 1}
+
+
+def test_transfer_probe_raises_when_cutoff_selects_no_neighbors() -> None:
+    dataset = ProteinDataset(
+        [
+            ProteinExample("train", "ACDE", {"active": 1}, "train"),
+            ProteinExample("test", "KLMN", {"active": 1}, "test"),
+        ]
+    )
+    task = Task(
+        name="transfer_empty_cutoff",
+        dataset=dataset,
+        prediction=PredictionSpec(target="active", objective="binary"),
+        probe=TransferProbe(
+            distance="euclidean",
+            neighbor_selection="cutoff_distance",
+            distance_cutoff=0.1,
+        ),
+    )
+
+    with pytest.raises(EmbeddingInputError, match="no neighbors"):
+        run_task_on_layer(
+            task=task,
+            embeddings={"train": [1.0, 0.0], "test": [0.0, 0.0]},
+        )
+
+
+def test_transfer_probe_raises_when_k_is_not_positive() -> None:
+    with pytest.raises(EmbeddingInputError, match="k"):
+        TransferProbe(k=0)
+
+
+def test_transfer_probe_raises_when_accelerated_backend_is_used_without_knn() -> None:
+    with pytest.raises(EmbeddingInputError, match="knn"):
+        TransferProbe(search_backend="faiss_cpu", neighbor_selection="all")
+
+
+def test_transfer_probe_raises_when_embedding_is_zero_vector() -> None:
+    dataset = ProteinDataset(
+        [
+            ProteinExample("train", "ACDE", {"active": 1}, "train"),
+            ProteinExample("test", "KLMN", {"active": 1}, "test"),
+        ]
+    )
+    task = Task(
+        name="transfer_zero_vector",
+        dataset=dataset,
+        prediction=PredictionSpec(target="active", objective="binary"),
+        probe=TransferProbe(),
+    )
+
+    with pytest.raises(EmbeddingInputError, match="zero vectors"):
+        run_task_on_layer(
+            task=task,
+            embeddings={"train": [0.0, 0.0], "test": [1.0, 0.0]},
+        )
+
+
 @pytest.mark.parametrize(
     "probe",
     [
@@ -592,9 +898,23 @@ def test_multilabel_metrics_report_micro_and_macro_f1() -> None:
     )
 
     assert metrics["exact_match"] == pytest.approx(2.0 / 3.0)
+    assert metrics["f1"] == pytest.approx(0.75)
     assert metrics["micro_f1"] == pytest.approx(0.75)
     assert metrics["macro_f1"] == pytest.approx((0.8 + 2.0 / 3.0) / 2.0)
+    assert metrics["weighted_f1"] == pytest.approx((0.8 * 2.0 + (2.0 / 3.0) * 2.0) / 4.0)
     assert metrics["average_precision"] == pytest.approx(1.0)
+
+
+def test_multiclass_metrics_report_weighted_f1() -> None:
+    metrics = multiclass_metrics(
+        y_true=[0, 0, 0, 1, 2],
+        y_pred=[0, 0, 1, 1, 1],
+        class_count=3,
+    )
+
+    assert metrics["accuracy"] == pytest.approx(0.6)
+    assert metrics["macro_f1"] == pytest.approx(((4.0 / 5.0) + (1.0 / 2.0) + 0.0) / 3.0)
+    assert metrics["weighted_f1"] == pytest.approx(((4.0 / 5.0) * 3.0 + (1.0 / 2.0)) / 5.0)
 
 
 def test_multilabel_task_trains_probe_with_label_sets() -> None:
@@ -635,7 +955,9 @@ def test_multilabel_task_trains_probe_with_label_sets() -> None:
 
     assert result.metrics["exact_match"] == pytest.approx(1.0)
     assert result.metrics["micro_f1"] == pytest.approx(1.0)
+    assert result.metrics["f1"] == pytest.approx(1.0)
     assert result.metrics["macro_f1"] == pytest.approx(1.0)
+    assert result.metrics["weighted_f1"] == pytest.approx(1.0)
     assert result.predictions == {
         "test_a": ["a"],
         "test_b": ["b"],
@@ -1057,7 +1379,7 @@ def _write_ec_dataset_layout(root: Path) -> None:
     ec_root = root / "ec_main_head"
     manifest_dir = ec_root / "manifests"
     manifest_dir.mkdir(parents=True)
-    for track in ("head", "main"):
+    for track in ("head", "main", "full"):
         (manifest_dir / f"ec_full_{track}.json").write_text(
             json.dumps({"task": "ec_full", "track": track, "split_counts": {"train": 2}})
             + "\n",
@@ -1140,6 +1462,16 @@ def _write_ec_dataset_layout(root: Path) -> None:
                 ec_level3=["1.1.1"],
             )
         ],
+        ("full", "train"): [
+            _ec_jsonl_record(
+                "ec_full:full:p9",
+                "MMMM",
+                ["9.9.9.9"],
+                ec_level1=["9"],
+                ec_level2=["9.9"],
+                ec_level3=["9.9.9"],
+            )
+        ],
     }
     for (track, split), split_records in records.items():
         path = ec_root / "tasks" / "ec_full" / track / f"{split}.jsonl"
@@ -1206,6 +1538,436 @@ def _ec_jsonl_record(
     }
 
 
+def _write_clean_dataset_layout(root: Path) -> None:
+    clean_root = root / "CLEAN" / "CLEAN_all_train_valid_splits"
+    split_dir = clean_root / "split30"
+    split_dir.mkdir(parents=True)
+    (split_dir / "split30_train_split_0.csv").write_text(
+        "\n".join(
+            [
+                "Entry\tEC number\tSequence",
+                "clean_train_1\t1.1.1.1\tACDE",
+                "clean_train_2\t1.1.1.2;1.1.2.1\tFGHI",
+                "clean_train_partial\t3.4.24.-\tKLMN",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (split_dir / "split30_test_split_0_curate.csv").write_text(
+        "\n".join(
+            [
+                "ID\tEC\tSequences",
+                "clean_test_1\t2.7.7.4\tPQRS",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (clean_root / "halogenase.csv").write_text(
+        "\n".join(
+            [
+                "Entry\tEC number\tSequence",
+                "clean_halogenase_1\t4.2.3.158\tTVWY",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (clean_root / "price.csv").write_text(
+        "\n".join(
+            [
+                "Entry\tEC number\tSequence",
+                "clean_price_1\t5.4.2.1\tAAAA",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (clean_root / "new.csv").write_text(
+        "\n".join(
+            [
+                "Entry\tEC number\tSequence",
+                "clean_new_1\t6.1.1.10\tCCCC",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def _write_ecbench_dataset_layout(root: Path) -> None:
+    ecbench_root = root / "ec-benchmark"
+    ecbench_root.mkdir()
+    (ecbench_root / "train_30.csv").write_text(
+        "\n".join(
+            [
+                "id,seq,ec_number",
+                "ecbench_train_1,ACDE,1.1.1.1",
+                "ecbench_train_2,FGHI,1.1.1.2;1.1.2.1",
+                "ecbench_train_partial,KLMN,3.4.24.-",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (ecbench_root / "train_100.csv").write_text(
+        "\n".join(
+            [
+                "id,seq,ec_number",
+                "ecbench_train100_1,ACDE,6.1.1.10",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (ecbench_root / "test_ec.csv").write_text(
+        "\n".join(
+            [
+                "id,seq,ec_number",
+                "ecbench_test_1,PQRS,2.7.7.4",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    for test_set, label in {
+        "halogenase": "4.2.3.158",
+        "price": "5.4.2.1",
+        "new": "6.1.1.10",
+    }.items():
+        (ecbench_root / f"{test_set}.csv").write_text(
+            "\n".join(
+                [
+                    "id,seq,ec_number",
+                    f"ecbench_{test_set}_1,TVWY,{label}",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+
+def _write_go_dataset_layout(root: Path) -> None:
+    go_root = root / "go_main_head"
+    manifest_dir = go_root / "manifests"
+    manifest_dir.mkdir(parents=True)
+    ontology_dir = go_root / "go_ontology"
+    ontology_dir.mkdir()
+    (ontology_dir / "go.obo").write_text(
+        """format-version: 1.2
+
+[Term]
+id: GO:0008150
+name: biological process
+namespace: biological_process
+
+[Term]
+id: GO:0009987
+name: cellular process
+namespace: biological_process
+is_a: GO:0008150 ! biological process
+
+[Term]
+id: GO:0008151
+name: unrelated process
+namespace: biological_process
+is_a: GO:0008150 ! biological process
+
+[Term]
+id: GO:0003674
+name: molecular function
+namespace: molecular_function
+""",
+        encoding="utf-8",
+    )
+    for aspect in ("bp", "cc", "mf"):
+        for track in ("head", "main", "full"):
+            (manifest_dir / f"go_{aspect}_{track}.json").write_text(
+                json.dumps({"task": f"go_{aspect}", "track": track}) + "\n",
+                encoding="utf-8",
+            )
+            split_dir = go_root / "tasks" / f"go_{aspect}" / track
+            split_dir.mkdir(parents=True)
+            for split in ("train", "val", "test"):
+                (split_dir / f"{split}.jsonl").write_text("", encoding="utf-8")
+    (go_root / "tasks" / "go_bp" / "head" / "train.jsonl").write_text(
+        "".join(
+            json.dumps(record) + "\n"
+            for record in [
+                _go_jsonl_record("go_bp:head:p1", "ACDE", ["GO:0008150", "GO:0009987"]),
+                _go_jsonl_record("go_bp:head:p2", "FGHI", ["GO:0008150", "GO:0008151"]),
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (go_root / "tasks" / "go_mf" / "main" / "test.jsonl").write_text(
+        json.dumps(_go_jsonl_record("go_mf:main:p3", "KLMN", ["GO:0003674"])) + "\n",
+        encoding="utf-8",
+    )
+    (go_root / "tasks" / "go_bp" / "head" / "test.jsonl").write_text(
+        json.dumps(_go_jsonl_record("go_bp:head:p3", "KLMN", ["GO:0008150", "GO:0009987"]))
+        + "\n",
+        encoding="utf-8",
+    )
+    (go_root / "tasks" / "go_bp" / "full" / "train.jsonl").write_text(
+        json.dumps(_go_jsonl_record("go_bp:full:p4", "MMMM", ["GO:0008150", "GO:0008151"]))
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def _go_jsonl_record(record_id: str, sequence: str, labels_propagated: list[str]) -> dict[str, object]:
+    cluster_id = record_id.rpartition(":")[2]
+    return {
+        "cluster_id": cluster_id,
+        "id": record_id,
+        "labels_asserted": labels_propagated[-1:],
+        "labels_propagated": labels_propagated,
+        "metadata": {"aspect": "biological_process", "track": record_id.split(":")[1]},
+        "rep_accession": cluster_id,
+        "sequence": sequence,
+    }
+
+
+def _write_cafa6_dataset_layout(root: Path) -> None:
+    train_dir = root / "Train"
+    train_dir.mkdir(parents=True)
+    (train_dir / "train_sequences.fasta").write_text(
+        "\n".join(
+            [
+                ">sp|P1|ONE protein one",
+                "ACDE",
+                ">P2 protein two",
+                "FGHI",
+                ">P3 protein three",
+                "KLMN",
+                ">P4 protein four",
+                "PQRS",
+                ">P5 protein five",
+                "TVWY",
+                ">P6 protein six",
+                "AAAA",
+                ">P7 protein seven",
+                "CCCC",
+                ">P8 protein eight",
+                "DDDD",
+                ">P9 protein nine",
+                "EEEE",
+                ">P10 protein ten",
+                "FFFF",
+                ">P11 protein eleven",
+                "GGGG",
+                ">P12 protein twelve",
+                "HHHH",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (train_dir / "train_terms.tsv").write_text(
+        "\n".join(
+            [
+                "EntryID\tterm\taspect",
+                "P1\tGO:0009987\tP",
+                "P1\tGO:0008151\tP",
+                "P2\tGO:0009987\tP",
+                "P3\tGO:0005575\tC",
+                "P4\tGO:0003674\tF",
+                "P5\tGO:0009987\tP",
+                "P6\tGO:0009987\tP",
+                "P7\tGO:0009987\tP",
+                "P8\tGO:0009987\tP",
+                "P9\tGO:0009987\tP",
+                "P10\tGO:0009987\tP",
+                "P11\tGO:0009987\tP",
+                "P12\tGO:0009987\tP",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (train_dir / "go-basic.obo").write_text(
+        """format-version: 1.2
+
+[Term]
+id: GO:0008150
+name: biological process
+namespace: biological_process
+
+[Term]
+id: GO:0009987
+name: cellular process
+namespace: biological_process
+is_a: GO:0008150 ! biological process
+
+[Term]
+id: GO:0008151
+name: unrelated process
+namespace: biological_process
+is_a: GO:0008150 ! biological process
+
+[Term]
+id: GO:0005575
+name: cellular component
+namespace: cellular_component
+
+[Term]
+id: GO:0003674
+name: molecular function
+namespace: molecular_function
+""",
+        encoding="utf-8",
+    )
+    (root / "IA.tsv").write_text(
+        "\n".join(
+            [
+                "GO:0008150\t0.0",
+                "GO:0009987\t2.0",
+                "GO:0008151\t1.0",
+                "GO:0005575\t1.5",
+                "GO:0003674\t1.25",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def _write_cafa_lowercase_aspect_layout(root: Path) -> None:
+    train_dir = root / "Train"
+    train_dir.mkdir(parents=True)
+    (train_dir / "train_sequences.fasta").write_text(
+        "\n".join(
+            [
+                ">P1 protein one",
+                "ACDE",
+                ">P2 protein two",
+                "FGHI",
+                ">P3 protein three",
+                "KLMN",
+                ">P4 protein four",
+                "PQRS",
+                ">P5 protein five",
+                "TVWY",
+                ">P6 protein six",
+                "AAAA",
+                ">P7 protein seven",
+                "CCCC",
+                ">P8 protein eight",
+                "DDDD",
+                ">P9 protein nine",
+                "EEEE",
+                ">P10 protein ten",
+                "FFFF",
+                ">P11 protein eleven",
+                "GGGG",
+                ">P12 protein twelve",
+                "HHHH",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (train_dir / "train_terms.tsv").write_text(
+        "\n".join(
+            [
+                "Entry_ID\tTERM\tAspect",
+                "P1\tGO:0009987\tp",
+                "P2\tGO:0009987\tp",
+                "P3\tGO:0005575\tc",
+                "P4\tGO:0003674\tf",
+                "P5\tGO:0009987\tp",
+                "P6\tGO:0009987\tp",
+                "P7\tGO:0009987\tp",
+                "P8\tGO:0009987\tp",
+                "P9\tGO:0009987\tp",
+                "P10\tGO:0009987\tp",
+                "P11\tGO:0009987\tp",
+                "P12\tGO:0009987\tp",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def _write_cafa6_dataset_zip(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr(
+            "Train/train_sequences.fasta",
+            "\n".join(
+                [
+                    ">P1 protein one",
+                    "ACDE",
+                    ">P2 protein two",
+                    "FGHI",
+                    ">P3 protein three",
+                    "KLMN",
+                    ">P4 protein four",
+                    "PQRS",
+                    ">P5 protein five",
+                    "TVWY",
+                    ">P6 protein six",
+                    "AAAA",
+                    ">P7 protein seven",
+                    "CCCC",
+                    ">P8 protein eight",
+                    "DDDD",
+                    ">P9 protein nine",
+                    "EEEE",
+                    ">P10 protein ten",
+                    "FFFF",
+                    ">P11 protein eleven",
+                    "GGGG",
+                    ">P12 protein twelve",
+                    "HHHH",
+                ]
+            )
+            + "\n",
+        )
+        archive.writestr(
+            "Train/train_terms.tsv",
+            "\n".join(
+                [
+                    "EntryID\tterm\taspect",
+                    "P1\tGO:0009987\tP",
+                    "P1\tGO:0008151\tP",
+                    "P2\tGO:0009987\tP",
+                    "P3\tGO:0005575\tC",
+                    "P4\tGO:0003674\tF",
+                    "P5\tGO:0009987\tP",
+                    "P6\tGO:0009987\tP",
+                    "P7\tGO:0009987\tP",
+                    "P8\tGO:0009987\tP",
+                    "P9\tGO:0009987\tP",
+                    "P10\tGO:0009987\tP",
+                    "P11\tGO:0009987\tP",
+                    "P12\tGO:0009987\tP",
+                ]
+            )
+            + "\n",
+        )
+        archive.writestr(
+        "Train/go-basic.obo",
+            """format-version: 1.2
+
+[Term]
+id: GO:0008150
+name: biological process
+namespace: biological_process
+
+[Term]
+id: GO:0009987
+name: cellular process
+namespace: biological_process
+is_a: GO:0008150 ! biological process
+""",
+        )
+        archive.writestr("IA.tsv", "GO:0008150\t0.0\nGO:0009987\t2.0\n")
+
+
 def test_dtu_catalog_lists_relevant_residue_services() -> None:
     residue_names = {service.name for service in list_dtu_services(level="residue")}
     ptm_names = {service.name for service in list_dtu_services(category="ptm")}
@@ -1238,9 +2000,27 @@ def test_unified_dataset_catalog_is_filterable_and_searchable() -> None:
     assert get_dataset_catalog_entry("ec:ec_1_head").split_counts == (28147, 3519, 3519)
     assert get_dataset_catalog_entry("ec:ec_4_main").sample_count == 45405
     assert get_dataset_catalog_entry("ec:ec_4_main").loader == "load_ec_dataset"
+    assert get_dataset_catalog_entry("ec:ec_4_main").preferred_metric == "f1"
+    assert "weighted_f1" in get_dataset_catalog_entry("ec:ec_4_main").metrics
+    assert get_dataset_catalog_entry("ec:ec_4_full").sample_count == 60620
+    assert get_dataset_catalog_entry("go:go_bp_head").split_counts == (20948, 2620, 2619)
+    assert get_dataset_catalog_entry("go_mf_main").sample_count == 41081
+    assert get_dataset_catalog_entry("go:go_mf_full").split_counts == (40395, 4994, 5057)
+    assert get_dataset_catalog_entry("go:go_cc_main").loader == "load_go_dataset"
+    assert get_dataset_catalog_entry("go:go_bp_head").preferred_metric == "go_fmax"
+    assert get_dataset_catalog_entry("cafa:cafa5_bp").status == "adapter"
+    assert get_dataset_catalog_entry("cafa:cafa5_bp").preferred_metric == "go_weighted_fmax"
+    assert get_dataset_catalog_entry("cafa:cafa6_bp").status == "adapter"
+    assert get_dataset_catalog_entry("cafa:cafa6_bp").preferred_metric == "go_weighted_fmax"
+    assert get_dataset_catalog_entry("cafa6_mf").loader == "load_cafa6_dataset"
+    assert get_dataset_catalog_entry("cafa6:cafa6_cc").id == "cafa:cafa6_cc"
+    assert get_dataset_catalog_entry("cafa5:cafa5_cc").id == "cafa:cafa5_cc"
+    assert get_dataset_catalog_entry("cafa:cafa6_cc").target == "go_cc"
     assert get_dataset_catalog_entry("ec_2_head").target == "ec_2"
     assert get_dataset_catalog_entry("ec:single_ec_4_main").objective == "multiclass"
+    assert "weighted_f1" in get_dataset_catalog_entry("ec:single_ec_4_main").metrics
     assert get_dataset_catalog_entry("single_ec_4_main").split_counts == (34213, 4368, 4376)
+    assert get_dataset_catalog_entry("single_ec_4_full").sample_count == 56165
     assert get_dataset_catalog_entry("ec:single_ec_1_head").target == "single_ec_1"
     assert get_dataset_catalog_entry("ec:ec_3_subclass_holdout_main").objective == "multiclass"
     assert get_dataset_catalog_entry("ec:ec_3_subclass_holdout_main").split_counts == (32143, 4040, 4021)
@@ -1248,7 +2028,14 @@ def test_unified_dataset_catalog_is_filterable_and_searchable() -> None:
     assert get_dataset_catalog_entry("ec:ec_2_subclass_holdout_main").split_counts == (29773, 3771, 3738)
     assert get_dataset_catalog_entry("ec_2_subclass_holdout_head").target == "ec_2"
     assert get_dataset_catalog_entry("ec:ec_1_subclass_holdout_main").split_counts == (34592, 5057, 4485)
+    assert get_dataset_catalog_entry("ec:ec_3_subclass_holdout_full").split_counts == (44304, 5542, 5543)
     assert get_dataset_catalog_entry("ec_1_subclass_holdout_head").target == "ec_1"
+    assert get_dataset_catalog_entry("clean:ec_4_split30_fold0").loader == "load_clean_dataset"
+    assert get_dataset_catalog_entry("clean:ec_4_split30_fold0").preferred_metric == "f1"
+    assert get_dataset_catalog_entry("clean:ec_4_split30_fold0_price").target == "ec_4"
+    assert get_dataset_catalog_entry("ecbench:ec_4_train_100").loader == "load_ecbench_dataset"
+    assert "weighted_f1" in get_dataset_catalog_entry("ecbench:ec_4_train_100").metrics
+    assert get_dataset_catalog_entry("ec-bench:ec_1_train_30_new").id == "ecbench:ec_1_train_30_new"
     assert get_dataset_catalog_entry("source:phosphoelm_ltp").id == "phosphoelm:ltp"
     assert get_dataset_catalog_entry("secondary_structure").id == "peer:secondary_structure"
     for entry in list_dataset_catalog():
@@ -1263,6 +2050,13 @@ def test_unified_dataset_catalog_is_filterable_and_searchable() -> None:
     assert "peer:fold" in {entry.id for entry in structure_tasks}
     assert "phosphoelm:ltp" in {entry.id for entry in f1_tasks}
     assert "ec:ec_4_main" in {entry.id for entry in list_dataset_catalog(collection="ec")}
+    assert "ec:ec_4_full" in {entry.id for entry in list_dataset_catalog(collection="ec")}
+    assert "go:go_mf_main" in {entry.id for entry in list_dataset_catalog(collection="go")}
+    assert "go:go_mf_full" in {entry.id for entry in list_dataset_catalog(collection="go")}
+    assert "cafa:cafa5_bp" in {entry.id for entry in list_dataset_catalog(collection="cafa")}
+    assert "cafa:cafa6_bp" in {entry.id for entry in list_dataset_catalog(collection="cafa")}
+    assert "clean:ec_4_split30_fold0" in {entry.id for entry in list_dataset_catalog(collection="clean")}
+    assert "ecbench:ec_4_train_100" in {entry.id for entry in list_dataset_catalog(collection="ecbench")}
     assert "ec:single_ec_4_main" in {entry.id for entry in list_dataset_catalog(collection="ec", objective="multiclass")}
     assert "ec:ec_3_subclass_holdout_main" in {
         entry.id for entry in list_dataset_catalog(collection="ec", objective="multiclass")
@@ -1287,6 +2081,12 @@ def test_unified_dataset_catalog_is_filterable_and_searchable() -> None:
     assert "ec:ec_1_subclass_holdout_head" in {
         entry.id for entry in search_dataset_catalog("ec 1 subclass holdout head")
     }
+    assert "go:go_bp_head" in {entry.id for entry in search_dataset_catalog("gene ontology bp head")}
+    assert "go:go_bp_full" in {entry.id for entry in search_dataset_catalog("gene ontology bp full")}
+    assert "cafa:cafa5_bp" in {entry.id for entry in search_dataset_catalog("cafa5 kaggle bp")}
+    assert "cafa:cafa6_bp" in {entry.id for entry in search_dataset_catalog("cafa6 kaggle bp")}
+    assert "clean:ec_4_split30_fold0" in {entry.id for entry in search_dataset_catalog("clean ec 4 split30")}
+    assert "ecbench:ec_4_train_100" in {entry.id for entry in search_dataset_catalog("ecbench ec 4 train 100")}
 
 
 def test_dataset_catalog_is_flattened_from_registered_collections() -> None:
@@ -1302,6 +2102,10 @@ def test_dataset_catalog_is_flattened_from_registered_collections() -> None:
         "peer",
         "dbptm",
         "ec",
+        "clean",
+        "ecbench",
+        "go",
+        "cafa",
         "musitedeep",
         "disprot",
         "biolip",
@@ -1349,6 +2153,7 @@ def test_load_ec_dataset_imports_generated_level_targets(tmp_path: Path) -> None
 
     level1 = load_dataset("ec:ec_1_head", tmp_path, split="train", download=True)
     level4 = load_ec_dataset(tmp_path / "ec_main_head", name="ec_4_main", split=("val", "test"))
+    full = load_dataset("ec:ec_4_full", tmp_path, split="train", download=True)
 
     assert level1.split_counts() == {"train": 5, "val": 0, "test": 0}
     assert level1.target_values("ec_1") == {
@@ -1363,6 +2168,515 @@ def test_load_ec_dataset_imports_generated_level_targets(tmp_path: Path) -> None
         "ec_full:main:p3": ["3.5.4.10"],
         "ec_full:main:p4": ["1.1.1.1"],
     }
+    assert full.target_values("ec_4") == {"ec_full:full:p9": ["9.9.9.9"]}
+
+
+def test_load_clean_dataset_imports_level_targets_and_named_test_sets(tmp_path: Path) -> None:
+    _write_clean_dataset_layout(tmp_path)
+
+    native = load_dataset("clean:ec_3_split30_fold0", tmp_path)
+    halogenase = load_clean_dataset(tmp_path, name="ec_4_split30_fold0_halogenase")
+
+    assert native.split_counts() == {"train": 3, "val": 0, "test": 1}
+    assert native.target_values("ec_3") == {
+        "clean_train_1": ["1.1.1"],
+        "clean_train_2": ["1.1.1", "1.1.2"],
+        "clean_train_partial": ["3.4.24"],
+        "clean_test_1": ["2.7.7"],
+    }
+    assert halogenase.split_counts() == {"train": 2, "val": 0, "test": 1}
+    assert halogenase.target_values("ec_4") == {
+        "clean_train_1": ["1.1.1.1"],
+        "clean_train_2": ["1.1.1.2", "1.1.2.1"],
+        "clean_halogenase_1": ["4.2.3.158"],
+    }
+
+
+def test_load_ecbench_dataset_imports_level_targets_and_named_test_sets(tmp_path: Path) -> None:
+    _write_ecbench_dataset_layout(tmp_path)
+
+    native = load_dataset("ec-bench:ec_3_train_30", tmp_path)
+    price = load_ecbench_dataset(tmp_path, name="ecbench:ec4_train100_price")
+
+    assert native.split_counts() == {"train": 3, "val": 0, "test": 1}
+    assert native.target_values("ec_3") == {
+        "ecbench_train_1": ["1.1.1"],
+        "ecbench_train_2": ["1.1.1", "1.1.2"],
+        "ecbench_train_partial": ["3.4.24"],
+        "ecbench_test_1": ["2.7.7"],
+    }
+    assert price.split_counts() == {"train": 1, "val": 0, "test": 1}
+    assert price.target_values("ec_4") == {
+        "ecbench_train100_1": ["6.1.1.10"],
+        "ecbench_price_1": ["5.4.2.1"],
+    }
+
+
+def test_load_go_dataset_imports_generated_asserted_targets(tmp_path: Path) -> None:
+    _write_go_dataset_layout(tmp_path)
+
+    bp_dataset = load_dataset("go:go_bp_head", tmp_path, split="train", download=True)
+    mf_dataset = load_go_dataset(tmp_path / "go_main_head", name="go_mf_main", split="test")
+    full_dataset = load_dataset("go:go_bp_full", tmp_path, split="train", download=True)
+
+    assert bp_dataset.split_counts() == {"train": 2, "val": 0, "test": 0}
+    assert bp_dataset.target_values("go_bp") == {
+        "go_bp:head:p1": ["GO:0009987"],
+        "go_bp:head:p2": ["GO:0008151"],
+    }
+    assert mf_dataset.target_values("go_mf") == {"go_mf:main:p3": ["GO:0003674"]}
+    assert full_dataset.target_values("go_bp") == {"go_bp:full:p4": ["GO:0008151"]}
+
+
+def test_run_task_on_layer_reports_propagated_go_fmax_for_custom_backend(tmp_path: Path) -> None:
+    _write_go_dataset_layout(tmp_path)
+    dataset = load_dataset("go:go_bp_head", tmp_path)
+    task = Task(
+        name="go_bp",
+        dataset=dataset,
+        prediction=PredictionSpec(target="go_bp", objective="multilabel"),
+        probe=_FixedProbeBackend(
+            ProbeBackendOutput(
+                predictions={"go_bp:head:p3": ["GO:0009987"]},
+                scores={"go_bp:head:p3": [0.2, 0.9]},
+            )
+        ),
+    )
+
+    result = run_task_on_layer(
+        task=task,
+        embeddings={
+            "go_bp:head:p1": [0.0],
+            "go_bp:head:p2": [0.0],
+            "go_bp:head:p3": [0.0],
+        },
+    )
+
+    assert result.metrics["go_fmax"] == pytest.approx(1.0)
+    assert result.metrics["go_fmax_threshold"] == pytest.approx(0.21)
+    assert result.metrics["go_precision_at_fmax"] == pytest.approx(1.0)
+    assert result.metrics["go_recall_at_fmax"] == pytest.approx(1.0)
+    assert result.metrics["go_evaluated_protein_count"] == pytest.approx(1.0)
+    assert "go_propagated_f1" not in result.metrics
+    assert "go_propagated_threshold" not in result.metrics
+
+
+def test_run_task_on_layer_reports_fixed_threshold_propagated_go_metrics_for_transfer_probe(tmp_path: Path) -> None:
+    _write_go_dataset_layout(tmp_path)
+    dataset = load_dataset("go:go_bp_head", tmp_path)
+    task = Task(
+        name="go_bp",
+        dataset=dataset,
+        prediction=PredictionSpec(target="go_bp", objective="multilabel"),
+        probe=TransferProbe(
+            neighbor_selection="knn",
+            k=1,
+            threshold=0.25,
+            scoring="voting",
+        ),
+    )
+
+    result = run_task_on_layer(
+        task=task,
+        embeddings={
+            "go_bp:head:p1": [1.0, 0.0],
+            "go_bp:head:p2": [0.0, 1.0],
+            "go_bp:head:p3": [0.9, 0.1],
+        },
+    )
+
+    assert result.metrics["go_propagated_f1"] == pytest.approx(1.0)
+    assert result.metrics["go_propagated_precision"] == pytest.approx(1.0)
+    assert result.metrics["go_propagated_recall"] == pytest.approx(1.0)
+    assert result.metrics["go_propagated_threshold"] == pytest.approx(0.25)
+    assert result.metrics["go_propagated_evaluated_protein_count"] == pytest.approx(1.0)
+
+
+def test_run_task_on_layer_ignores_validation_only_go_classes_for_fmax(tmp_path: Path) -> None:
+    _write_go_dataset_layout(tmp_path)
+    metadata = {
+        "source": "go",
+        "labels_propagated": ["GO:0009987"],
+        "go_obo_path": str(tmp_path / "go_main_head" / "go_ontology" / "go.obo"),
+    }
+    dataset = ProteinDataset(
+        [
+            ProteinExample("train", "AAAA", {"go_bp": ["GO:0009987"]}, "train", metadata=metadata),
+            ProteinExample(
+                "val",
+                "CCCC",
+                {"go_bp": ["GO:0008151"]},
+                "val",
+                metadata={**metadata, "labels_propagated": ["GO:0008151"]},
+            ),
+            ProteinExample("test", "DDDD", {"go_bp": ["GO:0009987"]}, "test", metadata=metadata),
+        ]
+    )
+    task = Task(
+        name="go_bp",
+        dataset=dataset,
+        prediction=PredictionSpec(target="go_bp", objective="multilabel"),
+        probe=_FixedProbeBackend(
+            ProbeBackendOutput(
+                predictions={"test": ["GO:0009987"]},
+                scores={"test": [0.9]},
+            )
+        ),
+    )
+
+    result = run_task_on_layer(
+        task=task,
+        embeddings={"train": [0.0], "val": [0.5], "test": [1.0]},
+    )
+
+    assert result.metrics["go_fmax"] == pytest.approx(1.0)
+
+
+def test_go_weighted_protein_centric_metrics_use_information_accretion(tmp_path: Path) -> None:
+    _write_cafa6_dataset_layout(tmp_path)
+    ontology = load_go(str(tmp_path / "Train" / "go-basic.obo"))
+    weights = read_information_accretion_weights(tmp_path / "IA.tsv")
+
+    metrics = go_weighted_protein_centric_metrics(
+        {
+            "p1": [0.1, 0.9],
+            "p2": [0.7, 0.8],
+        },
+        class_names=["GO:0008151", "GO:0009987"],
+        true_labels={
+            "p1": ["GO:0009987"],
+            "p2": ["GO:0008151"],
+        },
+        ontology=ontology,
+        term_weights=weights,
+    )
+
+    assert metrics["go_weighted_fmax"] == pytest.approx(0.8)
+    assert metrics["go_weighted_fmax_threshold"] == pytest.approx(0.11)
+    assert metrics["go_weighted_precision_at_fmax"] == pytest.approx(2.0 / 3.0)
+    assert metrics["go_weighted_recall_at_fmax"] == pytest.approx(1.0)
+
+
+def test_go_combined_protein_centric_metrics_matches_separate_metrics(tmp_path: Path) -> None:
+    _write_cafa6_dataset_layout(tmp_path)
+    ontology = load_go(str(tmp_path / "Train" / "go-basic.obo"))
+    weights = read_information_accretion_weights(tmp_path / "IA.tsv")
+    predicted_scores = {
+        "p1": [0.1, 0.9],
+        "p2": [0.7, 0.8],
+    }
+    class_names = ["GO:0008151", "GO:0009987"]
+    true_labels = {
+        "p1": ["GO:0009987"],
+        "p2": ["GO:0008151"],
+    }
+
+    combined = go_combined_protein_centric_metrics(
+        predicted_scores,
+        class_names=class_names,
+        true_labels=true_labels,
+        ontology=ontology,
+        term_weights=weights,
+        threshold_count=101,
+    )
+    unweighted = go_protein_centric_metrics(
+        predicted_scores,
+        class_names=class_names,
+        true_labels=true_labels,
+        ontology=ontology,
+        threshold_count=101,
+    )
+    weighted = go_weighted_protein_centric_metrics(
+        predicted_scores,
+        class_names=class_names,
+        true_labels=true_labels,
+        ontology=ontology,
+        term_weights=weights,
+        threshold_count=101,
+    )
+
+    for key, value in {**unweighted, **weighted}.items():
+        assert combined[key] == pytest.approx(value)
+
+
+def test_go_fixed_threshold_protein_centric_metrics_report_propagated_f1(tmp_path: Path) -> None:
+    _write_cafa6_dataset_layout(tmp_path)
+    ontology = load_go(str(tmp_path / "Train" / "go-basic.obo"))
+
+    metrics = go_fixed_threshold_protein_centric_metrics(
+        {
+            "p1": [0.1, 0.9],
+            "p2": [0.7, 0.8],
+        },
+        class_names=["GO:0008151", "GO:0009987"],
+        true_labels={
+            "p1": ["GO:0009987"],
+            "p2": ["GO:0008151"],
+        },
+        ontology=ontology,
+        threshold=0.65,
+    )
+
+    assert metrics["go_propagated_f1"] == pytest.approx(6.0 / 7.0)
+    assert metrics["go_propagated_precision"] == pytest.approx(0.75)
+    assert metrics["go_propagated_recall"] == pytest.approx(1.0)
+    assert metrics["go_propagated_threshold"] == pytest.approx(0.65)
+    assert metrics["go_propagated_evaluated_protein_count"] == pytest.approx(2.0)
+
+
+def test_run_task_on_layer_reports_cafa6_weighted_go_fmax(tmp_path: Path) -> None:
+    _write_cafa6_dataset_layout(tmp_path)
+    metadata = {
+        "source": "cafa6",
+        "labels_propagated": ["GO:0009987"],
+        "go_obo_path": str(tmp_path / "Train" / "go-basic.obo"),
+        "ia_path": str(tmp_path / "IA.tsv"),
+    }
+    dataset = ProteinDataset(
+        [
+            ProteinExample("train", "AAAA", {"go_bp": ["GO:0009987"]}, "train", metadata=metadata),
+            ProteinExample("p1", "ACDE", {"go_bp": ["GO:0009987"]}, "test", metadata=metadata),
+            ProteinExample(
+                "p2",
+                "FGHI",
+                {"go_bp": ["GO:0008151"]},
+                "test",
+                metadata={**metadata, "labels_propagated": ["GO:0008151"]},
+            ),
+        ]
+    )
+    task = Task(
+        name="cafa6_bp",
+        dataset=dataset,
+        prediction=PredictionSpec(target="go_bp", objective="multilabel"),
+        probe=_FixedProbeBackend(
+            ProbeBackendOutput(
+                predictions={
+                    "p1": ["GO:0009987"],
+                    "p2": ["GO:0008151", "GO:0009987"],
+                },
+                scores={
+                    "p1": [0.1, 0.9],
+                    "p2": [0.7, 0.8],
+                },
+            )
+        ),
+    )
+
+    result = run_task_on_layer(
+        task=task,
+        embeddings={"train": [0.0], "p1": [1.0], "p2": [2.0]},
+    )
+
+    assert result.metrics["go_weighted_fmax"] == pytest.approx(0.8)
+    assert result.metrics["go_weighted_precision_at_fmax"] == pytest.approx(2.0 / 3.0)
+
+
+def test_cafa6_weighted_fmax_mean_averages_three_aspects() -> None:
+    metrics = cafa6_weighted_fmax_mean(
+        {
+            "mf": {"go_weighted_fmax": 0.6},
+            "bp": {"go_weighted_fmax": 0.9},
+            "cc": {"go_weighted_fmax": 0.3},
+        }
+    )
+
+    assert metrics["cafa6_weighted_fmax_mean"] == pytest.approx(0.6)
+    assert metrics["cafa6_mf_weighted_fmax"] == pytest.approx(0.6)
+    assert metrics["cafa6_bp_weighted_fmax"] == pytest.approx(0.9)
+    assert metrics["cafa6_cc_weighted_fmax"] == pytest.approx(0.3)
+
+
+def test_read_go_manifest_reads_generated_dataset_metadata(tmp_path: Path) -> None:
+    _write_go_dataset_layout(tmp_path)
+
+    manifest = read_go_manifest(tmp_path, name="go_bp_head")
+
+    assert manifest == {"task": "go_bp", "track": "head"}
+
+
+def test_load_go_dataset_raises_on_unsupported_target(tmp_path: Path) -> None:
+    _write_go_dataset_layout(tmp_path)
+
+    with pytest.raises(EmbeddingInputError, match="only supports target"):
+        load_go_dataset(tmp_path, name="go_bp_head", target="wrong")
+
+
+def test_load_cafa6_dataset_imports_kaggle_training_terms(tmp_path: Path) -> None:
+    _write_cafa6_dataset_layout(tmp_path)
+
+    dataset = load_cafa6_dataset(tmp_path, name="cafa6_bp")
+
+    assert dataset.split_counts() == {"train": 8, "val": 1, "test": 1}
+    assert dataset.target_values("go_bp")["P1"] == ["GO:0008151", "GO:0009987"]
+    assert dataset.target_values("go_bp")["P2"] == ["GO:0009987"]
+    assert dataset.examples[0].metadata is not None
+    assert dataset.examples[0].metadata["source"] == "cafa6"
+    assert dataset.examples[0].metadata["go_obo_path"].endswith("go-basic.obo")
+    assert dataset.examples[0].metadata["ia_path"].endswith("IA.tsv")
+
+
+def test_load_cafa5_dataset_imports_kaggle_training_terms(tmp_path: Path) -> None:
+    _write_cafa6_dataset_layout(tmp_path)
+
+    dataset = load_cafa5_dataset(tmp_path, name="cafa5_bp")
+
+    assert dataset.split_counts() == {"train": 8, "val": 1, "test": 1}
+    assert dataset.target_values("go_bp")["P1"] == ["GO:0008151", "GO:0009987"]
+    assert dataset.examples[0].metadata is not None
+    assert dataset.examples[0].metadata["source"] == "cafa5"
+
+
+def test_load_cafa6_dataset_accepts_lowercase_aspects_and_header_variants(tmp_path: Path) -> None:
+    _write_cafa_lowercase_aspect_layout(tmp_path)
+
+    dataset = load_cafa6_dataset(tmp_path, name="cafa6_bp")
+
+    assert dataset.split_counts() == {"train": 8, "val": 1, "test": 1}
+    assert dataset.target_values("go_bp")["P1"] == ["GO:0009987"]
+
+
+def test_load_cafa5_dataset_accepts_lowercase_aspects_and_header_variants(tmp_path: Path) -> None:
+    _write_cafa_lowercase_aspect_layout(tmp_path)
+
+    dataset = load_cafa5_dataset(tmp_path, name="cafa5_cc")
+
+    assert dataset.split_counts() == {"train": 1, "val": 0, "test": 0}
+    assert dataset.target_values("go_cc") == {"P3": ["GO:0005575"]}
+
+
+def test_load_dataset_routes_cafa5_through_cafa_collection(tmp_path: Path) -> None:
+    _write_cafa6_dataset_layout(tmp_path)
+
+    dataset = load_dataset("cafa:cafa5_cc", tmp_path, split="train")
+
+    assert dataset.split_counts() == {"train": 1, "val": 0, "test": 0}
+    assert dataset.target_values("go_cc") == {"P3": ["GO:0005575"]}
+
+
+def test_load_dataset_routes_cafa_collection_with_split_filter(tmp_path: Path) -> None:
+    _write_cafa6_dataset_layout(tmp_path)
+
+    dataset = load_dataset("cafa:cafa6_cc", tmp_path, split="train")
+
+    assert dataset.split_counts() == {"train": 1, "val": 0, "test": 0}
+    assert dataset.target_values("go_cc") == {"P3": ["GO:0005575"]}
+
+
+def test_download_cafa6_dataset_invokes_kaggle_cli(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    commands: list[list[str]] = []
+    environments: list[dict[str, str]] = []
+
+    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        env = kwargs["env"]
+        assert isinstance(env, dict)
+        environments.append(env)
+        output_dir = Path(command[command.index("-p") + 1])
+        _write_cafa6_dataset_zip(output_dir / "cafa-6-protein-function-prediction.zip")
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setenv("KAGGLE_API_TOKEN", "env-token")
+    monkeypatch.setattr(cafa_download_module.shutil, "which", lambda name: "/usr/bin/kaggle")
+    monkeypatch.setattr(cafa_download_module.subprocess, "run", fake_run)
+
+    paths = download_cafa6_dataset(tmp_path)
+
+    assert paths == [tmp_path / "cafa-6-protein-function-prediction"]
+    assert commands == [
+        [
+            "/usr/bin/kaggle",
+            "competitions",
+            "download",
+            "-c",
+            "cafa-6-protein-function-prediction",
+            "-p",
+            str(tmp_path / "cafa-6-protein-function-prediction"),
+        ]
+    ]
+    assert environments[0]["KAGGLE_API_TOKEN"] == "env-token"
+
+
+def test_download_cafa6_dataset_reads_access_token_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    environments: list[dict[str, str]] = []
+    home = tmp_path / "home"
+    token_dir = home / ".kaggle"
+    token_dir.mkdir(parents=True)
+    (token_dir / "access_token").write_text("file-token\n", encoding="utf-8")
+
+    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        env = kwargs["env"]
+        assert isinstance(env, dict)
+        environments.append(env)
+        output_dir = Path(command[command.index("-p") + 1])
+        _write_cafa6_dataset_zip(output_dir / "cafa-6-protein-function-prediction.zip")
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.delenv("KAGGLE_API_TOKEN", raising=False)
+    monkeypatch.setattr(cafa_download_module.Path, "home", lambda: home)
+    monkeypatch.setattr(cafa_download_module.shutil, "which", lambda name: "/usr/bin/kaggle")
+    monkeypatch.setattr(cafa_download_module.subprocess, "run", fake_run)
+
+    download_cafa6_dataset(tmp_path)
+
+    assert environments[0]["KAGGLE_API_TOKEN"] == "file-token"
+
+
+def test_load_dataset_downloads_cafa6_when_download_is_true(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        _ = kwargs
+        output_dir = Path(command[command.index("-p") + 1])
+        _write_cafa6_dataset_zip(output_dir / "cafa-6-protein-function-prediction.zip")
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(cafa_download_module.shutil, "which", lambda name: "/usr/bin/kaggle")
+    monkeypatch.setattr(cafa_download_module.subprocess, "run", fake_run)
+
+    dataset = load_dataset("cafa:cafa6_bp", tmp_path, split="test", download=True)
+
+    assert dataset.split_counts() == {"train": 0, "val": 0, "test": 1}
+    assert "GO:0009987" in next(iter(dataset.target_values("go_bp").values()))
+
+
+def test_download_cafa6_dataset_raises_when_kaggle_cli_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(cafa_download_module.shutil, "which", lambda name: None)
+
+    with pytest.raises(EmbeddingDependencyError, match="Kaggle CLI"):
+        download_cafa6_dataset(tmp_path)
+
+
+def test_download_cafa6_dataset_explains_forbidden_kaggle_response(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        _ = command, kwargs
+        return subprocess.CompletedProcess(
+            command,
+            1,
+            stdout="",
+            stderr="403 Client Error: Forbidden for url: https://api.kaggle.com/v1/competitions",
+        )
+
+    monkeypatch.setattr(cafa_download_module.shutil, "which", lambda name: "/usr/bin/kaggle")
+    monkeypatch.setattr(cafa_download_module.subprocess, "run", fake_run)
+
+    with pytest.raises(EmbeddingInputError, match="accept the competition rules"):
+        download_cafa6_dataset(tmp_path)
+
+
+def test_load_cafa6_dataset_raises_on_missing_kaggle_files(tmp_path: Path) -> None:
+    with pytest.raises(EmbeddingInputError, match="Train/train_terms.tsv"):
+        load_cafa6_dataset(tmp_path, name="cafa6_bp")
 
 
 def test_load_ec_dataset_imports_single_label_multiclass_targets(tmp_path: Path) -> None:

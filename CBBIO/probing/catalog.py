@@ -188,6 +188,10 @@ def load_dataset(
 
 def _normalize_catalog_id(dataset_id: str) -> str:
     text = dataset_id.strip().lower().replace("-", "_")
+    if text.startswith("ec_bench:"):
+        text = f"ecbench:{text.partition(':')[2]}"
+    if text.startswith("ec_benchmark:"):
+        text = f"ecbench:{text.partition(':')[2]}"
     alias = _legacy_catalog_id_alias(text)
     if alias is not None:
         return alias
@@ -215,6 +219,24 @@ def _legacy_catalog_id_alias(dataset_id: str) -> str | None:
         "biolip_rna": "biolip:rna",
         "biolip_pep": "biolip:pep",
         "biolip_other": "biolip:other",
+        "cafa5:cafa5_bp": "cafa:cafa5_bp",
+        "cafa5:cafa5_cc": "cafa:cafa5_cc",
+        "cafa5:cafa5_mf": "cafa:cafa5_mf",
+        "cafa5_bp": "cafa:cafa5_bp",
+        "cafa5_cc": "cafa:cafa5_cc",
+        "cafa5_mf": "cafa:cafa5_mf",
+        "cafa6:cafa6_bp": "cafa:cafa6_bp",
+        "cafa6:cafa6_cc": "cafa:cafa6_cc",
+        "cafa6:cafa6_mf": "cafa:cafa6_mf",
+        "cafa6_bp": "cafa:cafa6_bp",
+        "cafa6_cc": "cafa:cafa6_cc",
+        "cafa6_mf": "cafa:cafa6_mf",
+        "go_bp_cafa5": "cafa:cafa5_bp",
+        "go_cc_cafa5": "cafa:cafa5_cc",
+        "go_mf_cafa5": "cafa:cafa5_mf",
+        "go_bp_cafa6": "cafa:cafa6_bp",
+        "go_cc_cafa6": "cafa:cafa6_cc",
+        "go_mf_cafa6": "cafa:cafa6_mf",
         "phosphoelm_all": "phosphoelm:all",
         "phosphoelm_ltp": "phosphoelm:ltp",
         "phosphoelm_htp": "phosphoelm:htp",

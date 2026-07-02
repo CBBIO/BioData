@@ -18,14 +18,20 @@ from .collection_types import (
 from .datasets import ProteinDataset, ResidueDataset, SplitName
 from .splitters import DatasetSplitter
 from .sources.biolip import BIOLIP_COLLECTION_METADATA, BIOLIP_DATASETS
+from .sources.cafa5 import CAFA5_DATASETS
+from .sources.cafa6 import CAFA_COLLECTION_METADATA, CAFA6_DATASETS
+from .sources.clean import CLEAN_COLLECTION_METADATA, CLEAN_DATASETS
 from .sources.dbptm import DBPTM_COLLECTION_METADATA, DBPTM_DATASETS
 from .sources.disprot import DISPROT_COLLECTION_METADATA, DISPROT_DATASETS
 from .sources.dtu import DTU_COLLECTION_METADATA, DTU_DATASETS
 from .sources.ec import EC_COLLECTION_METADATA, EC_DATASETS
+from .sources.ecbench import ECBENCH_COLLECTION_METADATA, ECBENCH_DATASETS
+from .sources.go import GO_COLLECTION_METADATA, GO_DATASETS
 from .sources.musitedeep import MUSITEDEEP_COLLECTION_METADATA, MUSITEDEEP_DATASETS
 from .sources.peer import PEER_COLLECTION_METADATA, PEER_DATASETS
 from .sources.phosphoelm import PHOSPHOELM_COLLECTION_METADATA, PHOSPHOELM_DATASETS
 from .sources._registry import ADAPTER_COLLECTION_METADATA, ADAPTER_DATASETS
+
 
 class PeerCollection(DatasetCollection):
     """Expose PEER benchmark tasks as one dataset collection."""
@@ -292,6 +298,205 @@ class EcCollection(DatasetCollection):
         return load_ec_dataset(root, name=dataset.name, split=split, target=target)
 
 
+class CleanCollection(DatasetCollection):
+    """Expose CLEAN enzyme commission benchmark datasets."""
+
+    metadata = CLEAN_COLLECTION_METADATA
+
+    def list_datasets(self) -> List[DatasetMetadata]:
+        """Return CLEAN EC benchmark dataset specifications."""
+        return list(CLEAN_DATASETS)
+
+    def download(
+        self,
+        root: str | Path,
+        *,
+        name: str,
+        force: bool = False,
+    ) -> List[Path]:
+        """Reject downloads because CLEAN datasets are local artifacts."""
+        _ = root, force
+        dataset = self.get_dataset(name)
+        raise EmbeddingInputError(
+            f"Dataset {dataset.id!r} does not have a download adapter. "
+            "Point load_dataset() at a CLEAN dataset directory."
+        )
+
+    def load(
+        self,
+        root: str | Path,
+        *,
+        name: str,
+        split: str | Sequence[str] | None = None,
+        target: str | None = None,
+        download: bool = False,
+        max_examples_per_split: Mapping[str, int | None] | None = None,
+        splitter: DatasetSplitter | None = None,
+    ) -> ProteinDataset | ResidueDataset:
+        """Load one CLEAN EC benchmark dataset."""
+        from .sources.clean import load_clean_dataset
+
+        _ = download
+        if max_examples_per_split is not None:
+            raise EmbeddingInputError("CLEAN datasets do not support max_examples_per_split.")
+        if splitter is not None:
+            raise EmbeddingInputError("CLEAN datasets define fixed splits and do not accept splitter.")
+        dataset = self.get_dataset(name)
+        return load_clean_dataset(root, name=dataset.name, split=split, target=target)
+
+
+class EcBenchCollection(DatasetCollection):
+    """Expose EC-Bench enzyme commission benchmark datasets."""
+
+    metadata = ECBENCH_COLLECTION_METADATA
+
+    def list_datasets(self) -> List[DatasetMetadata]:
+        """Return EC-Bench dataset specifications."""
+        return list(ECBENCH_DATASETS)
+
+    def download(
+        self,
+        root: str | Path,
+        *,
+        name: str,
+        force: bool = False,
+    ) -> List[Path]:
+        """Reject downloads because EC-Bench datasets are local artifacts."""
+        _ = root, force
+        dataset = self.get_dataset(name)
+        raise EmbeddingInputError(
+            f"Dataset {dataset.id!r} does not have a download adapter. "
+            "Point load_dataset() at an ec-benchmark directory."
+        )
+
+    def load(
+        self,
+        root: str | Path,
+        *,
+        name: str,
+        split: str | Sequence[str] | None = None,
+        target: str | None = None,
+        download: bool = False,
+        max_examples_per_split: Mapping[str, int | None] | None = None,
+        splitter: DatasetSplitter | None = None,
+    ) -> ProteinDataset | ResidueDataset:
+        """Load one EC-Bench dataset."""
+        from .sources.ecbench import load_ecbench_dataset
+
+        _ = download
+        if max_examples_per_split is not None:
+            raise EmbeddingInputError("EC-Bench datasets do not support max_examples_per_split.")
+        if splitter is not None:
+            raise EmbeddingInputError("EC-Bench datasets define fixed splits and do not accept splitter.")
+        dataset = self.get_dataset(name)
+        return load_ecbench_dataset(root, name=dataset.name, split=split, target=target)
+
+
+class GoCollection(DatasetCollection):
+    """Expose generated Gene Ontology prediction datasets."""
+
+    metadata = GO_COLLECTION_METADATA
+
+    def list_datasets(self) -> List[DatasetMetadata]:
+        """Return generated Gene Ontology dataset specifications."""
+        return list(GO_DATASETS)
+
+    def download(
+        self,
+        root: str | Path,
+        *,
+        name: str,
+        force: bool = False,
+    ) -> List[Path]:
+        """Reject downloads because generated GO datasets are local artifacts."""
+        _ = root, force
+        dataset = self.get_dataset(name)
+        raise EmbeddingInputError(
+            f"Dataset {dataset.id!r} does not have a download adapter. "
+            "Point load_dataset() at a generated go_main_head directory."
+        )
+
+    def load(
+        self,
+        root: str | Path,
+        *,
+        name: str,
+        split: str | Sequence[str] | None = None,
+        target: str | None = None,
+        download: bool = False,
+        max_examples_per_split: Mapping[str, int | None] | None = None,
+        splitter: DatasetSplitter | None = None,
+    ) -> ProteinDataset | ResidueDataset:
+        """Load one generated Gene Ontology prediction dataset."""
+        from .sources.go import load_go_dataset
+
+        _ = download
+        if max_examples_per_split is not None:
+            raise EmbeddingInputError("GO datasets do not support max_examples_per_split.")
+        if splitter is not None:
+            raise EmbeddingInputError("GO datasets define fixed splits and do not accept splitter.")
+        dataset = self.get_dataset(name)
+        return load_go_dataset(root, name=dataset.name, split=split, target=target)
+
+
+class CafaCollection(DatasetCollection):
+    """Expose local CAFA Kaggle competition training datasets."""
+
+    metadata = CAFA_COLLECTION_METADATA
+
+    def list_datasets(self) -> List[DatasetMetadata]:
+        """Return CAFA aspect dataset specifications."""
+        return [*CAFA5_DATASETS, *CAFA6_DATASETS]
+
+    def download(
+        self,
+        root: str | Path,
+        *,
+        name: str,
+        force: bool = False,
+    ) -> List[Path]:
+        """Download CAFA competition files through the Kaggle CLI."""
+        from .sources.cafa5 import download_cafa5_dataset
+        from .sources.cafa6 import download_cafa6_dataset
+
+        dataset = self.get_dataset(name)
+        if dataset.name.startswith("cafa5_"):
+            return download_cafa5_dataset(root, force=force)
+        return download_cafa6_dataset(root, force=force)
+
+    def load(
+        self,
+        root: str | Path,
+        *,
+        name: str,
+        split: str | Sequence[str] | None = None,
+        target: str | None = None,
+        download: bool = False,
+        max_examples_per_split: Mapping[str, int | None] | None = None,
+        splitter: DatasetSplitter | None = None,
+    ) -> ProteinDataset | ResidueDataset:
+        """Load one CAFA aspect dataset."""
+        from .sources.cafa5 import download_cafa5_dataset, load_cafa5_dataset
+        from .sources.cafa6 import download_cafa6_dataset, load_cafa6_dataset
+
+        if max_examples_per_split is not None:
+            raise EmbeddingInputError("CAFA datasets do not support max_examples_per_split.")
+        dataset = self.get_dataset(name)
+        if dataset.name.startswith("cafa5_"):
+            if download:
+                download_cafa5_dataset(root)
+            return load_cafa5_dataset(
+                root,
+                name=dataset.name,
+                split=split,
+                target=target,
+                splitter=splitter,
+            )
+        if download:
+            download_cafa6_dataset(root)
+        return load_cafa6_dataset(root, name=dataset.name, split=split, target=target, splitter=splitter)
+
+
 def list_dataset_collections() -> List[DatasetCollection]:
     """Return registered dataset collections."""
     return list(DATASET_COLLECTIONS.values())
@@ -300,6 +505,10 @@ def list_dataset_collections() -> List[DatasetCollection]:
 def get_dataset_collection(collection_id: str) -> DatasetCollection:
     """Return one registered dataset collection."""
     normalized = str(collection_id).strip().lower().replace("-", "_")
+    if normalized in {"cafa5", "cafa6"}:
+        normalized = "cafa"
+    if normalized in {"ec_bench", "ec_benchmark"}:
+        normalized = "ecbench"
     collection = DATASET_COLLECTIONS.get(normalized)
     if collection is None:
         supported = ", ".join(sorted(DATASET_COLLECTIONS))
@@ -322,6 +531,11 @@ PEER_COLLECTION = PeerCollection()
 DBPTM_COLLECTION = DbptmCollection()
 DTU_COLLECTION = DtuCollection()
 EC_COLLECTION = EcCollection()
+CLEAN_COLLECTION = CleanCollection()
+ECBENCH_COLLECTION = EcBenchCollection()
+GO_COLLECTION = GoCollection()
+CAFA_COLLECTION = CafaCollection()
+CAFA6_COLLECTION = CAFA_COLLECTION
 
 _PROVIDER_COLLECTION_METADATA = (
     MUSITEDEEP_COLLECTION_METADATA,
@@ -339,6 +553,10 @@ DATASET_COLLECTIONS: dict[str, DatasetCollection] = {
     PEER_COLLECTION.id: PEER_COLLECTION,
     DBPTM_COLLECTION.id: DBPTM_COLLECTION,
     EC_COLLECTION.id: EC_COLLECTION,
+    CLEAN_COLLECTION.id: CLEAN_COLLECTION,
+    ECBENCH_COLLECTION.id: ECBENCH_COLLECTION,
+    GO_COLLECTION.id: GO_COLLECTION,
+    CAFA_COLLECTION.id: CAFA_COLLECTION,
     **_RESIDUE_COLLECTIONS,
     DTU_COLLECTION.id: DTU_COLLECTION,
 }
@@ -347,15 +565,24 @@ DATASET_COLLECTIONS: dict[str, DatasetCollection] = {
 __all__ = [
     "DATASET_COLLECTIONS",
     "DBPTM_COLLECTION",
+    "CAFA_COLLECTION",
+    "CAFA6_COLLECTION",
+    "CafaCollection",
+    "CLEAN_COLLECTION",
+    "CleanCollection",
     "DTU_COLLECTION",
+    "ECBENCH_COLLECTION",
     "EC_COLLECTION",
+    "GO_COLLECTION",
     "DatasetCollection",
     "DatasetLevel",
     "DatasetMetadata",
     "DatasetStatus",
     "DbptmCollection",
     "DtuCollection",
+    "EcBenchCollection",
     "EcCollection",
+    "GoCollection",
     "PEER_COLLECTION",
     "PeerCollection",
     "get_dataset_collection",

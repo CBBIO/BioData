@@ -45,6 +45,7 @@ class ProbeBackendOutput:
 
     predictions: Mapping[str, ProbePredictionOutput]
     scores: Mapping[str, ProbeScoreOutput] | None = None
+    metadata: Mapping[str, Any] | None = None
 
 
 class ProbeBackend(ABC):
