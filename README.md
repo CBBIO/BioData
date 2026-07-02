@@ -132,6 +132,9 @@ Environment variable overrides (highest precedence):
 
 | Topic | Document |
 |---|---|
+| Agent quick start | [docs/AgentQuickStart.md](docs/AgentQuickStart.md) |
+| Agent workflow recipes | [docs/AgentWorkflows.md](docs/AgentWorkflows.md) |
+| Agent public API map | [docs/AgentApiMap.md](docs/AgentApiMap.md) |
 | Getting started tutorial | [docs/GettingStarted.md](docs/GettingStarted.md) |
 | Embedding generation | [docs/Embeddings.md](docs/Embeddings.md) |
 | Probing tasks and benchmarks | [docs/Probing.md](docs/Probing.md) |
