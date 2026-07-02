@@ -15,6 +15,12 @@ from ._esm_hf import (
 
 
 ESM2_HF_MODEL_NAMES: Dict[str, str] = {
+    "esm2_8m": "facebook/esm2_t6_8M_UR50D",
+    "esm2_35m": "facebook/esm2_t12_35M_UR50D",
+    "esm2_150m": "facebook/esm2_t30_150M_UR50D",
+    "esm2_650m": "facebook/esm2_t33_650M_UR50D",
+    "esm2_3b": "facebook/esm2_t36_3B_UR50D",
+    "esm2_15b": "facebook/esm2_t48_15B_UR50D",
     "esm2_t6_8m_ur50d": "facebook/esm2_t6_8M_UR50D",
     "esm2_t12_35m_ur50d": "facebook/esm2_t12_35M_UR50D",
     "esm2_t30_150m_ur50d": "facebook/esm2_t30_150M_UR50D",

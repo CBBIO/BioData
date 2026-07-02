@@ -19,6 +19,8 @@ from ._esm_hf import (
 
 
 ESM1B_MODEL_ALIASES: Dict[str, str] = {
+    "esm1b_650m": "esm1b_t33_650M_UR50S",
+    "esm1b-650m": "esm1b_t33_650M_UR50S",
     "facebook/esm-1b": "esm1b_t33_650M_UR50S",
 }
 

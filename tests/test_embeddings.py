@@ -426,6 +426,20 @@ def test_generator_factory_builds_esmc() -> None:
     assert isinstance(obj, EsmcEmbeddingGenerator)
 
 
+def test_generator_factory_builds_esmc_from_size_alias() -> None:
+    obj = Generator(
+        model_class="esm-c",
+        name="esmc600m",
+        model=object(),
+        tokenizer=object(),
+    )
+
+    assert isinstance(obj, EsmcEmbeddingGenerator)
+    assert obj.model_reference == "biohub/ESMC-600M"
+    assert obj.model_metadata.parameters is not None
+    assert obj.model_metadata.parameters["sdk_model_name"] == "esmc_600m"
+
+
 def test_generator_factory_builds_proteinglm() -> None:
     obj = Generator(
         model_class="proteinglm",
@@ -444,6 +458,48 @@ def test_generator_factory_builds_esm2() -> None:
         tokenizer=object(),
     )
     assert isinstance(obj, Esm2EmbeddingGenerator)
+
+
+def test_generator_factory_builds_esm2_from_size_alias() -> None:
+    obj = Generator(
+        model_class="esm",
+        name="esm2_650m",
+        model=object(),
+        tokenizer=object(),
+    )
+
+    assert isinstance(obj, Esm2EmbeddingGenerator)
+    assert obj.model_reference == "facebook/esm2_t33_650M_UR50D"
+
+
+@pytest.mark.parametrize(
+    ("model_class", "model_name", "expected_type", "expected_reference"),
+    [
+        ("amplify", "amplify_350m", AmplifyEmbeddingGenerator, "nvidia/AMPLIFY_350M"),
+        ("ankh3", "ankh3_base", Ankh3EmbeddingGenerator, "ElnaggarLab/ankh-base"),
+        ("esmc", "esmc_600m", EsmcEmbeddingGenerator, "biohub/ESMC-600M"),
+        ("esm2", "esm2_650m", Esm2EmbeddingGenerator, "facebook/esm2_t33_650M_UR50D"),
+        ("esm1b", "esm1b_650m", Esm1bEmbeddingGenerator, "esm1b_t33_650M_UR50S"),
+        ("proteinglm", "proteinglm_3b", ProteinGlmEmbeddingGenerator, "biomap-research/proteinglm-3b-mlm"),
+        ("prott5", "prott5_xl_uniref50", ProtT5EmbeddingGenerator, "Rostlab/prot_t5_xl_uniref50"),
+    ],
+)
+def test_generator_factory_accepts_family_size_model_aliases(
+    model_class: str,
+    model_name: str,
+    expected_type: type[Any],
+    expected_reference: str,
+) -> None:
+    model = types.SimpleNamespace(config=types.SimpleNamespace(num_hidden_layers=1))
+    obj = Generator(
+        model_class=model_class,
+        name=model_name,
+        model=model,
+        tokenizer=object(),
+    )
+
+    assert isinstance(obj, expected_type)
+    assert obj.model_reference == expected_reference
 
 
 def test_generator_factory_builds_esm1b() -> None:

@@ -34,6 +34,8 @@ from ._esm_hf import resolve_model_name
 ANKH3_MODEL_NAMES: Dict[str, str] = {
     "ankh large": "ElnaggarLab/ankh-large",
     "ankh base": "ElnaggarLab/ankh-base",
+    "ankh3_base": "ElnaggarLab/ankh-base",
+    "ankh3-base": "ElnaggarLab/ankh-base",
     "ankh3 large": "ElnaggarLab/ankh3-large",
     "ankh3-large": "ElnaggarLab/ankh3-large",
     "ankh3_large": "ElnaggarLab/ankh3-large",
