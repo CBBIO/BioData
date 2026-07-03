@@ -91,8 +91,8 @@ built-in MLP architecture.
 
 `TransferProbe()` is a no-training transfer head for protein-level tasks. By default, it scores
 classes from all training examples with inverse cosine-distance weighted votes and returns the full
-score vector. For multilabel tasks, `threshold=None` transfers every class with nonzero support so
-GO/Fmax metrics can choose their threshold from the scores.
+score vector. For multilabel tasks, `threshold=None` keeps the full score vector for AP, Fmax, and
+GO metrics while using `0.5` for fixed prediction metrics.
 
 Transfer controls:
 
@@ -103,7 +103,7 @@ Transfer controls:
 | `k` | `10` | Used when `neighbor_selection="knn"` |
 | `distance_cutoff` | `None` | Required when `neighbor_selection="cutoff_distance"` |
 | `scoring` | `"weighted_voting"` | `"weighted_voting"`, `"voting"` |
-| `threshold` | `None` | Binary uses `0.5`; multilabel transfers all nonzero scores |
+| `threshold` | `None` | Binary and multilabel predictions use `0.5`; score-swept metrics use the full scores |
 | `search_backend` | `"numpy"` | `"numpy"`, `"auto"`, `"faiss_cpu"`, `"faiss_gpu"`, `"cuvs_gpu"`, `"torch_gpu"` |
 | `search_device` | `None` | Accelerator device for non-NumPy backends |
 | `search_ann` | `False` | Enables ANN where the selected backend supports it |
@@ -366,7 +366,8 @@ dataset = load_dataset(
 
 The generated EC collection provides multilabel EC-level tasks, single-label variants, and
 subclass-holdout variants. Multilabel dataset IDs use `ec:ec_<level>_<track>`, where `level` is
-`1` through `4` and `track` is `head`, `main`, or `full`. These tasks report `f1`, `macro_f1`,
+`1` through `4` and `track` is `head`, `main`, or `full`. These tasks prefer `fmax`, a swept
+micro-F score over label scores. They also report fixed-threshold `f1`, `macro_f1`,
 `weighted_f1`, and `average_precision`.
 
 The `head` and `main` tracks apply class minimum-support filters. The `full` track keeps every
@@ -780,6 +781,10 @@ print(report.removed_count)
 | `macro_f1` | Unweighted mean F1 over labels |
 | `weighted_f1` | Support-weighted mean F1 over labels |
 | `average_precision` | Mean per-label area under the precision-recall curve |
+| `fmax` | Best micro-F score after sweeping score thresholds |
+| `fmax_threshold` | Score threshold that produced `fmax` |
+| `precision_at_fmax` | Micro-precision at the best threshold |
+| `recall_at_fmax` | Micro-recall at the best threshold |
 
 GO tasks additionally report propagated, protein-centric metrics. `go_fmax`,
 `go_precision_at_fmax`, and `go_recall_at_fmax` use the best swept threshold. `go_propagated_f1`,

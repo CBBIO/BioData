@@ -227,7 +227,7 @@ ECBENCH_DATASETS: tuple[DatasetMetadata, ...] = tuple(
         source="EC-Bench",
         category="function_prediction",
         task_class="function",
-        preferred_metric="f1",
+        preferred_metric="fmax",
         description=(
             "Source: EC-Bench. "
             "Class: function_prediction. "
@@ -238,7 +238,7 @@ ECBENCH_DATASETS: tuple[DatasetMetadata, ...] = tuple(
         objective="multilabel",
         target=f"ec_{level}",
         status="ready",
-        metrics=("f1", "macro_f1", "weighted_f1", "average_precision"),
+        metrics=("fmax", "f1", "macro_f1", "weighted_f1", "average_precision"),
         import_adapter="load_ecbench_dataset",
         loader="load_ecbench_dataset",
         tags=_ecbench_tags(level=level, train_size=train_size, test_set=test_set),

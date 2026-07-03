@@ -278,14 +278,10 @@ class TransferProbe(ProbeBackend):
                     votes[label] += weight
             row = [votes[label] / total for label in classes]
             scores[item] = [float(value) for value in row]
-            if self.threshold is None:
-                predictions[item] = [
-                    label for label, value in zip(classes, row) if value > 0.0
-                ]
-            else:
-                predictions[item] = [
-                    label for label, value in zip(classes, row) if value >= self.threshold
-                ]
+            threshold = 0.5 if self.threshold is None else self.threshold
+            predictions[item] = [
+                label for label, value in zip(classes, row) if value >= threshold
+            ]
         return ProbeBackendOutput(
             predictions=predictions,
             scores=scores,

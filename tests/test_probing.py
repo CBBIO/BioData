@@ -526,36 +526,36 @@ def test_transfer_probe_scores_multilabel_classes_by_inverse_cosine_distance() -
     assert result.predictions == {"test": ["a"]}
 
 
-def test_transfer_probe_transfers_all_multilabel_scores_by_default() -> None:
+def test_transfer_probe_uses_half_threshold_for_default_multilabel_predictions() -> None:
     dataset = ProteinDataset(
         [
-            ProteinExample("a", "ACDE", {"terms": ["a"]}, "train"),
-            ProteinExample("b", "FGHI", {"terms": ["b"]}, "train"),
+            ProteinExample("near", "ACDE", {"terms": ["a"]}, "train"),
+            ProteinExample("far", "FGHI", {"terms": ["b"]}, "train"),
             ProteinExample("test", "KLMN", {"terms": ["a"]}, "test"),
         ]
     )
     task = Task(
-        name="transfer_all_multilabel",
+        name="transfer_default_multilabel",
         dataset=dataset,
         prediction=PredictionSpec(
             target="terms",
             objective="multilabel",
             classes=("a", "b"),
         ),
-        probe=TransferProbe(scoring="voting"),
+        probe=TransferProbe(k=2),
     )
 
     result = run_task_on_layer(
         task=task,
         embeddings={
-            "a": [1.0, 0.0],
-            "b": [0.0, 1.0],
+            "near": [0.9, 0.4358898944],
+            "far": [0.8, 0.6],
             "test": [1.0, 0.0],
         },
     )
 
-    assert result.scores == {"test": pytest.approx([0.5, 0.5])}
-    assert result.predictions == {"test": ["a", "b"]}
+    assert result.scores == {"test": pytest.approx([2.0 / 3.0, 1.0 / 3.0])}
+    assert result.predictions == {"test": ["a"]}
 
 
 def test_transfer_probe_uses_ten_neighbors_for_knn_selection() -> None:
@@ -903,6 +903,22 @@ def test_multilabel_metrics_report_micro_and_macro_f1() -> None:
     assert metrics["macro_f1"] == pytest.approx((0.8 + 2.0 / 3.0) / 2.0)
     assert metrics["weighted_f1"] == pytest.approx((0.8 * 2.0 + (2.0 / 3.0) * 2.0) / 4.0)
     assert metrics["average_precision"] == pytest.approx(1.0)
+    assert metrics["fmax"] == pytest.approx(8.0 / 9.0)
+    assert metrics["fmax_threshold"] == pytest.approx(0.11)
+    assert metrics["precision_at_fmax"] == pytest.approx(0.8)
+    assert metrics["recall_at_fmax"] == pytest.approx(1.0)
+
+
+def test_multilabel_metrics_do_not_propagate_hierarchical_labels() -> None:
+    metrics = multilabel_metrics(
+        y_true=[[1, 0]],
+        y_pred=[[0, 1]],
+        y_score=[[-1.0, 0.9]],
+    )
+
+    assert metrics["exact_match"] == pytest.approx(0.0)
+    assert metrics["f1"] == pytest.approx(0.0)
+    assert metrics["fmax"] == pytest.approx(0.0)
 
 
 def test_multiclass_metrics_report_weighted_f1() -> None:
@@ -2000,7 +2016,8 @@ def test_unified_dataset_catalog_is_filterable_and_searchable() -> None:
     assert get_dataset_catalog_entry("ec:ec_1_head").split_counts == (28147, 3519, 3519)
     assert get_dataset_catalog_entry("ec:ec_4_main").sample_count == 45405
     assert get_dataset_catalog_entry("ec:ec_4_main").loader == "load_ec_dataset"
-    assert get_dataset_catalog_entry("ec:ec_4_main").preferred_metric == "f1"
+    assert get_dataset_catalog_entry("ec:ec_4_main").preferred_metric == "fmax"
+    assert "fmax" in get_dataset_catalog_entry("ec:ec_4_main").metrics
     assert "weighted_f1" in get_dataset_catalog_entry("ec:ec_4_main").metrics
     assert get_dataset_catalog_entry("ec:ec_4_full").sample_count == 60620
     assert get_dataset_catalog_entry("go:go_bp_head").split_counts == (20948, 2620, 2619)
@@ -2031,9 +2048,10 @@ def test_unified_dataset_catalog_is_filterable_and_searchable() -> None:
     assert get_dataset_catalog_entry("ec:ec_3_subclass_holdout_full").split_counts == (44304, 5542, 5543)
     assert get_dataset_catalog_entry("ec_1_subclass_holdout_head").target == "ec_1"
     assert get_dataset_catalog_entry("clean:ec_4_split30_fold0").loader == "load_clean_dataset"
-    assert get_dataset_catalog_entry("clean:ec_4_split30_fold0").preferred_metric == "f1"
+    assert get_dataset_catalog_entry("clean:ec_4_split30_fold0").preferred_metric == "fmax"
     assert get_dataset_catalog_entry("clean:ec_4_split30_fold0_price").target == "ec_4"
     assert get_dataset_catalog_entry("ecbench:ec_4_train_100").loader == "load_ecbench_dataset"
+    assert get_dataset_catalog_entry("ecbench:ec_4_train_100").preferred_metric == "fmax"
     assert "weighted_f1" in get_dataset_catalog_entry("ecbench:ec_4_train_100").metrics
     assert get_dataset_catalog_entry("ec-bench:ec_1_train_30_new").id == "ecbench:ec_1_train_30_new"
     assert get_dataset_catalog_entry("source:phosphoelm_ltp").id == "phosphoelm:ltp"
@@ -2330,6 +2348,19 @@ def test_run_task_on_layer_ignores_validation_only_go_classes_for_fmax(tmp_path:
     )
 
     assert result.metrics["go_fmax"] == pytest.approx(1.0)
+
+
+def test_go_protein_centric_metrics_exclude_root_terms(tmp_path: Path) -> None:
+    _write_go_dataset_layout(tmp_path)
+    ontology = load_go(str(tmp_path / "go_main_head" / "go_ontology" / "go.obo"))
+
+    with pytest.raises(ValueError, match="non-root"):
+        go_protein_centric_metrics(
+            {"p1": [0.9]},
+            class_names=["GO:0008150"],
+            true_labels={"p1": ["GO:0008150"]},
+            ontology=ontology,
+        )
 
 
 def test_go_weighted_protein_centric_metrics_use_information_accretion(tmp_path: Path) -> None:

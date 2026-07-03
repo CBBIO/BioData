@@ -342,7 +342,7 @@ _EC_MULTILABEL_DATASETS: tuple[DatasetMetadata, ...] = tuple(
         source="UniRef50 EC annotations",
         category="function_prediction",
         task_class="function",
-        preferred_metric="f1",
+        preferred_metric="fmax",
         description=(
             "Source: UniRef50 EC annotations. "
             "Class: function_prediction. "
@@ -352,7 +352,7 @@ _EC_MULTILABEL_DATASETS: tuple[DatasetMetadata, ...] = tuple(
         objective="multilabel",
         target=f"ec_{level}",
         status="ready",
-        metrics=("f1", "macro_f1", "weighted_f1", "average_precision"),
+        metrics=("fmax", "f1", "macro_f1", "weighted_f1", "average_precision"),
         split_counts=cast(tuple[int, int, int], _EC_STATS[f"ec_{level}_{track}"]["split_counts"]),
         sample_count=cast(int, _EC_STATS[f"ec_{level}_{track}"]["sample_count"]),
         download_adapter=None,
