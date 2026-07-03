@@ -7,7 +7,6 @@ from .backends import (
     evaluate_probe_backend_output,
 )
 from .metrics import (
-    cafa6_weighted_fmax_mean,
     go_combined_protein_centric_metrics,
     go_fixed_threshold_protein_centric_metrics,
     go_protein_centric_metrics,
@@ -50,7 +49,6 @@ from .catalog import (
 )
 from .collections import (
     CAFA_COLLECTION,
-    CAFA6_COLLECTION,
     CLEAN_COLLECTION,
     DBPTM_COLLECTION,
     DTU_COLLECTION,
@@ -84,18 +82,13 @@ from .sources.clean import (
 from .sources.cafa5 import (
     CAFA5_COLLECTION_METADATA,
     CAFA5_DATASETS,
+    CAFA5_TARGET_SUBSETS,
     Cafa5Aspect,
+    Cafa5Subset,
     download_cafa5_dataset,
     load_cafa5_dataset,
 )
-from .sources.cafa6 import (
-    CAFA_COLLECTION_METADATA,
-    CAFA6_COLLECTION_METADATA,
-    CAFA6_DATASETS,
-    Cafa6Aspect,
-    download_cafa6_dataset,
-    load_cafa6_dataset,
-)
+from .sources.cafa5 import CAFA_COLLECTION_METADATA
 from .sources.ec import (
     EC_COLLECTION_METADATA,
     EC_DATASETS,
@@ -205,9 +198,7 @@ __all__ = [
     "CAFA_COLLECTION_METADATA",
     "CAFA5_COLLECTION_METADATA",
     "CAFA5_DATASETS",
-    "CAFA6_COLLECTION",
-    "CAFA6_COLLECTION_METADATA",
-    "CAFA6_DATASETS",
+    "CAFA5_TARGET_SUBSETS",
     "CLEAN_COLLECTION",
     "CLEAN_COLLECTION_METADATA",
     "CLEAN_DATASETS",
@@ -225,7 +216,7 @@ __all__ = [
     "GO_COLLECTION_METADATA",
     "GO_DATASETS",
     "Cafa5Aspect",
-    "Cafa6Aspect",
+    "Cafa5Subset",
     "CafaCollection",
     "CleanCollection",
     "CleanFold",
@@ -306,7 +297,6 @@ __all__ = [
     "TaskLevel",
     "download_dbptm_benchmark",
     "download_cafa5_dataset",
-    "download_cafa6_dataset",
     "download_dataset",
     "download_disprot_current_json",
     "download_disprot_current_tsv",
@@ -314,7 +304,6 @@ __all__ = [
     "download_peer_dataset",
     "download_residue_source",
     "evaluate_probe_backend_output",
-    "cafa6_weighted_fmax_mean",
     "go_combined_protein_centric_metrics",
     "go_fixed_threshold_protein_centric_metrics",
     "go_protein_centric_metrics",
@@ -336,7 +325,6 @@ __all__ = [
     "list_residue_sources",
     "load_biolip_dataset",
     "load_cafa5_dataset",
-    "load_cafa6_dataset",
     "load_clean_dataset",
     "load_dataset",
     "load_dbptm_benchmark_archive",

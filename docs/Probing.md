@@ -175,7 +175,7 @@ print([dataset.id for dataset in biolip.list_datasets()])
 | `phosphoelm` | PhosphoELM evidence subsets |
 | `ec` | Generated Enzyme Commission function-prediction tasks |
 | `go` | Generated Gene Ontology function-prediction tasks |
-| `cafa` | CAFA5 and CAFA6 Kaggle Gene Ontology prediction training data |
+| `cafa` | CAFA5 Kaggle Gene Ontology prediction training and target-subset data |
 | `dtu` | DTU in-house annotation services |
 
 `DatasetCatalogEntry` remains as a compatibility alias for `DatasetMetadata`.
@@ -311,13 +311,13 @@ metrics = go_fixed_threshold_protein_centric_metrics(
 print(metrics["go_propagated_f1"])
 ```
 
-### CAFA6 Kaggle Tasks
+### CAFA5 Kaggle Tasks
 
 ```python
 from CBBIO import load_dataset
 
 dataset = load_dataset(
-    "cafa:cafa6_bp",
+    "cafa:cafa5_partial_bp",
     "/data/probing",
     split=("train", "test"),
     download=True,
@@ -325,32 +325,26 @@ dataset = load_dataset(
 ```
 
 The CAFA collection downloads with the Kaggle CLI when `download=True`, then loads
-`Train/train_terms.tsv` and `Train/train_sequences.fasta`. Dataset IDs are `cafa:cafa5_bp`,
-`cafa:cafa5_cc`, `cafa:cafa5_mf`, `cafa:cafa6_bp`, `cafa:cafa6_cc`, and `cafa:cafa6_mf`; each
-uses deterministic hash splits over the labeled training proteins.
+`Train/train_terms.tsv` and `Train/train_sequences.fasta`. Training-only dataset IDs are
+`cafa:cafa5_bp`, `cafa:cafa5_cc`, and `cafa:cafa5_mf`; each uses deterministic hash splits over the
+labeled training proteins.
+
+Released CAFA5 target-subset IDs use `cafa:cafa5_<subset>_<aspect>`, where `subset` is
+`no_knowledge`, `limited`, `partial`, or the corresponding `*_after_t0` publication-date subset.
+These datasets use the Kaggle training proteins as `train` and the released target terms as `test`.
+The partial-knowledge subsets require `Test (Targets)/known_t0.tsv` or
+`Test (Targets)/known_publishedaftert0.tsv`; CBBIO records that path in test-example metadata as
+`known_terms_path`. If `Test (Targets)/toi_2025_03.tsv` is present, CBBIO records it as `toi_path`
+and restricts GO evaluation to those terms.
 
 Install `kaggle` and configure Kaggle credentials before using `download=True`. The downloader
 passes through `KAGGLE_API_TOKEN` when set, or reads `~/.kaggle/access_token` when that file exists.
 If `go-basic.obo` or `go.obo` and `IA.txt` are present beside `Train/`, the loader records them in
 example metadata so GO tasks can report the challenge metric, `go_weighted_fmax`, with
 `go_weighted_precision_at_fmax` and `go_weighted_recall_at_fmax`. The unweighted propagated
-`go_fmax` is still reported for comparison.
-
-```python
-from CBBIO import cafa6_weighted_fmax_mean
-
-summary = cafa6_weighted_fmax_mean(
-    {
-        "mf": mf_result.metrics,
-        "bp": bp_result.metrics,
-        "cc": cc_result.metrics,
-    }
-)
-```
-
-`cafa6_weighted_fmax_mean()` computes the arithmetic mean of the three subontology maximum
-weighted F-measures. Evaluate MF, BP, and CC separately, then pass the three result metric mappings
-to compute the CAFA6 three-aspect score.
+`go_fmax` is still reported for comparison. CAFA datasets use the CAFA evaluator threshold step of
+`0.001`. Partial-knowledge evaluation excludes propagated known terms from both truth and
+predictions before scoring.
 
 ### Enzyme Commission Tasks
 
@@ -786,10 +780,15 @@ print(report.removed_count)
 | `precision_at_fmax` | Micro-precision at the best threshold |
 | `recall_at_fmax` | Micro-recall at the best threshold |
 
-GO tasks additionally report propagated, protein-centric metrics. `go_fmax`,
-`go_precision_at_fmax`, and `go_recall_at_fmax` use the best swept threshold. `go_propagated_f1`,
+GO tasks additionally report propagated metrics. `go_macro_fmax`, `go_macro_precision_at_fmax`,
+and `go_macro_recall_at_fmax` use protein-centric macro averaging; `go_fmax`,
+`go_precision_at_fmax`, and `go_recall_at_fmax` remain compatibility aliases for those macro
+values. `go_micro_fmax`, `go_micro_precision_at_fmax`, and `go_micro_recall_at_fmax` pool
+protein-term decisions before computing precision and recall. `go_propagated_f1`,
 `go_propagated_precision`, and `go_propagated_recall` use the probe's fixed prediction threshold
-when one is available. Use `go_fmax` to compare GO probes against CAFA-style reports.
+when one is available. When IA weights are available, CBBIO also reports weighted macro and micro
+Fmax plus the semantic-distance metrics `go_weighted_smin`,
+`go_weighted_remaining_uncertainty_at_smin`, and `go_weighted_misinformation_at_smin`.
 
 ---
 

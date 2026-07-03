@@ -23,7 +23,7 @@ Write a script that connects to the BioData PostgreSQL database with CBBIO.conne
 ### 3. CAFA Transfer Baseline
 
 ```text
-Build a reproducible CAFA baseline pipeline. Load CAFA5 and CAFA6 datasets with CBBIO.load_dataset, generate protein-level embeddings for ESM-C and AMPLIFY, train no model with CBBIO.TransferProbe, and evaluate GO protein-centric metrics including weighted Fmax when information accretion weights are available. The script should compare search backends "numpy", "faiss_cpu", and "torch_gpu" when installed, skip missing optional dependencies with clear messages, and write one JSON report per dataset, model, layer, and backend.
+Build a reproducible CAFA baseline pipeline. Load CAFA5 training-only and released no-knowledge, limited-knowledge, and partial-knowledge target subsets with CBBIO.load_dataset, generate protein-level embeddings for ESM-C and AMPLIFY, train no model with CBBIO.TransferProbe, and evaluate GO protein-centric metrics including weighted Fmax when information accretion weights are available. The script should compare search backends "numpy", "faiss_cpu", and "torch_gpu" when installed, skip missing optional dependencies with clear messages, and write one JSON report per dataset, model, layer, and backend.
 ```
 
 ### 4. Residue PTM Probe Matrix

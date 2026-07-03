@@ -111,14 +111,32 @@ def build_cafa_datasets(spec: CafaChallengeSpec) -> tuple[DatasetMetadata, ...]:
             import_adapter=f"load_{spec.version}_dataset",
             loader=f"load_{spec.version}_dataset",
             tags=("protein", "function", "gene_ontology", "go", "cafa", spec.version, aspect),
-            notes=(
-                f"Requires a local Kaggle {spec.display_name} download containing "
-                "Train/train_terms.tsv and Train/train_sequences.fasta. Optional ontology "
-                "and IA files such as go-basic.obo and IA.txt are recorded in metadata when present."
-            ),
+            notes=_cafa_dataset_notes(spec),
         )
         for aspect in CAFA_ASPECTS
     )
+
+
+def _cafa_dataset_notes(spec: CafaChallengeSpec) -> str:
+    notes = (
+        f"Requires a local Kaggle {spec.display_name} download containing "
+        "Train/train_terms.tsv and Train/train_sequences.fasta. Optional ontology "
+        "and IA files such as go-basic.obo and IA.txt are recorded in metadata when present. "
+        "The loader uses deterministic hash splits over labeled training proteins."
+    )
+    if spec.version == "cafa6":
+        return (
+            notes
+            + " CAFA6 Kaggle test proteins are unlabeled in the competition download, "
+            "so this adapter does not provide an official labeled CAFA6 test benchmark."
+        )
+    if spec.version == "cafa5":
+        return (
+            notes
+            + " Released CAFA5 target files may be present under Test (Targets), "
+            "but the current adapter only loads the Kaggle training labels."
+        )
+    return notes
 
 
 def load_cafa_dataset(
@@ -405,9 +423,15 @@ def _finalize_sequence(
     return sequence
 
 
-def _read_train_terms(path: Path, *, aspect: CafaAspect, spec: CafaChallengeSpec) -> dict[str, list[str]]:
+def _read_terms(
+    path: Path,
+    *,
+    aspect: CafaAspect,
+    spec: CafaChallengeSpec,
+    file_label: str,
+) -> dict[str, list[str]]:
     if not path.exists():
-        raise EmbeddingInputError(f"{spec.display_name} training terms file not found: {path}.")
+        raise EmbeddingInputError(f"{spec.display_name} {file_label} file not found: {path}.")
     labels: dict[str, set[str]] = {}
     with path.open("r", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle, delimiter="\t")
@@ -417,7 +441,7 @@ def _read_train_terms(path: Path, *, aspect: CafaAspect, spec: CafaChallengeSpec
         aspect_field = fieldnames.get("aspect")
         if id_field is None or term_field is None or aspect_field is None:
             raise EmbeddingInputError(
-                f"{spec.display_name} train_terms.tsv must contain EntryID, term, and aspect columns."
+                f"{spec.display_name} {file_label} must contain EntryID, term, and aspect columns."
             )
         for line_number, row in enumerate(reader, start=2):
             protein_id = str(row.get(id_field, "")).strip()
@@ -430,12 +454,16 @@ def _read_train_terms(path: Path, *, aspect: CafaAspect, spec: CafaChallengeSpec
             )
             if not protein_id or not term:
                 raise EmbeddingInputError(
-                    f"{spec.display_name} train_terms.tsv {path} line {line_number} "
+                    f"{spec.display_name} {file_label} {path} line {line_number} "
                     "has an empty EntryID or term."
                 )
             if row_aspect == aspect:
                 labels.setdefault(protein_id, set()).add(term)
     return {protein_id: sorted(terms) for protein_id, terms in labels.items() if terms}
+
+
+def _read_train_terms(path: Path, *, aspect: CafaAspect, spec: CafaChallengeSpec) -> dict[str, list[str]]:
+    return _read_terms(path, aspect=aspect, spec=spec, file_label="train_terms.tsv")
 
 
 def _observed_aspects(path: Path) -> list[str]:
@@ -561,6 +589,78 @@ def _cafa_metadata(
     return metadata
 
 
+def cafa_example_metadata(
+    *,
+    spec: CafaChallengeSpec,
+    aspect: CafaAspect,
+    labels: Sequence[str],
+    terms_path: Path,
+    sequence_path: Path,
+    ontology_path: Path | None,
+    ia_path: Path | None,
+) -> dict[str, str | list[str]]:
+    """Build per-example metadata for a CAFA source file."""
+    return _cafa_metadata(
+        spec=spec,
+        aspect=aspect,
+        labels=labels,
+        terms_path=terms_path,
+        sequence_path=sequence_path,
+        ontology_path=ontology_path,
+        ia_path=ia_path,
+    )
+
+
+def read_cafa_fasta_sequences(path: Path, *, spec: CafaChallengeSpec) -> dict[str, str]:
+    """Read CAFA FASTA sequences and identifier aliases."""
+    return _read_fasta_sequences(path, spec=spec)
+
+
+def read_cafa_terms(
+    path: Path,
+    *,
+    aspect: CafaAspect,
+    spec: CafaChallengeSpec,
+    file_label: str,
+) -> dict[str, list[str]]:
+    """Read CAFA term labels from a tab-separated file."""
+    return _read_terms(path, aspect=aspect, spec=spec, file_label=file_label)
+
+
+def read_cafa_train_terms(path: Path, *, aspect: CafaAspect, spec: CafaChallengeSpec) -> dict[str, list[str]]:
+    """Read CAFA training term labels."""
+    return _read_train_terms(path, aspect=aspect, spec=spec)
+
+
+def resolve_cafa_go_obo_path(
+    root: Path,
+    *,
+    go_obo_path: str | Path | None,
+    spec: CafaChallengeSpec,
+) -> Path | None:
+    """Resolve a CAFA GO ontology file when present."""
+    return _resolve_go_obo_path(root, go_obo_path=go_obo_path, spec=spec)
+
+
+def resolve_cafa_ia_path(
+    root: Path,
+    *,
+    ia_path: str | Path | None,
+    spec: CafaChallengeSpec,
+) -> Path | None:
+    """Resolve a CAFA information-accretion file when present."""
+    return _resolve_ia_path(root, ia_path=ia_path, spec=spec)
+
+
+def resolve_cafa_splits(
+    split: str | Sequence[str] | None,
+    *,
+    spec: CafaChallengeSpec,
+) -> set[SplitName] | None:
+    """Resolve CAFA split names."""
+    return _resolve_splits(split, spec=spec)
+
+
 __all__ = [
     "CAFA_ASPECTS",
     "CAFA_ASPECT_NAMES",
@@ -568,8 +668,15 @@ __all__ = [
     "CafaAspect",
     "CafaChallengeSpec",
     "build_cafa_datasets",
+    "cafa_example_metadata",
     "download_cafa_dataset",
     "load_cafa_dataset",
     "parse_cafa_dataset_name",
+    "read_cafa_fasta_sequences",
+    "read_cafa_terms",
+    "read_cafa_train_terms",
+    "resolve_cafa_go_obo_path",
+    "resolve_cafa_ia_path",
     "resolve_cafa_root",
+    "resolve_cafa_splits",
 ]

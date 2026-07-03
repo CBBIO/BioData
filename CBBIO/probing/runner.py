@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import csv
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 import time
 from typing import Any, Dict, cast
 
@@ -151,12 +153,16 @@ def _evaluate_go_metrics(
     true_labels: dict[str, Sequence[str]] = {}
     ontology_paths: set[str] = set()
     ia_paths: set[str] = set()
+    known_terms_paths: set[str] = set()
+    terms_of_interest_paths: set[str] = set()
     sources: set[str] = set()
     for example in test_examples:
         metadata = example.metadata or {}
         raw_labels = metadata.get("labels_propagated")
         ontology_path = metadata.get("go_obo_path")
         ia_path = metadata.get("ia_path")
+        known_terms_path = metadata.get("known_terms_path")
+        terms_of_interest_path = metadata.get("toi_path")
         source = metadata.get("source")
         if not isinstance(raw_labels, Sequence) or isinstance(raw_labels, str | bytes):
             raise EmbeddingInputError(
@@ -169,12 +175,20 @@ def _evaluate_go_metrics(
         ontology_paths.add(ontology_path)
         if isinstance(ia_path, str) and ia_path.strip():
             ia_paths.add(ia_path)
+        if isinstance(known_terms_path, str) and known_terms_path.strip():
+            known_terms_paths.add(known_terms_path)
+        if isinstance(terms_of_interest_path, str) and terms_of_interest_path.strip():
+            terms_of_interest_paths.add(terms_of_interest_path)
         if isinstance(source, str) and source.strip():
             sources.add(source)
     if len(ontology_paths) != 1:
         raise EmbeddingInputError("GO evaluation requires one shared ontology path.")
     if len(ia_paths) > 1:
         raise EmbeddingInputError("GO weighted evaluation requires one shared IA weight path.")
+    if len(known_terms_paths) > 1:
+        raise EmbeddingInputError("GO partial-knowledge evaluation requires one shared known-terms path.")
+    if len(terms_of_interest_paths) > 1:
+        raise EmbeddingInputError("GO evaluation requires one shared terms-of-interest path.")
     if sources.intersection({"cafa5", "cafa6"}) and not ia_paths:
         raise EmbeddingInputError(
             "CAFA weighted GO evaluation requires an IA.txt information-accretion weight file."
@@ -210,6 +224,20 @@ def _evaluate_go_metrics(
             true_labels=true_labels,
             ontology=ontology,
             term_weights=term_weights,
+            known_labels=(
+                _read_go_terms_by_protein(
+                    next(iter(known_terms_paths)),
+                    target=task.prediction.target,
+                    protein_ids=true_labels,
+                )
+                if known_terms_paths
+                else None
+            ),
+            terms_of_interest=(
+                _read_go_terms_of_interest(next(iter(terms_of_interest_paths)))
+                if terms_of_interest_paths
+                else None
+            ),
             threshold_count=_go_threshold_count(sources),
         )
         if fixed_threshold is not None:
@@ -220,6 +248,20 @@ def _evaluate_go_metrics(
                     true_labels=true_labels,
                     ontology=ontology,
                     threshold=fixed_threshold,
+                    known_labels=(
+                        _read_go_terms_by_protein(
+                            next(iter(known_terms_paths)),
+                            target=task.prediction.target,
+                            protein_ids=true_labels,
+                        )
+                        if known_terms_paths
+                        else None
+                    ),
+                    terms_of_interest=(
+                        _read_go_terms_of_interest(next(iter(terms_of_interest_paths)))
+                        if terms_of_interest_paths
+                        else None
+                    ),
                 )
             )
         return metrics
@@ -237,8 +279,57 @@ def _go_fixed_threshold(backend: ProbeBackend) -> float | None:
 
 def _go_threshold_count(sources: set[str]) -> int:
     if sources.intersection({"cafa5", "cafa6"}):
-        return 51
+        return 1001
     return 101
+
+
+def _read_go_terms_by_protein(
+    path: str,
+    *,
+    target: str,
+    protein_ids: Mapping[str, object],
+) -> dict[str, list[str]]:
+    terms_by_protein: dict[str, set[str]] = {}
+    accepted_aspects = _go_aspect_values(target)
+    with Path(path).expanduser().open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        fieldnames = {field.strip().lower(): field for field in reader.fieldnames or []}
+        id_field = fieldnames.get("entryid")
+        term_field = fieldnames.get("term")
+        aspect_field = fieldnames.get("aspect")
+        if id_field is None or term_field is None or aspect_field is None:
+            raise EmbeddingInputError(f"GO known-terms file {path} must contain EntryID, term, and aspect.")
+        for row in reader:
+            protein_id = str(row.get(id_field, "")).strip()
+            if protein_id not in protein_ids:
+                continue
+            aspect = str(row.get(aspect_field, "")).strip().upper()
+            if aspect not in accepted_aspects:
+                continue
+            term = str(row.get(term_field, "")).strip()
+            if term:
+                terms_by_protein.setdefault(protein_id, set()).add(term)
+    return {protein_id: sorted(terms) for protein_id, terms in terms_by_protein.items()}
+
+
+def _read_go_terms_of_interest(path: str) -> list[str]:
+    terms: list[str] = []
+    with Path(path).expanduser().open("r", encoding="utf-8") as handle:
+        for line in handle:
+            term = line.strip().split("\t", maxsplit=1)[0]
+            if term:
+                terms.append(term)
+    return terms
+
+
+def _go_aspect_values(target: str) -> set[str]:
+    if target == "go_bp":
+        return {"BPO", "BP", "P"}
+    if target == "go_cc":
+        return {"CCO", "CC", "C"}
+    if target == "go_mf":
+        return {"MFO", "MF", "F"}
+    raise EmbeddingInputError(f"Unsupported GO target {target!r}.")
 
 
 def _backend_from_spec(probe: ProbeSpec) -> ProbeBackend:

@@ -152,7 +152,6 @@ Provider-specific loaders remain public for cases where a caller needs provider 
 | `load_dbptm_benchmark_dataset()` | dbPTM benchmark archives |
 | `load_residue_source_dataset()` | Residue annotation sources |
 | `load_cafa5_dataset()` | CAFA5 function prediction data |
-| `load_cafa6_dataset()` | CAFA6 function prediction data |
 | `load_ec_dataset()` | Enzyme Commission tasks |
 | `load_go_dataset()` | Gene Ontology tasks |
 

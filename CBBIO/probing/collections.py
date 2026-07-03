@@ -19,7 +19,7 @@ from .datasets import ProteinDataset, ResidueDataset, SplitName
 from .splitters import DatasetSplitter
 from .sources.biolip import BIOLIP_COLLECTION_METADATA, BIOLIP_DATASETS
 from .sources.cafa5 import CAFA5_DATASETS
-from .sources.cafa6 import CAFA_COLLECTION_METADATA, CAFA6_DATASETS
+from .sources.cafa5 import CAFA_COLLECTION_METADATA
 from .sources.clean import CLEAN_COLLECTION_METADATA, CLEAN_DATASETS
 from .sources.dbptm import DBPTM_COLLECTION_METADATA, DBPTM_DATASETS
 from .sources.disprot import DISPROT_COLLECTION_METADATA, DISPROT_DATASETS
@@ -446,7 +446,7 @@ class CafaCollection(DatasetCollection):
 
     def list_datasets(self) -> List[DatasetMetadata]:
         """Return CAFA aspect dataset specifications."""
-        return [*CAFA5_DATASETS, *CAFA6_DATASETS]
+        return [*CAFA5_DATASETS]
 
     def download(
         self,
@@ -457,12 +457,9 @@ class CafaCollection(DatasetCollection):
     ) -> List[Path]:
         """Download CAFA competition files through the Kaggle CLI."""
         from .sources.cafa5 import download_cafa5_dataset
-        from .sources.cafa6 import download_cafa6_dataset
 
-        dataset = self.get_dataset(name)
-        if dataset.name.startswith("cafa5_"):
-            return download_cafa5_dataset(root, force=force)
-        return download_cafa6_dataset(root, force=force)
+        _ = self.get_dataset(name)
+        return download_cafa5_dataset(root, force=force)
 
     def load(
         self,
@@ -477,24 +474,19 @@ class CafaCollection(DatasetCollection):
     ) -> ProteinDataset | ResidueDataset:
         """Load one CAFA aspect dataset."""
         from .sources.cafa5 import download_cafa5_dataset, load_cafa5_dataset
-        from .sources.cafa6 import download_cafa6_dataset, load_cafa6_dataset
 
         if max_examples_per_split is not None:
             raise EmbeddingInputError("CAFA datasets do not support max_examples_per_split.")
         dataset = self.get_dataset(name)
-        if dataset.name.startswith("cafa5_"):
-            if download:
-                download_cafa5_dataset(root)
-            return load_cafa5_dataset(
-                root,
-                name=dataset.name,
-                split=split,
-                target=target,
-                splitter=splitter,
-            )
         if download:
-            download_cafa6_dataset(root)
-        return load_cafa6_dataset(root, name=dataset.name, split=split, target=target, splitter=splitter)
+            download_cafa5_dataset(root)
+        return load_cafa5_dataset(
+            root,
+            name=dataset.name,
+            split=split,
+            target=target,
+            splitter=splitter,
+        )
 
 
 def list_dataset_collections() -> List[DatasetCollection]:
@@ -505,7 +497,7 @@ def list_dataset_collections() -> List[DatasetCollection]:
 def get_dataset_collection(collection_id: str) -> DatasetCollection:
     """Return one registered dataset collection."""
     normalized = str(collection_id).strip().lower().replace("-", "_")
-    if normalized in {"cafa5", "cafa6"}:
+    if normalized == "cafa5":
         normalized = "cafa"
     if normalized in {"ec_bench", "ec_benchmark"}:
         normalized = "ecbench"
@@ -535,7 +527,6 @@ CLEAN_COLLECTION = CleanCollection()
 ECBENCH_COLLECTION = EcBenchCollection()
 GO_COLLECTION = GoCollection()
 CAFA_COLLECTION = CafaCollection()
-CAFA6_COLLECTION = CAFA_COLLECTION
 
 _PROVIDER_COLLECTION_METADATA = (
     MUSITEDEEP_COLLECTION_METADATA,
@@ -566,7 +557,6 @@ __all__ = [
     "DATASET_COLLECTIONS",
     "DBPTM_COLLECTION",
     "CAFA_COLLECTION",
-    "CAFA6_COLLECTION",
     "CafaCollection",
     "CLEAN_COLLECTION",
     "CleanCollection",

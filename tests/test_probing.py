@@ -30,12 +30,11 @@ from CBBIO import (
     ResidueExample,
     StratifiedDatasetSplitter,
     Task,
-    cafa6_weighted_fmax_mean,
+    CAFA5_TARGET_SUBSETS,
     get_dataset_collection,
     get_dataset_catalog_entry,
     download_dbptm_benchmark,
     download_cafa5_dataset,
-    download_cafa6_dataset,
     download_disprot_current_json,
     download_disprot_current_tsv,
     download_musitedeep_testdata,
@@ -55,7 +54,6 @@ from CBBIO import (
     list_residue_sources,
     load_biolip_dataset,
     load_cafa5_dataset,
-    load_cafa6_dataset,
     load_clean_dataset,
     load_dataset,
     load_dbptm_benchmark_archive,
@@ -85,6 +83,7 @@ from CBBIO import (
     TransferProbe,
 )
 from CBBIO.probing.metrics import binary_metrics
+from CBBIO.probing.metrics import cafa6_weighted_fmax_mean
 from CBBIO.probing.metrics import go_combined_protein_centric_metrics
 from CBBIO.probing.metrics import go_fixed_threshold_protein_centric_metrics
 from CBBIO.probing.metrics import go_protein_centric_metrics
@@ -92,6 +91,8 @@ from CBBIO.probing.metrics import go_weighted_protein_centric_metrics
 from CBBIO.probing.metrics import multilabel_metrics
 from CBBIO.probing.metrics import multiclass_metrics
 from CBBIO.probing.metrics import spearmanr
+from CBBIO.probing.sources.cafa6 import download_cafa6_dataset
+from CBBIO.probing.sources.cafa6 import load_cafa6_dataset
 from CBBIO.embeddings import EmbeddingInputError
 
 
@@ -1850,6 +1851,50 @@ namespace: molecular_function
     )
 
 
+def _write_cafa5_target_subset_layout(root: Path) -> None:
+    _write_cafa6_dataset_layout(root)
+    target_dir = root / "Test (Targets)"
+    target_dir.mkdir(parents=True)
+    (target_dir / "eval_terms_partial_2025_03.tsv").write_text(
+        "\n".join(
+            [
+                "EntryID\tterm\taspect",
+                "T1\tGO:0009987\tBPO",
+                "T2\tGO:0008151\tBPO",
+                "T3\tGO:0005575\tCCO",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (target_dir / "known_t0.tsv").write_text(
+        "\n".join(
+            [
+                "EntryID\tterm\taspect",
+                "T1\tGO:0008151\tBPO",
+                "T2\tGO:0009987\tBPO",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (target_dir / "toi_2025_03.tsv").write_text("GO:0009987\nGO:0008151\n", encoding="utf-8")
+    (target_dir / "testsuperset.fasta").write_text(
+        "\n".join(
+            [
+                ">T1 target one",
+                "MMMM",
+                ">T2 target two",
+                "NNNN",
+                ">T3 target three",
+                "PPPP",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
 def _write_cafa_lowercase_aspect_layout(root: Path) -> None:
     train_dir = root / "Train"
     train_dir.mkdir(parents=True)
@@ -2027,12 +2072,12 @@ def test_unified_dataset_catalog_is_filterable_and_searchable() -> None:
     assert get_dataset_catalog_entry("go:go_bp_head").preferred_metric == "go_fmax"
     assert get_dataset_catalog_entry("cafa:cafa5_bp").status == "adapter"
     assert get_dataset_catalog_entry("cafa:cafa5_bp").preferred_metric == "go_weighted_fmax"
-    assert get_dataset_catalog_entry("cafa:cafa6_bp").status == "adapter"
-    assert get_dataset_catalog_entry("cafa:cafa6_bp").preferred_metric == "go_weighted_fmax"
-    assert get_dataset_catalog_entry("cafa6_mf").loader == "load_cafa6_dataset"
-    assert get_dataset_catalog_entry("cafa6:cafa6_cc").id == "cafa:cafa6_cc"
     assert get_dataset_catalog_entry("cafa5:cafa5_cc").id == "cafa:cafa5_cc"
-    assert get_dataset_catalog_entry("cafa:cafa6_cc").target == "go_cc"
+    assert get_dataset_catalog_entry("cafa:cafa5_partial_bp").target == "go_bp"
+    assert get_dataset_catalog_entry("cafa:cafa5_partial_bp").loader == "load_cafa5_dataset"
+    assert get_dataset_catalog_entry("cafa5_pk_bp").id == "cafa:cafa5_partial_bp"
+    with pytest.raises(EmbeddingInputError, match="Unknown dataset"):
+        get_dataset_catalog_entry("cafa:cafa6_bp")
     assert get_dataset_catalog_entry("ec_2_head").target == "ec_2"
     assert get_dataset_catalog_entry("ec:single_ec_4_main").objective == "multiclass"
     assert "weighted_f1" in get_dataset_catalog_entry("ec:single_ec_4_main").metrics
@@ -2072,7 +2117,8 @@ def test_unified_dataset_catalog_is_filterable_and_searchable() -> None:
     assert "go:go_mf_main" in {entry.id for entry in list_dataset_catalog(collection="go")}
     assert "go:go_mf_full" in {entry.id for entry in list_dataset_catalog(collection="go")}
     assert "cafa:cafa5_bp" in {entry.id for entry in list_dataset_catalog(collection="cafa")}
-    assert "cafa:cafa6_bp" in {entry.id for entry in list_dataset_catalog(collection="cafa")}
+    assert "cafa:cafa5_partial_bp" in {entry.id for entry in list_dataset_catalog(collection="cafa")}
+    assert "cafa:cafa6_bp" not in {entry.id for entry in list_dataset_catalog(collection="cafa")}
     assert "clean:ec_4_split30_fold0" in {entry.id for entry in list_dataset_catalog(collection="clean")}
     assert "ecbench:ec_4_train_100" in {entry.id for entry in list_dataset_catalog(collection="ecbench")}
     assert "ec:single_ec_4_main" in {entry.id for entry in list_dataset_catalog(collection="ec", objective="multiclass")}
@@ -2102,7 +2148,7 @@ def test_unified_dataset_catalog_is_filterable_and_searchable() -> None:
     assert "go:go_bp_head" in {entry.id for entry in search_dataset_catalog("gene ontology bp head")}
     assert "go:go_bp_full" in {entry.id for entry in search_dataset_catalog("gene ontology bp full")}
     assert "cafa:cafa5_bp" in {entry.id for entry in search_dataset_catalog("cafa5 kaggle bp")}
-    assert "cafa:cafa6_bp" in {entry.id for entry in search_dataset_catalog("cafa6 kaggle bp")}
+    assert "cafa:cafa5_partial_bp" in {entry.id for entry in search_dataset_catalog("cafa5 partial bp")}
     assert "clean:ec_4_split30_fold0" in {entry.id for entry in search_dataset_catalog("clean ec 4 split30")}
     assert "ecbench:ec_4_train_100" in {entry.id for entry in search_dataset_catalog("ecbench ec 4 train 100")}
 
@@ -2383,6 +2429,8 @@ def test_go_weighted_protein_centric_metrics_use_information_accretion(tmp_path:
     )
 
     assert metrics["go_weighted_fmax"] == pytest.approx(0.8)
+    assert metrics["go_weighted_macro_fmax"] == pytest.approx(0.8)
+    assert metrics["go_weighted_micro_fmax"] == pytest.approx(0.8)
     assert metrics["go_weighted_fmax_threshold"] == pytest.approx(0.11)
     assert metrics["go_weighted_precision_at_fmax"] == pytest.approx(2.0 / 3.0)
     assert metrics["go_weighted_recall_at_fmax"] == pytest.approx(1.0)
@@ -2428,6 +2476,36 @@ def test_go_combined_protein_centric_metrics_matches_separate_metrics(tmp_path: 
 
     for key, value in {**unweighted, **weighted}.items():
         assert combined[key] == pytest.approx(value)
+    assert combined["go_macro_fmax"] == pytest.approx(combined["go_fmax"])
+    assert combined["go_micro_fmax"] == pytest.approx(0.8)
+    assert combined["go_weighted_macro_fmax"] == pytest.approx(combined["go_weighted_fmax"])
+    assert combined["go_weighted_micro_fmax"] == pytest.approx(0.8)
+    assert combined["go_weighted_smin"] == pytest.approx(0.5)
+    assert combined["go_weighted_remaining_uncertainty_at_smin"] == pytest.approx(0.5)
+    assert combined["go_weighted_misinformation_at_smin"] == pytest.approx(0.0)
+
+
+def test_go_combined_protein_centric_metrics_excludes_known_partial_knowledge_terms(
+    tmp_path: Path,
+) -> None:
+    _write_cafa6_dataset_layout(tmp_path)
+    ontology = load_go(str(tmp_path / "Train" / "go-basic.obo"))
+    weights = read_information_accretion_weights(tmp_path / "IA.tsv")
+
+    metrics = go_combined_protein_centric_metrics(
+        {"p1": [0.95, 0.9]},
+        class_names=["GO:0008151", "GO:0009987"],
+        true_labels={"p1": ["GO:0009987"]},
+        ontology=ontology,
+        term_weights=weights,
+        known_labels={"p1": ["GO:0008151"]},
+        terms_of_interest=["GO:0009987"],
+        threshold_count=101,
+    )
+
+    assert metrics["go_fmax"] == pytest.approx(1.0)
+    assert metrics["go_weighted_fmax"] == pytest.approx(1.0)
+    assert metrics["go_weighted_smin"] == pytest.approx(0.0)
 
 
 def test_go_fixed_threshold_protein_centric_metrics_report_propagated_f1(tmp_path: Path) -> None:
@@ -2500,6 +2578,7 @@ def test_run_task_on_layer_reports_cafa6_weighted_go_fmax(tmp_path: Path) -> Non
     )
 
     assert result.metrics["go_weighted_fmax"] == pytest.approx(0.8)
+    assert result.metrics["go_weighted_fmax_threshold"] == pytest.approx(0.101)
     assert result.metrics["go_weighted_precision_at_fmax"] == pytest.approx(2.0 / 3.0)
 
 
@@ -2558,6 +2637,30 @@ def test_load_cafa5_dataset_imports_kaggle_training_terms(tmp_path: Path) -> Non
     assert dataset.examples[0].metadata["source"] == "cafa5"
 
 
+def test_load_cafa5_partial_subset_uses_released_targets_as_test_split(tmp_path: Path) -> None:
+    _write_cafa5_target_subset_layout(tmp_path)
+
+    dataset = load_cafa5_dataset(tmp_path, name="cafa5_partial_bp")
+
+    assert dataset.split_counts() == {"train": 10, "val": 0, "test": 2}
+    assert dataset.target_values("go_bp")["T1"] == ["GO:0009987"]
+    assert dataset.target_values("go_bp")["T2"] == ["GO:0008151"]
+    test_metadata = next(example.metadata for example in dataset.examples if example.id == "T1")
+    assert test_metadata is not None
+    assert test_metadata["evaluation_setting"] == "pk"
+    assert test_metadata["subset"] == "partial"
+    assert str(test_metadata["known_terms_path"]).endswith("known_t0.tsv")
+    assert str(test_metadata["toi_path"]).endswith("toi_2025_03.tsv")
+
+
+def test_load_cafa5_partial_subset_requires_known_terms_file(tmp_path: Path) -> None:
+    _write_cafa5_target_subset_layout(tmp_path)
+    (tmp_path / "Test (Targets)" / "known_t0.tsv").unlink()
+
+    with pytest.raises(EmbeddingInputError, match="known terms"):
+        load_cafa5_dataset(tmp_path, name="cafa5_partial_bp")
+
+
 def test_load_cafa6_dataset_accepts_lowercase_aspects_and_header_variants(tmp_path: Path) -> None:
     _write_cafa_lowercase_aspect_layout(tmp_path)
 
@@ -2588,10 +2691,17 @@ def test_load_dataset_routes_cafa5_through_cafa_collection(tmp_path: Path) -> No
 def test_load_dataset_routes_cafa_collection_with_split_filter(tmp_path: Path) -> None:
     _write_cafa6_dataset_layout(tmp_path)
 
-    dataset = load_dataset("cafa:cafa6_cc", tmp_path, split="train")
+    dataset = load_dataset("cafa:cafa5_cc", tmp_path, split="train")
 
     assert dataset.split_counts() == {"train": 1, "val": 0, "test": 0}
     assert dataset.target_values("go_cc") == {"P3": ["GO:0005575"]}
+
+
+def test_load_dataset_does_not_route_cafa6_through_public_catalog(tmp_path: Path) -> None:
+    _write_cafa6_dataset_layout(tmp_path)
+
+    with pytest.raises(EmbeddingInputError, match="Unknown dataset catalog id"):
+        load_dataset("cafa:cafa6_cc", tmp_path, split="train")
 
 
 def test_download_cafa6_dataset_invokes_kaggle_cli(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -2656,20 +2766,20 @@ def test_download_cafa6_dataset_reads_access_token_file(
     assert environments[0]["KAGGLE_API_TOKEN"] == "file-token"
 
 
-def test_load_dataset_downloads_cafa6_when_download_is_true(
+def test_load_dataset_downloads_cafa5_when_download_is_true(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         _ = kwargs
         output_dir = Path(command[command.index("-p") + 1])
-        _write_cafa6_dataset_zip(output_dir / "cafa-6-protein-function-prediction.zip")
+        _write_cafa6_dataset_zip(output_dir / "cafa-5-protein-function-prediction.zip")
         return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
     monkeypatch.setattr(cafa_download_module.shutil, "which", lambda name: "/usr/bin/kaggle")
     monkeypatch.setattr(cafa_download_module.subprocess, "run", fake_run)
 
-    dataset = load_dataset("cafa:cafa6_bp", tmp_path, split="test", download=True)
+    dataset = load_dataset("cafa:cafa5_bp", tmp_path, split="test", download=True)
 
     assert dataset.split_counts() == {"train": 0, "val": 0, "test": 1}
     assert "GO:0009987" in next(iter(dataset.target_values("go_bp").values()))

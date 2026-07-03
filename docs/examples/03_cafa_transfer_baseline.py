@@ -1,11 +1,11 @@
 # Prompt:
-# Build a reproducible CAFA baseline pipeline. Load CAFA5 and CAFA6 datasets with
-# CBBIO.load_dataset, generate protein-level embeddings for ESM-C and AMPLIFY, train
-# no model with CBBIO.TransferProbe, and evaluate GO protein-centric metrics including
-# weighted Fmax when information accretion weights are available. The script should
-# compare search backends "numpy", "faiss_cpu", and "torch_gpu" when installed, skip
-# missing optional dependencies with clear messages, and write one JSON report per
-# dataset, model, layer, and backend.
+# Build a reproducible CAFA baseline pipeline. Load CAFA5 training-only and released
+# target-subset datasets with CBBIO.load_dataset, generate protein-level embeddings
+# for ESM-C and AMPLIFY, train no model with CBBIO.TransferProbe, and evaluate GO
+# protein-centric metrics including weighted Fmax when information accretion weights
+# are available. The script should compare search backends "numpy", "faiss_cpu",
+# and "torch_gpu" when installed, skip missing optional dependencies with clear
+# messages, and write one JSON report per dataset, model, layer, and backend.
 
 from __future__ import annotations
 
@@ -61,7 +61,7 @@ def main() -> None:
     datasets = [
         item
         for item in list_dataset_catalog(level="protein", objective="multilabel", status="ready", has_loader=True)
-        if item.collection in {"cafa5", "cafa6", "cafa"}
+        if item.collection == "cafa"
     ]
     model_specs = [("esmc", "esmc_300m"), ("amplify", "nvidia/AMPLIFY_120M")]
     backends = ["numpy", "faiss_cpu", "torch_gpu"]
