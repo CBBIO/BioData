@@ -43,6 +43,7 @@ Use these documents by task:
 | Use GO or taxonomy utilities | [GO.md](GO.md), [Taxonomy.md](Taxonomy.md) |
 | Add an embedding model | [AgentWorkflows.md](AgentWorkflows.md), [ModelSpecificEmbeddingModules.md](ModelSpecificEmbeddingModules.md) |
 | Locate public APIs | [AgentApiMap.md](AgentApiMap.md) |
+| Generate coding-agent prompts | [AgentExamplePrompts.md](AgentExamplePrompts.md), [examples/](examples/) |
 | Change code style safely | [STYLE.md](STYLE.md), [STYLE_TESTS.md](STYLE_TESTS.md), [STYLE_DOCS.md](STYLE_DOCS.md) |
 
 ## Import Policy

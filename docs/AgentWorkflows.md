@@ -82,7 +82,7 @@ task = Task(
     probe=LinearProbe(epochs=100, seed=7),
 )
 
-result = run_task_on_layer(task, embeddings_by_id, layer_index=33)
+result = run_task_on_layer(task=task, embeddings=embeddings_by_id, layer_index=33)
 print(result.metrics)
 ```
 
@@ -101,7 +101,7 @@ task = Task(
     probe=LinearProbe(epochs=100, seed=7),
 )
 
-result = run_task_on_layer(task, residue_embeddings_by_id, layer_index=33)
+result = run_task_on_layer(task=task, embeddings=residue_embeddings_by_id, layer_index=33)
 print(result.metrics)
 ```
 

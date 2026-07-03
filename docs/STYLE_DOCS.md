@@ -221,6 +221,8 @@ All documentation lives under `docs/`. One file per module or subsystem.
 | `AgentQuickStart.md` | Fast orientation for coding agents |
 | `AgentWorkflows.md` | Common coding-agent task recipes |
 | `AgentApiMap.md` | Public API map for coding agents |
+| `AgentExamplePrompts.md` | Example prompts for coding agents |
+| `examples/` | Code examples paired with agent prompts |
 | `GettingStarted.md` | First-use tutorial for all modules |
 | `Embeddings.md` | Embedding generation |
 | `Probing.md` | Probing tasks and benchmarks |
