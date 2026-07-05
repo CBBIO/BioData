@@ -1,8 +1,4 @@
-"""Helpers to access the BioData PostgreSQL database with pgvector support.
-
-This module is tailored to the BioData schema described in ``Info.txt``.
-It focuses on embedding search and GO annotation retrieval.
-"""
+"""Helpers to access BioData PostgreSQL embeddings and GO annotations."""
 
 from __future__ import annotations
 
@@ -360,6 +356,12 @@ class BioDataClient:
         if row is None:
             return None
         return next(iter(row.values()))
+
+    def execute(self, sql: str, params: Params = None) -> None:
+        """Execute a SQL statement that does not return rows."""
+        conn = self._require_connection()
+        with _cursor(conn) as cur:
+            cur.execute(sql, params or ())
 
     def health_check(
         self,

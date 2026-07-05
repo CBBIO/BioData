@@ -11,9 +11,9 @@ import CBBIO.BioData as bd
 
 _RUN_HINT = (
     "Integration tests are skipped. To run them:\n"
-    "1) Copy config_test.yaml.example to config_test.yaml and edit credentials.\n"
+    "1) Copy tests/assets/config_test.yaml.example to config_test.yaml and edit credentials.\n"
     "2) Ensure PostgreSQL is running and reachable.\n"
-    "3) Ensure BioData schema is loaded (schema.sql).\n"
+    "3) Ensure BioData schema is loaded (sql/schema.sql).\n"
     "4) Run: poetry run pytest -q tests/test_biodata_integration.py"
 )
 

@@ -144,7 +144,7 @@ Every `EmbeddingGenerator` subclass defines:
 ```python
 from CBBIO import load_go, load_taxonomy, read_annotations_tsv
 
-go = load_go("go-basic.obo")
+go = load_go("notebooks/data/go-basic.obo")
 annotations = read_annotations_tsv("protein_go.tsv")
 go.prepare_term_counts(annotations)
 

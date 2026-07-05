@@ -29,7 +29,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--json",
         type=Path,
-        default=_SCRIPT_REPO_ROOT / "benchmark_embedding_batching_strategies.json",
+        default=_SCRIPT_REPO_ROOT / "notebooks" / "data" / "benchmark_embedding_batching_strategies.json",
         help="Benchmark JSON path.",
     )
     parser.add_argument(

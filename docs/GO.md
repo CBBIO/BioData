@@ -5,10 +5,10 @@
 ```python
 from CBBIO import load_go, read_annotations_tsv
 
-onto = load_go("go-basic.obo")
+onto = load_go("notebooks/data/go-basic.obo")
 ```
 
-Download a current OBO file from the Gene Ontology website or use the one in this repo (`go-basic.obo`).
+Download a current OBO file from the Gene Ontology website or use the one in this repo (`notebooks/data/go-basic.obo`).
 
 ---
 
@@ -18,7 +18,7 @@ Download a current OBO file from the Gene Ontology website or use the one in thi
 from CBBIO import load_go
 
 onto = load_go(
-    "go-basic.obo",
+    "notebooks/data/go-basic.obo",
     load_obsolete=False,   # set True to include deprecated terms
     quiet=True,            # suppress goatools parser output
 )
@@ -80,7 +80,7 @@ You need annotation data to compute IC. Load annotations from a TSV file (one `e
 ```python
 from CBBIO import load_go, read_annotations_tsv
 
-onto = load_go("go-basic.obo")
+onto = load_go("notebooks/data/go-basic.obo")
 annotations = read_annotations_tsv("annotations.tsv")
 # → {"P12345": {"GO:0006355", "GO:0003700"}, ...}
 
@@ -160,7 +160,7 @@ Compute functional similarity between two proteins based on their GO annotations
 from CBBIO import connect, load_go, read_annotations_tsv
 
 client = connect()
-onto   = load_go("go-basic.obo")
+onto   = load_go("notebooks/data/go-basic.obo")
 
 # Fetch all GO IDs in the database (use as corpus for IC)
 all_go_ids = client.fetch_protein_go_ids()    # {protein_id: {go_id, ...}}

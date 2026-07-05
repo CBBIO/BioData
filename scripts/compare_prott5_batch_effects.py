@@ -25,6 +25,7 @@ from CBBIO.types import DistanceMetric, Neighbor, SearchBackend
 
 DEFAULT_MODEL_NAME = "Rostlab/prot_t5_xl_uniref50"
 DEFAULT_BATCH_SIZES = [1, 10, 50]
+DEFAULT_FASTA_PATH = _SCRIPT_REPO_ROOT / "scripts" / "data" / "random_protein_ids_10000_lenle1000.fasta"
 
 
 def _parse_args() -> argparse.Namespace:
@@ -34,7 +35,12 @@ def _parse_args() -> argparse.Namespace:
             "compare pooled embeddings numerically, and optionally compare top-k neighbor results."
         ),
     )
-    parser.add_argument("--fasta", type=Path, required=True, help="Input FASTA file.")
+    parser.add_argument(
+        "--fasta",
+        type=Path,
+        default=DEFAULT_FASTA_PATH,
+        help=f"Input FASTA file. Default: {DEFAULT_FASTA_PATH.relative_to(_SCRIPT_REPO_ROOT)}",
+    )
     parser.add_argument(
         "--count",
         type=int,

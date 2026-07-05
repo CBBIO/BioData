@@ -18,14 +18,14 @@ import argparse
 import re
 import sys
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Any, Sequence, cast
 
 # Force local repo import before site-packages when running this script directly.
 _SCRIPT_REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_SCRIPT_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_REPO_ROOT))
 
-from CBBIO.BioData import BioDataClient, _embedding_dimension
+from CBBIO.BioData import BioDataClient, BioDataError
 
 try:
     from psycopg.errors import DiskFull
@@ -33,7 +33,7 @@ except ModuleNotFoundError:  # pragma: no cover - script dependency path
     DiskFull = None  # type: ignore[assignment]
 
 
-METRIC_OPCLASS: Dict[str, str] = {
+METRIC_OPCLASS: dict[str, str] = {
     "l2": "halfvec_l2_ops",
     "cosine": "halfvec_cosine_ops",
     "inner_product": "halfvec_ip_ops",
@@ -42,6 +42,35 @@ METRIC_OPCLASS: Dict[str, str] = {
 
 def _slug(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", value.strip().lower()).strip("_")
+
+
+def _embedding_dimension(value: Any) -> int:
+    dimensions_attr = getattr(value, "dimensions", None)
+    if callable(dimensions_attr):
+        try:
+            dimension = int(cast(Any, dimensions_attr)())
+            if dimension >= 1:
+                return dimension
+        except (TypeError, ValueError):
+            pass
+
+    to_list_attr = getattr(value, "to_list", None)
+    if callable(to_list_attr):
+        try:
+            values = cast(Sequence[Any], cast(Any, to_list_attr)())
+            dimension = int(len(values))
+            if dimension >= 1:
+                return dimension
+        except (TypeError, ValueError):
+            pass
+
+    try:
+        dimension = int(len(value))
+    except (TypeError, ValueError) as exc:
+        raise BioDataError("Could not infer embedding dimension from a sequence_embeddings row.") from exc
+    if dimension < 1:
+        raise BioDataError("Embedding dimension must be >= 1.")
+    return dimension
 
 
 def _parse_args() -> argparse.Namespace:
@@ -91,7 +120,7 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = _parse_args()
-    created: List[Tuple[str, int, str]] = []
+    created: list[tuple[str, int, str]] = []
     selected_embedding_ids = (
         {int(value) for value in args.embedding_type_id}
         if args.embedding_type_id
@@ -103,64 +132,62 @@ def main() -> None:
         embedding_types = client.list_embedding_types()
         if selected_embedding_ids is not None:
             embedding_types = [emb for emb in embedding_types if int(emb.id) in selected_embedding_ids]
-        conn = client._require_connection()  # noqa: SLF001 - local maintenance script
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT set_config('max_parallel_maintenance_workers', %s, false);",
-                (str(max(0, int(args.max_parallel_maintenance_workers))),),
+        client.execute(
+            "SELECT set_config('max_parallel_maintenance_workers', %s, false);",
+            (str(max(0, int(args.max_parallel_maintenance_workers))),),
+        )
+        client.execute(
+            "SELECT set_config('max_parallel_workers_per_gather', %s, false);",
+            (str(max(0, int(args.max_parallel_workers_per_gather))),),
+        )
+        if args.maintenance_work_mem:
+            client.execute(
+                "SELECT set_config('maintenance_work_mem', %s, false);",
+                (str(args.maintenance_work_mem).strip(),),
             )
-            cur.execute(
-                "SELECT set_config('max_parallel_workers_per_gather', %s, false);",
-                (str(max(0, int(args.max_parallel_workers_per_gather))),),
-            )
-            if args.maintenance_work_mem:
-                cur.execute(
-                    "SELECT set_config('maintenance_work_mem', %s, false);",
-                    (str(args.maintenance_work_mem).strip(),),
-                )
 
-            for emb in embedding_types:
-                emb_id = int(emb.id)
-                emb_slug = _slug(str(emb.name))
-                row = client.query_one(
-                    """
-                    SELECT embedding
-                    FROM sequence_embeddings
-                    WHERE embedding_type_id = %s
-                      AND layer_index = %s
-                    LIMIT 1;
-                    """,
-                    (emb_id, layer_index),
+        for emb in embedding_types:
+            emb_id = int(emb.id)
+            emb_slug = _slug(str(emb.name))
+            row = client.query_one(
+                """
+                SELECT embedding
+                FROM sequence_embeddings
+                WHERE embedding_type_id = %s
+                  AND layer_index = %s
+                LIMIT 1;
+                """,
+                (emb_id, layer_index),
+            )
+            if row is None or row.get("embedding") is None:
+                print(
+                    f"- skipping embedding_type_id={emb_id} ({emb.name}): "
+                    f"no layer {layer_index} embeddings found"
                 )
-                if row is None or row.get("embedding") is None:
-                    print(
-                        f"- skipping embedding_type_id={emb_id} ({emb.name}): "
-                        f"no layer {layer_index} embeddings found"
-                    )
-                    continue
-                dim = int(_embedding_dimension(row["embedding"]))
-                for metric_name in selected_metrics:
-                    opclass = METRIC_OPCLASS[metric_name]
-                    index_name = f"ix_seqemb_e{emb_id}_{emb_slug}_l{layer_index}_hnsw_{metric_name}"
-                    sql = (
-                        f"CREATE INDEX IF NOT EXISTS {index_name} "
-                        "ON public.sequence_embeddings "
-                        f"USING hnsw ((embedding::halfvec({dim})) {opclass}) "
-                        f"WHERE embedding_type_id = {emb_id} AND layer_index = {layer_index};"
-                    )
-                    try:
-                        cur.execute(sql)
-                    except Exception as exc:
-                        if DiskFull is not None and isinstance(exc, DiskFull):
-                            raise SystemExit(
-                                "PostgreSQL ran out of Docker shared memory while building the HNSW index.\n"
-                                "Try either:\n"
-                                "  1. restart the container with a larger shared-memory segment, e.g. --shm-size=1g\n"
-                                "  2. rerun this script with parallel workers disabled (already the default here)\n"
-                                "  3. optionally lower build memory, e.g. --maintenance-work-mem 128MB\n"
-                            ) from exc
-                        raise
-                    created.append((str(emb.name), emb_id, metric_name))
+                continue
+            dim = int(_embedding_dimension(row["embedding"]))
+            for metric_name in selected_metrics:
+                opclass = METRIC_OPCLASS[metric_name]
+                index_name = f"ix_seqemb_e{emb_id}_{emb_slug}_l{layer_index}_hnsw_{metric_name}"
+                sql = (
+                    f"CREATE INDEX IF NOT EXISTS {index_name} "
+                    "ON public.sequence_embeddings "
+                    f"USING hnsw ((embedding::halfvec({dim})) {opclass}) "
+                    f"WHERE embedding_type_id = {emb_id} AND layer_index = {layer_index};"
+                )
+                try:
+                    client.execute(sql)
+                except Exception as exc:
+                    if DiskFull is not None and isinstance(exc, DiskFull):
+                        raise SystemExit(
+                            "PostgreSQL ran out of Docker shared memory while building the HNSW index.\n"
+                            "Try either:\n"
+                            "  1. restart the container with a larger shared-memory segment, e.g. --shm-size=1g\n"
+                            "  2. rerun this script with parallel workers disabled (already the default here)\n"
+                            "  3. optionally lower build memory, e.g. --maintenance-work-mem 128MB\n"
+                        ) from exc
+                    raise
+                created.append((str(emb.name), emb_id, metric_name))
 
     print("Index creation statements executed:")
     for emb_name, emb_id, metric_name in created:

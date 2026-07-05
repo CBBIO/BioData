@@ -13,9 +13,11 @@ Utilities for working with a PostgreSQL BioData database, protein language model
 | `CBBIO/GO.py` | GO ontology utilities (`GOOntology`) built on `goatools` |
 | `CBBIO/Taxonomy.py` | Taxonomy utilities (`TaxonomyOntology`) for NCBI taxdump |
 | `CBBIO/similarity.py` | Pairwise sequence alignment via `parasail` |
-| `schema.sql` | Database schema |
+| `sql/schema.sql` | Database schema |
 | `config.yaml` | Default DB / search configuration |
 | `docs/` | Full documentation for all modules |
+| `notebooks/data/` | Small notebook input assets tracked with the repo |
+| `tests/assets/` | Test configuration templates and fixtures |
 
 ---
 
@@ -85,7 +87,7 @@ docker run -d --name pgvectorsql \
 PGPASSWORD=secret psql -h localhost -U biodata -d biodata \
   -c "CREATE EXTENSION IF NOT EXISTS vector;"
 
-PGPASSWORD=secret psql -h localhost -U biodata -d biodata -f schema.sql
+PGPASSWORD=secret psql -h localhost -U biodata -d biodata -f sql/schema.sql
 ```
 
 ### 3. Restore a dataset (optional)
@@ -160,7 +162,7 @@ poetry run pytest -q
 ### Integration tests (real DB required)
 
 ```bash
-cp config_test.yaml.example config_test.yaml
+cp tests/assets/config_test.yaml.example config_test.yaml
 # edit with your test DB credentials
 poetry run pytest -q tests/test_biodata_integration.py
 ```

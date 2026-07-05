@@ -10,7 +10,7 @@ Usage
 -----
 Edit the CONFIG block below to plug in your generator, then run:
 
-    python benchmark_embedding_speed.py
+    python scripts/benchmark_embedding_speed.py
 
 The script prints two outputs:
   1. Black-box timing  – full generate() call for each mode.
@@ -27,7 +27,8 @@ from typing import Any, List, Sequence
 from tqdm import tqdm
 
 # ── CONFIG ───────────────────────────────────────────────────────────────────
-FASTA_PATH        = Path(__file__).parent / "random_protein_ids_10000.fasta"
+REPO_ROOT         = Path(__file__).resolve().parent.parent
+FASTA_PATH        = REPO_ROOT / "scripts" / "data" / "random_protein_ids_10000_lenle1000.fasta"
 LAYER_INDEX       = -1      # last transformer layer; change as needed
 BATCH_SIZE          = 2    # max proteins per forward pass
 MAX_BATCH_TOKENS    = 32768/2  # mirrors notebook usage; None = fixed BATCH_SIZE only
@@ -116,7 +117,7 @@ def run_step_benchmark(
     Returns a dict of Timer objects, keyed by step name, for each mode.
     """
     import sys, os
-    sys.path.insert(0, str(Path(__file__).parent))
+    sys.path.insert(0, str(REPO_ROOT))
     from CBBIO.embeddings import (                       # private helpers
         _sample_spans_from_model_output,
         _slice_batched_layer_tensor,
@@ -275,7 +276,7 @@ def run_blackbox_benchmark(
 # ── main ─────────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    sys.path.insert(0, str(Path(__file__).parent))
+    sys.path.insert(0, str(REPO_ROOT))
     from CBBIO.embeddings import load_fasta_inputs
     from CBBIO.embeddings.factory import Generator
 

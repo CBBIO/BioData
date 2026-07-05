@@ -12,7 +12,7 @@ Sections
 3. P2 — multiclass_metrics: O(N) confusion matrix vs O(class_count × N) triple scan
 
 Run with:
-    python benchmark_probe_training.py
+    python scripts/benchmark_probe_training.py
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ from typing import Any, Dict, List, Sequence, Tuple
 import numpy as np
 import torch
 
-REPO_ROOT = Path(__file__).parent
+REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 

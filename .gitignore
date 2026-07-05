@@ -8,10 +8,17 @@ config_test.yaml
 taxdump/
 taxdump.tar.gz
 *.fasta
+!scripts/data/
+!scripts/data/random_protein_ids_10000_lenle1000.fasta
 *.pkl
 uniref50_gcrp_reps.fasta.split/*
 go_embedding/*
 *.npy
 uniref*
 notebooks/data/*
+!notebooks/data/go-basic.obo
+!notebooks/data/random_protein_ids.fasta
 .codex
+AGENTS.md
+CLAUDE.md
+GEMINI.md

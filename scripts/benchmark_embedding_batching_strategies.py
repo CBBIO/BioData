@@ -27,6 +27,7 @@ DEFAULT_MODELS = ["protT5", "prostT5", "ankh3", "esm2", "esm1b", "esmc"]
 DEFAULT_BATCH_SIZES = [1, 2, 4, 8]
 DEFAULT_TOKEN_BUDGETS = [4096, 8192, 16384]
 DEFAULT_LENGTH_LIMITS = [None, 512, 1024]
+DEFAULT_FASTA_PATH = _SCRIPT_REPO_ROOT / "scripts" / "data" / "random_protein_ids_10000_lenle1000.fasta"
 
 
 def _default_ints_as_strings(values: Sequence[int]) -> List[str]:
@@ -40,7 +41,12 @@ def _parse_args() -> argparse.Namespace:
             "and optional protein length limits."
         ),
     )
-    parser.add_argument("--fasta", type=Path, required=True, help="Input FASTA file.")
+    parser.add_argument(
+        "--fasta",
+        type=Path,
+        default=DEFAULT_FASTA_PATH,
+        help=f"Input FASTA file. Default: {DEFAULT_FASTA_PATH.relative_to(_SCRIPT_REPO_ROOT)}",
+    )
     parser.add_argument(
         "--models",
         nargs="+",
@@ -132,7 +138,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--json-out",
         type=Path,
-        default=_SCRIPT_REPO_ROOT / "benchmark_embedding_batching_strategies.json",
+        default=_SCRIPT_REPO_ROOT / "notebooks" / "data" / "benchmark_embedding_batching_strategies.json",
         help="JSON output path.",
     )
     return parser.parse_args()

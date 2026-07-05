@@ -35,13 +35,13 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--ids-out",
         type=Path,
-        default=_SCRIPT_REPO_ROOT / "random_protein_ids_10000.txt",
+        default=_SCRIPT_REPO_ROOT / "notebooks" / "data" / "random_protein_ids_10000.txt",
         help="Output path for protein IDs.",
     )
     parser.add_argument(
         "--fasta-out",
         type=Path,
-        default=_SCRIPT_REPO_ROOT / "random_protein_ids_10000.fasta",
+        default=_SCRIPT_REPO_ROOT / "notebooks" / "data" / "random_protein_ids_10000.fasta",
         help="Output path for FASTA records.",
     )
     parser.add_argument(

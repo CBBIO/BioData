@@ -27,6 +27,7 @@ from CBBIO.types import DistanceMetric, SearchBackend
 
 DEFAULT_BATCH_SIZES = [1, 10, 100, 1_000]
 DEFAULT_BACKENDS: list[SearchBackend] = ["auto", "pgvector", "faiss_cpu", "torch_gpu", "cuvs_gpu"]
+DEFAULT_FASTA_PATH = _SCRIPT_REPO_ROOT / "scripts" / "data" / "random_protein_ids_10000_lenle1000.fasta"
 
 
 def _parse_args() -> argparse.Namespace:
@@ -36,8 +37,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--fasta",
         type=Path,
-        required=True,
-        help="Input FASTA file containing the query proteins to benchmark.",
+        default=DEFAULT_FASTA_PATH,
+        help=f"Input FASTA file containing the query proteins. Default: {DEFAULT_FASTA_PATH.relative_to(_SCRIPT_REPO_ROOT)}",
     )
     parser.add_argument(
         "--batch-sizes",

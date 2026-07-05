@@ -33,8 +33,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--ids-file",
         type=Path,
-        default=_SCRIPT_REPO_ROOT / "random_protein_ids_10000.txt",
-        help="Protein ID pool file. Default: random_protein_ids_10000.txt",
+        default=_SCRIPT_REPO_ROOT / "notebooks" / "data" / "random_protein_ids_10000.txt",
+        help="Protein ID pool file. Default: notebooks/data/random_protein_ids_10000.txt",
     )
     parser.add_argument(
         "--batch-sizes",

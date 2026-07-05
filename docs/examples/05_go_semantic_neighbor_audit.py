@@ -1,7 +1,7 @@
 # Prompt:
 # Write an analysis notebook or script that samples proteins from the BioData database,
 # retrieves nearest neighbors with CBBIO.BioDataClient.find_nearest_neighbors, loads
-# go-basic.obo with CBBIO.load_go, prepares GO term counts from database annotations,
+# notebooks/data/go-basic.obo with CBBIO.load_go, prepares GO term counts from database annotations,
 # and compares embedding distance with GO semantic similarity using Resnik, Lin,
 # Schlicker, and Wang. Produce a Spearman correlation table by embedding type, model
 # layer, ontology aspect, and distance metric. Save the result as markdown and CSV.

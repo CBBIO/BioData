@@ -260,7 +260,7 @@ For the full probing reference, catalog of built-in datasets, and layer sweep ex
 ```python
 from CBBIO import load_go, read_annotations_tsv
 
-onto = load_go("go-basic.obo")
+onto = load_go("notebooks/data/go-basic.obo")
 
 # Information-content based similarity
 annotations = read_annotations_tsv("annotations.tsv")  # protein_id → [GO IDs]
