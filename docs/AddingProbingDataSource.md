@@ -108,8 +108,7 @@ The shared residue dispatch facade also requires these changes:
 
 1. Add the source specification and aliases to `CBBIO/probing/sources/_registry.py`.
 2. Route download and load operations to the provider functions.
-3. Re-export supported compatibility functions through `CBBIO/probing/residue_sources.py`.
-4. Re-export new public functions from `CBBIO/probing/__init__.py` and `CBBIO/__init__.py`.
+3. Re-export new public functions from `CBBIO/probing/__init__.py` and `CBBIO/__init__.py`.
 
 Add a dedicated `DatasetCollection` subclass when the provider cannot use the standard residue
 dispatch behavior. Implement `list_datasets()`, `download()`, and `load()`, then add one instance to

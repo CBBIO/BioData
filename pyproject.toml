@@ -1,6 +1,6 @@
 [project]
 name = "biodata"
-version = "0.5.0"
+version = "0.6.0"
 description = "CBBIO tools for BioData PostgreSQL access and GO semantic analysis"
 authors = [
     {name = "Ildefonso Cases",email = "icases@users.noreply.github.com"}

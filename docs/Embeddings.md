@@ -441,21 +441,6 @@ FASTA helpers also remain:
 - **ESM-1b**: The HuggingFace checkpoint (`facebook/esm-1b`) was trained with post-norm but the HF model code uses pre-norm, which degrades accuracy. The generator loads via `torch.hub` by default to avoid this mismatch.
 - **ESM-C**: Multi-sequence batches require SDK support for batched logits. If the installed SDK rejects them, set `batch_size=1`.
 
-## Deprecated
-
-These wrappers remain compatible but emit `DeprecationWarning` and will be removed soon.
-
-| Deprecated | Replacement |
-| --- | --- |
-| `generate_from_fasta(...)` | `FastaBatcher(...)` + `EmbeddingWriter(format="memory")` + `run_embedding_generation(...)` |
-| `generate_from_fasta_batches(...)` | `FastaBatcher(...)` + `run_embedding_generation(...)`, or low-level `generator.generate_batches(iter_fasta_inputs(...))` |
-| `iter_embedding_records_from_fasta(...)` | `FastaBatcher(...)` + `EmbeddingWriter(format="memory")` + `run_embedding_generation(...)` |
-| `generate_fasta_pickle_shards(...)` | `FastaBatcher(...)` + `EmbeddingWriter(format="pkl")` + `run_embedding_generation(...)` |
-| `generate_fasta_npy_shards(...)` | `FastaBatcher(...)` + `EmbeddingWriter(format="npy")` + `run_embedding_generation(...)` |
-| `generate_fasta_h5(...)` | `FastaBatcher(...)` + `EmbeddingWriter(format="h5")` + `run_embedding_generation(...)` |
-
-The old pooled-generation wrappers were experimental and have been removed. Use `generate(..., pooler=...)`, `generate_batches(..., pooler=...)`, or `run_embedding_generation(..., pooler=...)`.
-
 ## Error Handling
 
 By default, errors on individual proteins are collected and the run continues. Check `result.errors` and `result.skipped` after the run:

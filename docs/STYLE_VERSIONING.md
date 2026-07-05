@@ -21,7 +21,7 @@ Increment when you make a **breaking change** — something that requires a user
 
 Breaking changes include:
 - Removing a public function, class, or parameter
-- Renaming a public function, class, or parameter without a compatibility alias
+- Renaming a public function, class, or parameter
 - Changing the return type or shape of a public function in an incompatible way
 - Changing required parameters or their order
 - Dropping support for a previously supported Python version
@@ -244,24 +244,10 @@ Before tagging a release:
 
 ---
 
-## Deprecation Policy
+## Removal Policy
 
-Before removing or renaming a public name:
-
-1. In the release that introduces the replacement, add a `DeprecationWarning` to the old name pointing to the new one.
-2. Keep the deprecated name for at least one MINOR release.
-3. Remove it in the next MAJOR release (or the next MINOR release during `0.x`).
-
-```python
-import warnings
-
-def generate_from_fasta(path, generator, **kwargs):
-    warnings.warn(
-        "generate_from_fasta() is deprecated. Use FastaBatcher + run_embedding_generation() instead.",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    ...
-```
+Before removing or renaming a public name, account for it in the version bump and update the
+documentation in the same change. CBBIO is pre-1.0, so removals land in the next MINOR release.
+Do not add compatibility aliases for removed names.
 
 Document the deprecation in the relevant doc file and in the commit message.

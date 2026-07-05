@@ -9,12 +9,8 @@ import pytest
 from CBBIO.embeddings import EmbeddingDependencyError, EmbeddingInputError, GenerationInput
 from CBBIO.embeddings.factory import Generator, available_generator_classes, available_generator_models
 from CBBIO.embeddings.models import amplify as amplify_module
-from CBBIO.embeddings_amplify import (
-    AMPLIFY_HF_MODEL_NAMES,
-    AmplifyEmbeddingGenerator,
-    AmplifyPreprocessor,
-    AmplifyTokenizerAdapter,
-)
+from CBBIO.embeddings.models.amplify import AMPLIFY_HF_MODEL_NAMES
+from CBBIO import AmplifyEmbeddingGenerator, AmplifyPreprocessor, AmplifyTokenizerAdapter
 
 
 def _install_fake_transformer_engine(monkeypatch: pytest.MonkeyPatch) -> None:

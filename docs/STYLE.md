@@ -314,8 +314,8 @@ The collection owns each `DatasetMetadata`. The catalog indexes that metadata an
 `load_dataset()` and `download_dataset()` back to the owning collection. Do not duplicate dataset
 metadata in the catalog.
 
-Existing source-specific `list_*`, `download_*`, and `load_*_dataset` functions may remain as
-compatibility facades. New datasets must be reachable through their collection.
+New datasets must be reachable through their collection. Add source-specific functions only when
+the provider needs options that do not fit `load_dataset()` or `download_dataset()`.
 
 ---
 

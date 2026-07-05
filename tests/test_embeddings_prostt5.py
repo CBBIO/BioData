@@ -8,7 +8,7 @@ from typing import Any
 import pytest
 
 from CBBIO.embeddings import EmbeddingDependencyError, EmbeddingInputError, GenerationInput
-from CBBIO.embeddings_prostt5 import ProstT5EmbeddingGenerator, ProstT5Preprocessor
+from CBBIO import ProstT5EmbeddingGenerator, ProstT5Preprocessor
 
 
 class _FakeScalar:

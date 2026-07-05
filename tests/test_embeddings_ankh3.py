@@ -8,7 +8,7 @@ from typing import Any
 import pytest
 
 from CBBIO.embeddings import EmbeddingDependencyError, EmbeddingInputError, GenerationInput
-from CBBIO.embeddings_ankh3 import Ankh3EmbeddingGenerator, Ankh3Preprocessor
+from CBBIO import Ankh3EmbeddingGenerator, Ankh3Preprocessor
 
 
 class _FakeScalar:

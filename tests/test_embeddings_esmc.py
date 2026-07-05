@@ -8,13 +8,12 @@ from typing import Any, Sequence, cast
 import pytest
 
 from CBBIO.embeddings import EmbeddingDependencyError, GenerationInput
-from CBBIO.embeddings_esmc import (
+from CBBIO.embeddings.models.esmc import (
     ESMC_HF_MODEL_NAMES,
     ESMC_SDK_MODEL_NAMES,
-    EsmcEmbeddingGenerator,
-    EsmcPreprocessor,
     register_hf_esmc_architecture,
 )
+from CBBIO import EsmcEmbeddingGenerator, EsmcPreprocessor
 
 
 class _FakeTensor:

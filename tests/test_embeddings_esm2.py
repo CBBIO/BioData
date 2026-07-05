@@ -8,7 +8,8 @@ from typing import Any
 import pytest
 
 from CBBIO.embeddings import EmbeddingDependencyError, GenerationInput
-from CBBIO.embeddings_esm2 import ESM2_HF_MODEL_NAMES, Esm2EmbeddingGenerator, Esm2Preprocessor, Esm2TokenizerAdapter
+from CBBIO.embeddings.models.esm2 import ESM2_HF_MODEL_NAMES
+from CBBIO import Esm2EmbeddingGenerator, Esm2Preprocessor, Esm2TokenizerAdapter
 
 
 class _FakeTensor:

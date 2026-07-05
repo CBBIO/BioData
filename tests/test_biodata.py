@@ -675,8 +675,8 @@ def test_find_nearest_neighbors_auto_pgvector_records_diagnostics(monkeypatch: p
     responses = [_Response(all=[("P1", 0, 0.1)])]
     client, _ = _client_with_fake_conn(responses)
 
-    def _detect(*, device: str | None) -> bd._BackendAvailability:
-        return bd._BackendAvailability(
+    def _detect(*, device: str | None) -> bd.BackendAvailability:
+        return bd.BackendAvailability(
             faiss_gpu=False,
             torch_gpu=False,
             preferred_device=None,
@@ -702,7 +702,7 @@ def test_find_nearest_neighbors_auto_pgvector_records_diagnostics(monkeypatch: p
 
 def test_find_nearest_neighbors_prefers_resident_torch_state(monkeypatch: pytest.MonkeyPatch) -> None:
     client, _ = _client_with_fake_conn([])
-    client._gpu_search_state = bd._GpuSearchState(
+    client._gpu_search_state = bd.GpuSearchState(
         backend="torch_gpu",
         embedding_type_id=3,
         layer_index=0,
@@ -714,8 +714,8 @@ def test_find_nearest_neighbors_prefers_resident_torch_state(monkeypatch: pytest
         vectors=None,
     )
 
-    def _detect(*, device: str | None) -> bd._BackendAvailability:
-        return bd._BackendAvailability(
+    def _detect(*, device: str | None) -> bd.BackendAvailability:
+        return bd.BackendAvailability(
             faiss_gpu=False,
             torch_gpu=True,
             preferred_device="mps",
@@ -749,8 +749,8 @@ def test_find_nearest_neighbors_prefers_resident_torch_state(monkeypatch: pytest
 def test_find_nearest_neighbors_gpu_request_degrades_ann_to_torch(monkeypatch: pytest.MonkeyPatch) -> None:
     client, _ = _client_with_fake_conn([])
 
-    def _detect(*, device: str | None) -> bd._BackendAvailability:
-        return bd._BackendAvailability(
+    def _detect(*, device: str | None) -> bd.BackendAvailability:
+        return bd.BackendAvailability(
             faiss_gpu=False,
             torch_gpu=True,
             preferred_device="mps",
@@ -784,8 +784,8 @@ def test_find_nearest_neighbors_gpu_request_degrades_ann_to_torch(monkeypatch: p
 def test_find_nearest_neighbors_gpu_request_warns_when_faiss_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
     client, _ = _client_with_fake_conn([])
 
-    def _detect(*, device: str | None) -> bd._BackendAvailability:
-        return bd._BackendAvailability(
+    def _detect(*, device: str | None) -> bd.BackendAvailability:
+        return bd.BackendAvailability(
             faiss_gpu=False,
             torch_gpu=True,
             preferred_device="mps",
@@ -816,8 +816,8 @@ def test_find_nearest_neighbors_gpu_request_warns_when_no_accelerator_available(
     responses = [_Response(all=[("P1", 0, 0.1)])]
     client, _ = _client_with_fake_conn(responses)
 
-    def _detect(*, device: str | None) -> bd._BackendAvailability:
-        return bd._BackendAvailability(
+    def _detect(*, device: str | None) -> bd.BackendAvailability:
+        return bd.BackendAvailability(
             faiss_gpu=False,
             torch_gpu=False,
             preferred_device=None,
@@ -843,8 +843,8 @@ def test_find_nearest_neighbors_for_proteins_auto_routes_to_torch_by_batch_size(
     client, _ = _client_with_fake_conn([])
     query_ids = [f"Q{i}" for i in range(8)]
 
-    def _detect(*, device: str | None) -> bd._BackendAvailability:
-        return bd._BackendAvailability(
+    def _detect(*, device: str | None) -> bd.BackendAvailability:
+        return bd.BackendAvailability(
             faiss_gpu=False,
             torch_gpu=True,
             preferred_device="mps",
@@ -887,8 +887,8 @@ def test_find_nearest_neighbors_for_proteins_auto_warns_when_faiss_unavailable(
     client, _ = _client_with_fake_conn([])
     query_ids = [f"Q{i}" for i in range(1000)]
 
-    def _detect(*, device: str | None) -> bd._BackendAvailability:
-        return bd._BackendAvailability(
+    def _detect(*, device: str | None) -> bd.BackendAvailability:
+        return bd.BackendAvailability(
             faiss_gpu=False,
             torch_gpu=True,
             preferred_device="mps",
@@ -925,8 +925,8 @@ def test_find_nearest_neighbors_auto_ann_warns_when_degraded_to_torch(monkeypatc
     client, _ = _client_with_fake_conn([])
     client.backend_thresholds["mps"]["torch_gpu_min_batch"] = 1
 
-    def _detect(*, device: str | None) -> bd._BackendAvailability:
-        return bd._BackendAvailability(
+    def _detect(*, device: str | None) -> bd.BackendAvailability:
+        return bd.BackendAvailability(
             faiss_gpu=False,
             torch_gpu=True,
             preferred_device="mps",
@@ -955,8 +955,8 @@ def test_find_nearest_neighbors_auto_ann_warns_when_degraded_to_torch(monkeypatc
 def test_find_nearest_neighbors_explicit_faiss_unavailable_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     client, _ = _client_with_fake_conn([])
 
-    def _detect(*, device: str | None) -> bd._BackendAvailability:
-        return bd._BackendAvailability(
+    def _detect(*, device: str | None) -> bd.BackendAvailability:
+        return bd.BackendAvailability(
             faiss_gpu=False,
             torch_gpu=False,
             preferred_device=None,
@@ -979,8 +979,8 @@ def test_find_nearest_neighbors_explicit_faiss_unavailable_raises(monkeypatch: p
 def test_find_nearest_neighbors_explicit_faiss_cpu_uses_backend(monkeypatch: pytest.MonkeyPatch) -> None:
     client, _ = _client_with_fake_conn([])
 
-    def _detect(*, device: str | None) -> bd._BackendAvailability:
-        return bd._BackendAvailability(
+    def _detect(*, device: str | None) -> bd.BackendAvailability:
+        return bd.BackendAvailability(
             faiss_gpu=False,
             torch_gpu=False,
             preferred_device=None,
@@ -1014,8 +1014,8 @@ def test_find_nearest_neighbors_explicit_faiss_cpu_uses_backend(monkeypatch: pyt
 def test_find_nearest_neighbors_explicit_faiss_cpu_unavailable_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     client, _ = _client_with_fake_conn([])
 
-    def _detect(*, device: str | None) -> bd._BackendAvailability:
-        return bd._BackendAvailability(
+    def _detect(*, device: str | None) -> bd.BackendAvailability:
+        return bd.BackendAvailability(
             faiss_gpu=False,
             torch_gpu=False,
             preferred_device=None,
@@ -1041,8 +1041,8 @@ def test_find_nearest_neighbors_explicit_faiss_cpu_unavailable_raises(monkeypatc
 def test_find_nearest_neighbors_explicit_cuvs_unavailable_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     client, _ = _client_with_fake_conn([])
 
-    def _detect(*, device: str | None) -> bd._BackendAvailability:
-        return bd._BackendAvailability(
+    def _detect(*, device: str | None) -> bd.BackendAvailability:
+        return bd.BackendAvailability(
             faiss_gpu=False,
             torch_gpu=False,
             preferred_device=None,
@@ -1069,8 +1069,8 @@ def test_find_nearest_neighbors_gpu_request_uses_cuvs_when_faiss_unavailable(
 ) -> None:
     client, _ = _client_with_fake_conn([])
 
-    def _detect(*, device: str | None) -> bd._BackendAvailability:
-        return bd._BackendAvailability(
+    def _detect(*, device: str | None) -> bd.BackendAvailability:
+        return bd.BackendAvailability(
             faiss_gpu=False,
             torch_gpu=True,
             preferred_device="cuda:0",
@@ -1108,8 +1108,8 @@ def test_find_nearest_neighbors_for_proteins_auto_routes_to_cuvs_when_available(
     client, _ = _client_with_fake_conn([])
     query_ids = [f"Q{i}" for i in range(1000)]
 
-    def _detect(*, device: str | None) -> bd._BackendAvailability:
-        return bd._BackendAvailability(
+    def _detect(*, device: str | None) -> bd.BackendAvailability:
+        return bd.BackendAvailability(
             faiss_gpu=False,
             torch_gpu=True,
             preferred_device="cuda:0",
@@ -1153,8 +1153,8 @@ def test_find_nearest_neighbors_for_proteins_auto_falls_back_to_faiss_cpu_when_g
     client, _ = _client_with_fake_conn([])
     query_ids = [f"Q{i}" for i in range(1000)]
 
-    def _detect(*, device: str | None) -> bd._BackendAvailability:
-        return bd._BackendAvailability(
+    def _detect(*, device: str | None) -> bd.BackendAvailability:
+        return bd.BackendAvailability(
             faiss_gpu=False,
             torch_gpu=True,
             preferred_device="cuda:0",
@@ -1205,7 +1205,7 @@ def test_find_nearest_neighbors_for_proteins_auto_chunks_gpu_queries_by_safe_bat
     client, _ = _client_with_fake_conn([])
     query_ids = [f"Q{i}" for i in range(8)]
     seen_chunks: List[int] = []
-    client._gpu_search_state = bd._GpuSearchState(
+    client._gpu_search_state = bd.GpuSearchState(
         backend="cuvs_gpu",
         embedding_type_id=1,
         layer_index=0,
@@ -1217,8 +1217,8 @@ def test_find_nearest_neighbors_for_proteins_auto_chunks_gpu_queries_by_safe_bat
         vectors=None,
     )
 
-    def _detect(*, device: str | None) -> bd._BackendAvailability:
-        return bd._BackendAvailability(
+    def _detect(*, device: str | None) -> bd.BackendAvailability:
+        return bd.BackendAvailability(
             faiss_gpu=False,
             torch_gpu=True,
             preferred_device="cuda:0",
@@ -1270,7 +1270,7 @@ def test_search_torch_state_returns_exact_neighbors_and_respects_exclusions() ->
         [[1.0, 0.0], [0.8, 0.2], [0.0, 1.0]],
         metric="cosine",
     )
-    state = bd._GpuSearchState(
+    state = bd.GpuSearchState(
         backend="torch_gpu",
         embedding_type_id=1,
         layer_index=0,

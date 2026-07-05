@@ -20,17 +20,12 @@ from .datasets import ObjectiveName, ProteinDataset, ResidueDataset
 from .splitters import DatasetSplitter
 
 
-DatasetCatalogEntry = DatasetMetadata
-DatasetCatalogLevel = DatasetLevel
-DatasetCatalogStatus = DatasetStatus
-
-
 def build_dataset_catalog(
     collections: Sequence[DatasetCollection] | None = None,
-) -> dict[str, DatasetCatalogEntry]:
+) -> dict[str, DatasetMetadata]:
     """Build a flattened dataset index from collections."""
     selected = list_dataset_collections() if collections is None else list(collections)
-    catalog: dict[str, DatasetCatalogEntry] = {}
+    catalog: dict[str, DatasetMetadata] = {}
     for collection in selected:
         for dataset in collection.list_datasets():
             if dataset.collection != collection.id:
@@ -44,7 +39,7 @@ def build_dataset_catalog(
     return catalog
 
 
-def get_dataset_catalog_entry(dataset_id: str) -> DatasetCatalogEntry:
+def get_dataset_catalog_entry(dataset_id: str) -> DatasetMetadata:
     """Return one registered dataset specification."""
     key = _normalize_catalog_id(dataset_id)
     entry = DATASET_CATALOG.get(key)
@@ -63,13 +58,13 @@ def list_dataset_catalog(
     category: str | None = None,
     task_class: str | None = None,
     preferred_metric: str | None = None,
-    level: DatasetCatalogLevel | None = None,
+    level: DatasetLevel | None = None,
     objective: ObjectiveName | None = None,
-    status: DatasetCatalogStatus | None = None,
+    status: DatasetStatus | None = None,
     has_download: bool | None = None,
     has_loader: bool | None = None,
     tag: str | None = None,
-) -> list[DatasetCatalogEntry]:
+) -> list[DatasetMetadata]:
     """Return dataset specifications matching the requested metadata."""
     values = list(DATASET_CATALOG.values())
     if collection is not None:
@@ -123,10 +118,10 @@ def search_dataset_catalog(
     collection: str | None = None,
     category: str | None = None,
     task_class: str | None = None,
-    level: DatasetCatalogLevel | None = None,
+    level: DatasetLevel | None = None,
     objective: ObjectiveName | None = None,
-    status: DatasetCatalogStatus | None = None,
-) -> list[DatasetCatalogEntry]:
+    status: DatasetStatus | None = None,
+) -> list[DatasetMetadata]:
     """Search dataset specifications with ranked token matching."""
     tokens = _query_tokens(query)
     if not tokens:
@@ -187,80 +182,14 @@ def load_dataset(
 
 
 def _normalize_catalog_id(dataset_id: str) -> str:
-    text = dataset_id.strip().lower().replace("-", "_")
-    if text.startswith("ec_bench:"):
-        text = f"ecbench:{text.partition(':')[2]}"
-    if text.startswith("ec_benchmark:"):
-        text = f"ecbench:{text.partition(':')[2]}"
-    alias = _legacy_catalog_id_alias(text)
-    if alias is not None:
-        return alias
-    if ":" in text:
-        return text
-    matches = [key for key in DATASET_CATALOG if key.endswith(f":{text}")]
-    if len(matches) == 1:
-        return matches[0]
-    return text
-
-
-def _legacy_catalog_id_alias(dataset_id: str) -> str | None:
-    aliases = {
-        "secondary_structure": "peer:secondary_structure",
-        "dbptm": "dbptm:all",
-        "musitedeep": "musitedeep:all",
-        "disprot": "disprot:all",
-        "biolip": "biolip:all",
-        "metalpdb": "metalpdb:all",
-        "scannet": "scannet:binding",
-        "netsurfp": "netsurfp:secondary_structure",
-        "phosphoelm": "phosphoelm:all",
-        "biolip_all": "biolip:all",
-        "biolip_dna": "biolip:dna",
-        "biolip_rna": "biolip:rna",
-        "biolip_pep": "biolip:pep",
-        "biolip_other": "biolip:other",
-        "cafa5:cafa5_bp": "cafa:cafa5_bp",
-        "cafa5:cafa5_cc": "cafa:cafa5_cc",
-        "cafa5:cafa5_mf": "cafa:cafa5_mf",
-        "cafa5_bp": "cafa:cafa5_bp",
-        "cafa5_cc": "cafa:cafa5_cc",
-        "cafa5_mf": "cafa:cafa5_mf",
-        "go_bp_cafa5": "cafa:cafa5_bp",
-        "go_cc_cafa5": "cafa:cafa5_cc",
-        "go_mf_cafa5": "cafa:cafa5_mf",
-        "cafa5_nk_bp": "cafa:cafa5_no_knowledge_bp",
-        "cafa5_nk_cc": "cafa:cafa5_no_knowledge_cc",
-        "cafa5_nk_mf": "cafa:cafa5_no_knowledge_mf",
-        "cafa5_lk_bp": "cafa:cafa5_limited_bp",
-        "cafa5_lk_cc": "cafa:cafa5_limited_cc",
-        "cafa5_lk_mf": "cafa:cafa5_limited_mf",
-        "cafa5_pk_bp": "cafa:cafa5_partial_bp",
-        "cafa5_pk_cc": "cafa:cafa5_partial_cc",
-        "cafa5_pk_mf": "cafa:cafa5_partial_mf",
-        "cafa5_nk_after_t0_bp": "cafa:cafa5_no_knowledge_after_t0_bp",
-        "cafa5_nk_after_t0_cc": "cafa:cafa5_no_knowledge_after_t0_cc",
-        "cafa5_nk_after_t0_mf": "cafa:cafa5_no_knowledge_after_t0_mf",
-        "cafa5_lk_after_t0_bp": "cafa:cafa5_limited_after_t0_bp",
-        "cafa5_lk_after_t0_cc": "cafa:cafa5_limited_after_t0_cc",
-        "cafa5_lk_after_t0_mf": "cafa:cafa5_limited_after_t0_mf",
-        "cafa5_pk_after_t0_bp": "cafa:cafa5_partial_after_t0_bp",
-        "cafa5_pk_after_t0_cc": "cafa:cafa5_partial_after_t0_cc",
-        "cafa5_pk_after_t0_mf": "cafa:cafa5_partial_after_t0_mf",
-        "phosphoelm_all": "phosphoelm:all",
-        "phosphoelm_ltp": "phosphoelm:ltp",
-        "phosphoelm_htp": "phosphoelm:htp",
-        "scannet_binding": "scannet:binding",
-    }
-    if dataset_id.startswith("source:"):
-        return aliases.get(dataset_id.partition(":")[2])
-    return aliases.get(dataset_id)
+    return dataset_id.strip().lower()
 
 
 def _query_tokens(query: str) -> tuple[str, ...]:
     return tuple(token for token in query.strip().lower().replace("-", "_").split() if token)
 
 
-def _catalog_search_score(entry: DatasetCatalogEntry, tokens: tuple[str, ...]) -> int:
+def _catalog_search_score(entry: DatasetMetadata, tokens: tuple[str, ...]) -> int:
     exact_fields = {
         entry.id.lower(),
         entry.name.lower(),
@@ -306,15 +235,12 @@ def _catalog_search_score(entry: DatasetCatalogEntry, tokens: tuple[str, ...]) -
     return score
 
 
-DATASET_CATALOG: dict[str, DatasetCatalogEntry] = build_dataset_catalog()
+DATASET_CATALOG: dict[str, DatasetMetadata] = build_dataset_catalog()
 
 
 __all__ = [
     "DATASET_CATALOG",
     "DATASET_COLLECTIONS",
-    "DatasetCatalogEntry",
-    "DatasetCatalogLevel",
-    "DatasetCatalogStatus",
     "build_dataset_catalog",
     "download_dataset",
     "get_dataset_catalog_entry",

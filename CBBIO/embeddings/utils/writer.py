@@ -362,73 +362,12 @@ class _H5EmbeddingWriter:
             return
 
         payload_kinds = [_payload_kind_from_shape(record.shape) for record in normalized]
-        if self._should_use_legacy_vector_schema(payload_kinds):
-            self._append_legacy_vectors(_vector_records(normalized), np)
-        else:
-            self._append_extended_payloads(normalized, payload_kinds, np)
+        self._append_extended_payloads(normalized, payload_kinds, np)
 
         self.record_count = int(self.handle.attrs.get("record_count", 0))
         self._append_count += 1
         if self.flush_interval > 0 and self._append_count % self.flush_interval == 0:
             self.handle.flush()
-
-    def _should_use_legacy_vector_schema(self, payload_kinds: Sequence[str]) -> bool:
-        if any(kind != "vector" for kind in payload_kinds):
-            return False
-        return "payload_kind" not in self.handle
-
-    def _append_legacy_vectors(self, records: Sequence[EmbeddingRecord], np: Any) -> None:
-        self._has_vectors = True
-        matrix = np.stack([np.asarray(record.embedding, dtype=np.float32) for record in records])
-        ids = [record.id for record in records]
-        layer_indices = np.array([int(record.layer_index) for record in records], dtype=np.int32)
-        model_refs = [record.model_reference for record in records]
-        pool_methods = [_pool_method_from_record(record, payload_kind="vector") for record in records]
-
-        if "embeddings" not in self.handle:
-            dim = int(matrix.shape[1])
-            string_dtype = self._h5py.string_dtype(encoding="utf-8")
-            self.handle.create_dataset(
-                "embeddings",
-                data=matrix,
-                maxshape=(None, dim),
-                chunks=True,
-                compression=self.compression,
-            )
-            self.handle.create_dataset("ids", data=ids, maxshape=(None,), dtype=string_dtype, chunks=True)
-            self.handle.create_dataset("layer_index", data=layer_indices, maxshape=(None,), chunks=True)
-            self.handle.create_dataset(
-                "model_reference",
-                data=model_refs,
-                maxshape=(None,),
-                dtype=string_dtype,
-                chunks=True,
-            )
-            self.handle.create_dataset("pool_method", data=pool_methods, maxshape=(None,), dtype=string_dtype, chunks=True)
-            record_count = int(matrix.shape[0])
-        else:
-            embeddings = self.handle["embeddings"]
-            if int(embeddings.shape[1]) != int(matrix.shape[1]):
-                raise EmbeddingInputError(
-                    f"HDF5 embedding dimension mismatch: file has {embeddings.shape[1]}, new batch has {matrix.shape[1]}."
-                )
-            old_size = int(embeddings.shape[0])
-            new_size = old_size + int(matrix.shape[0])
-            for dataset_name in ("embeddings", "ids", "layer_index", "model_reference"):
-                shape = (new_size, matrix.shape[1]) if dataset_name == "embeddings" else (new_size,)
-                self.handle[dataset_name].resize(shape)
-            self._ensure_pool_method_dataset(record_count=old_size)
-            self.handle["pool_method"].resize((new_size,))
-            self.handle["embeddings"][old_size:new_size] = matrix
-            self.handle["ids"][old_size:new_size] = ids
-            self.handle["layer_index"][old_size:new_size] = layer_indices
-            self.handle["model_reference"][old_size:new_size] = model_refs
-            self.handle["pool_method"][old_size:new_size] = pool_methods
-            record_count = new_size
-
-        self.handle.attrs["record_count"] = int(record_count)
-        self.handle.attrs["payload_kind"] = "vector"
-        self.handle.attrs["payload_schema_version"] = 1
 
     def _append_extended_payloads(self, records: Sequence[EmbeddingRecord], payload_kinds: Sequence[str], np: Any) -> None:
         if any(k == "vector" for k in payload_kinds):
@@ -558,10 +497,12 @@ class _H5EmbeddingWriter:
             return
 
         string_dtype = self._h5py.string_dtype(encoding="utf-8")
-        if "ids" not in self.handle:
-            self.handle.create_dataset("ids", data=[], maxshape=(None,), dtype=string_dtype, chunks=True)
-            self.handle.create_dataset("layer_index", data=np.zeros((0,), dtype=np.int32), maxshape=(None,), chunks=True)
-            self.handle.create_dataset("model_reference", data=[], maxshape=(None,), dtype=string_dtype, chunks=True)
+        if "ids" in self.handle:
+            raise EmbeddingInputError("Cannot append to HDF5 files that do not use payload schema version 2.")
+
+        self.handle.create_dataset("ids", data=[], maxshape=(None,), dtype=string_dtype, chunks=True)
+        self.handle.create_dataset("layer_index", data=np.zeros((0,), dtype=np.int32), maxshape=(None,), chunks=True)
+        self.handle.create_dataset("model_reference", data=[], maxshape=(None,), dtype=string_dtype, chunks=True)
 
         record_count = int(self.handle["ids"].shape[0])
         self.handle.create_dataset(
@@ -623,15 +564,10 @@ class _H5EmbeddingWriter:
         if "pool_method" in self.handle:
             return
         string_dtype = self._h5py.string_dtype(encoding="utf-8")
-        if "payload_kind" in self.handle:
-            pool_methods = [
-                "none" if str(kind).strip().lower() == "matrix" else "unknown"
-                for kind in self.handle["payload_kind"].asstr()[:].tolist()
-            ]
-        else:
-            default_kind = str(self.handle.attrs.get("payload_kind", "")).strip().lower()
-            default_pool = "none" if default_kind == "matrix" else "unknown"
-            pool_methods = [default_pool] * int(record_count)
+        pool_methods = [
+            "none" if str(kind).strip().lower() == "matrix" else "unknown"
+            for kind in self.handle["payload_kind"].asstr()[:].tolist()
+        ]
         self.handle.create_dataset(
             "pool_method",
             data=pool_methods,

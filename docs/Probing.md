@@ -90,9 +90,9 @@ task = Task(
 built-in MLP architecture.
 
 `TransferProbe()` is a no-training transfer head for protein-level tasks. By default, it scores
-classes from all training examples with inverse cosine-distance weighted votes and returns the full
-score vector. For multilabel tasks, `threshold=None` keeps the full score vector for AP, Fmax, and
-GO metrics while using `0.5` for fixed prediction metrics.
+classes from all training examples with similarity-weighted votes and returns the full score vector.
+For multilabel tasks, `threshold=None` keeps the full score vector for AP, Fmax, and GO metrics
+while using `0.5` for fixed prediction metrics.
 
 Transfer controls:
 
@@ -102,7 +102,7 @@ Transfer controls:
 | `neighbor_selection` | `"all"` | `"all"`, `"knn"`, `"cutoff_distance"` |
 | `k` | `10` | Used when `neighbor_selection="knn"` |
 | `distance_cutoff` | `None` | Required when `neighbor_selection="cutoff_distance"` |
-| `scoring` | `"weighted_voting"` | `"weighted_voting"`, `"voting"` |
+| `scoring` | `"weighted_voting"` | `"weighted_voting"`, `"nearest_similarity"`, `"voting"` |
 | `threshold` | `None` | Binary and multilabel predictions use `0.5`; score-swept metrics use the full scores |
 | `search_backend` | `"numpy"` | `"numpy"`, `"auto"`, `"faiss_cpu"`, `"faiss_gpu"`, `"cuvs_gpu"`, `"torch_gpu"` |
 | `search_device` | `None` | Accelerator device for non-NumPy backends |
@@ -112,10 +112,16 @@ Transfer controls:
 Non-NumPy transfer backends support `neighbor_selection="knn"`. The default NumPy backend remains
 available for exact `"all"` and `"cutoff_distance"` transfer.
 
+Transfer scoring options:
+
+| Scoring | Meaning |
+|---|---|
+| `"weighted_voting"` | Sum bounded similarity weights for neighbors with each class, then divide by total selected-neighbor weight |
+| `"nearest_similarity"` | Score each class by the highest bounded similarity among selected neighbors that carry that class |
+| `"voting"` | Unweighted selected-neighbor vote fraction |
+
 For XGBoost, CNNs, and other estimators, see
 [Custom Probes](CustomProbes.md).
-
-`ProbeSpec` remains available as a compatibility configuration for existing code.
 
 ---
 
@@ -136,9 +142,8 @@ that provider through one interface for discovery, download, and loading. The ca
 collections into one searchable index. `load_dataset()` resolves a qualified dataset ID and delegates
 to the owning collection.
 
-Source-specific functions such as `load_peer_dataset()` and `load_residue_source_dataset()` remain
-available as compatibility facades. New code can use `load_dataset()` when it does not need a
-provider-specific option.
+Use `load_dataset()` for catalog-backed datasets. Use source-specific loaders only when you need
+provider-specific options.
 
 Key `DatasetMetadata` fields:
 
@@ -177,8 +182,6 @@ print([dataset.id for dataset in biolip.list_datasets()])
 | `go` | Generated Gene Ontology function-prediction tasks |
 | `cafa` | CAFA5 Kaggle Gene Ontology prediction training and target-subset data |
 | `dtu` | DTU in-house annotation services |
-
-`DatasetCatalogEntry` remains as a compatibility alias for `DatasetMetadata`.
 
 See [Adding a Probing Data Source](AddingProbingDataSource.md) to implement and register another
 provider.
@@ -781,10 +784,9 @@ print(report.removed_count)
 | `recall_at_fmax` | Micro-recall at the best threshold |
 
 GO tasks additionally report propagated metrics. `go_macro_fmax`, `go_macro_precision_at_fmax`,
-and `go_macro_recall_at_fmax` use protein-centric macro averaging; `go_fmax`,
-`go_precision_at_fmax`, and `go_recall_at_fmax` remain compatibility aliases for those macro
-values. `go_micro_fmax`, `go_micro_precision_at_fmax`, and `go_micro_recall_at_fmax` pool
-protein-term decisions before computing precision and recall. `go_propagated_f1`,
+and `go_macro_recall_at_fmax` use protein-centric macro averaging. `go_micro_fmax`,
+`go_micro_precision_at_fmax`, and `go_micro_recall_at_fmax` pool protein-term decisions before
+computing precision and recall. `go_propagated_f1`,
 `go_propagated_precision`, and `go_propagated_recall` use the probe's fixed prediction threshold
 when one is available. When IA weights are available, CBBIO also reports weighted macro and micro
 Fmax plus the semantic-distance metrics `go_weighted_smin`,

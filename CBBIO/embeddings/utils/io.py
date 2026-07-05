@@ -6,20 +6,14 @@ from collections.abc import Iterable, Mapping as MappingABC
 from dataclasses import dataclass
 import pickle
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Literal, Sequence, Tuple, cast
-import warnings
+from typing import Any, Dict, List, Sequence, Tuple, cast
 
 from .. import (
     EmbeddingDependencyError,
-    EmbeddingGenerator,
     EmbeddingInputError,
     EmbeddingPayload,
     EmbeddingRecord,
-    FastaEmbeddingH5Result,
-    FastaEmbeddingNpyShardResult,
-    FastaEmbeddingPickleShardResult,
     H5WriteResult,
-    LayerSelection,
     NpyShardWriteResult,
     PicklePayloadFormat,
     PickleShardWriteResult,
@@ -27,14 +21,6 @@ from .. import (
 )
 from .pooler import mean_pool_embedding_record
 from .writer import _H5EmbeddingWriter, _normalize_embedding_record  # pyright: ignore[reportPrivateUsage]
-
-
-def _warn_deprecated(name: str, replacement: str) -> None:
-    warnings.warn(
-        f"{name} is deprecated and will be removed soon. Use {replacement} instead.",
-        DeprecationWarning,
-        stacklevel=3,
-    )
 
 
 def load_embedding_records(
@@ -144,184 +130,6 @@ def save_embedding_records_pickle_shards(
         record_count += len(pending)
 
     return PickleShardWriteResult(paths=paths, record_count=record_count)
-
-
-def generate_fasta_pickle_shards(
-    path: str | Path,
-    generator: EmbeddingGenerator,
-    output_path: str | Path,
-    *,
-    batch_size: int,
-    records_per_shard: int,
-    layer_index: LayerSelection = 0,
-    fail_fast: bool = False,
-    id_from: Literal["record_id", "description"] = "record_id",
-    payload_format: PicklePayloadFormat = "records",
-    max_batch_tokens: int | None = None,
-    max_records: int | None = None,
-    max_sequence_length: int | None = None,
-    length_sort_window: int | None = None,
-    skipped_path: str | Path | None = None,
-    pool: Literal["mean", "none"] = "mean",
-    progress_callback: Callable[[Dict[str, Any]], None] | None = None,
-) -> FastaEmbeddingPickleShardResult:
-    """Deprecated wrapper around the embedding job API."""
-    _warn_deprecated("generate_fasta_pickle_shards", "FastaBatcher + EmbeddingWriter(format='pkl') + run_embedding_generation")
-    from .batcher import FastaBatcher
-    from .jobs import run_embedding_generation
-    from .pooler import pooler_factory
-    from .writer import EmbeddingWriter
-
-    batcher = FastaBatcher(
-        path,
-        batch_size=batch_size,
-        max_batch_tokens=max_batch_tokens,
-        limit=max_records,
-        length_sort_window=length_sort_window,
-        max_sequence_length=max_sequence_length,
-        skipped_path=skipped_path,
-        id_from=id_from,
-    )
-    writer = EmbeddingWriter(
-        format="pkl",
-        path=output_path,
-        records_per_shard=records_per_shard,
-        payload_format=payload_format,
-    )
-    state = run_embedding_generation(
-        generator,
-        batcher,
-        writer,
-        layer_index=layer_index,
-        pooler=pooler_factory(pool),
-        fail_fast=fail_fast,
-        progress_callback=progress_callback,
-    )
-    return FastaEmbeddingPickleShardResult(
-        paths=state.paths,
-        record_count=state.record_count,
-        error_count=state.error_count,
-        skipped_count=state.skipped_count,
-        errors=state.errors,
-        skipped=state.skipped,
-    )
-
-
-def generate_fasta_npy_shards(
-    path: str | Path,
-    generator: EmbeddingGenerator,
-    output_path: str | Path,
-    *,
-    batch_size: int,
-    records_per_shard: int,
-    layer_index: LayerSelection = 0,
-    fail_fast: bool = False,
-    id_from: Literal["record_id", "description"] = "record_id",
-    max_batch_tokens: int | None = None,
-    max_records: int | None = None,
-    max_sequence_length: int | None = None,
-    length_sort_window: int | None = None,
-    skipped_path: str | Path | None = None,
-    pool: Literal["mean", "none"] = "mean",
-    progress_callback: Callable[[Dict[str, Any]], None] | None = None,
-) -> FastaEmbeddingNpyShardResult:
-    """Deprecated wrapper around the embedding job API."""
-    _warn_deprecated("generate_fasta_npy_shards", "FastaBatcher + EmbeddingWriter(format='npy') + run_embedding_generation")
-    from .batcher import FastaBatcher
-    from .jobs import run_embedding_generation
-    from .pooler import pooler_factory
-    from .writer import EmbeddingWriter
-
-    batcher = FastaBatcher(
-        path,
-        batch_size=batch_size,
-        max_batch_tokens=max_batch_tokens,
-        limit=max_records,
-        length_sort_window=length_sort_window,
-        max_sequence_length=max_sequence_length,
-        skipped_path=skipped_path,
-        id_from=id_from,
-    )
-    writer = EmbeddingWriter(format="npy", path=output_path, records_per_shard=records_per_shard)
-    state = run_embedding_generation(
-        generator,
-        batcher,
-        writer,
-        layer_index=layer_index,
-        pooler=pooler_factory(pool),
-        fail_fast=fail_fast,
-        progress_callback=progress_callback,
-    )
-    return FastaEmbeddingNpyShardResult(
-        paths=state.paths,
-        id_paths=state.id_paths,
-        record_count=state.record_count,
-        error_count=state.error_count,
-        skipped_count=state.skipped_count,
-        errors=state.errors,
-        skipped=state.skipped,
-    )
-
-
-def generate_fasta_h5(
-    path: str | Path,
-    generator: EmbeddingGenerator,
-    output_path: str | Path,
-    *,
-    batch_size: int,
-    layer_index: LayerSelection = 0,
-    fail_fast: bool = False,
-    id_from: Literal["record_id", "description"] = "record_id",
-    max_batch_tokens: int | None = None,
-    max_records: int | None = None,
-    max_sequence_length: int | None = None,
-    length_sort_window: int | None = None,
-    skipped_path: str | Path | None = None,
-    pool: Literal["mean", "none"] = "mean",
-    compression: str | None = "gzip",
-    write_batch_size: int = 1,
-    progress_callback: Callable[[Dict[str, Any]], None] | None = None,
-) -> FastaEmbeddingH5Result:
-    """Deprecated wrapper around the embedding job API."""
-    _warn_deprecated("generate_fasta_h5", "FastaBatcher + EmbeddingWriter(format='h5') + run_embedding_generation")
-    from .batcher import FastaBatcher
-    from .jobs import run_embedding_generation
-    from .pooler import pooler_factory
-    from .writer import EmbeddingWriter
-
-    batcher = FastaBatcher(
-        path,
-        batch_size=batch_size,
-        max_batch_tokens=max_batch_tokens,
-        limit=max_records,
-        length_sort_window=length_sort_window,
-        max_sequence_length=max_sequence_length,
-        skipped_path=skipped_path,
-        id_from=id_from,
-    )
-    writer = EmbeddingWriter(
-        format="h5",
-        path=output_path,
-        compression=compression,
-        write_batch_size=write_batch_size,
-    )
-    state = run_embedding_generation(
-        generator,
-        batcher,
-        writer,
-        layer_index=layer_index,
-        pooler=pooler_factory(pool),
-        fail_fast=fail_fast,
-        progress_callback=progress_callback,
-    )
-    return FastaEmbeddingH5Result(
-        path=Path(output_path),
-        record_count=state.record_count,
-        error_count=state.error_count,
-        skipped_count=state.skipped_count,
-        errors=state.errors,
-        skipped=state.skipped,
-    )
 
 
 def save_embedding_records_npy(
@@ -1231,8 +1039,5 @@ __all__ = [
     "save_embedding_records_npy",
     "save_embedding_records_npy_shards",
     "save_embedding_records_h5",
-    "generate_fasta_pickle_shards",
-    "generate_fasta_npy_shards",
-    "generate_fasta_h5",
     "mean_pool_embedding_record",
 ]

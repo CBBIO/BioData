@@ -37,7 +37,11 @@ from .tasks import PredictionSpec, ProbeKind, ProbeSpec
 DEFAULT_RESIDUE_BATCH_SIZE = 8192
 TransferDistance: TypeAlias = Literal["cosine", "euclidean"]
 TransferNeighborSelection: TypeAlias = Literal["knn", "all", "cutoff_distance"]
-TransferScoring: TypeAlias = Literal["voting", "weighted_voting"]
+TransferScoring: TypeAlias = Literal[
+    "voting",
+    "weighted_voting",
+    "nearest_similarity",
+]
 TransferSearchBackend: TypeAlias = Literal[
     "numpy",
     "auto",
@@ -183,8 +187,15 @@ class TransferProbe(ProbeBackend):
             )
         if self.distance_cutoff is not None and self.distance_cutoff < 0.0:
             raise EmbeddingInputError("TransferProbe.distance_cutoff must be >= 0 when provided.")
-        if self.scoring not in {"voting", "weighted_voting"}:
-            raise EmbeddingInputError("TransferProbe.scoring must be one of: voting, weighted_voting.")
+        if self.scoring not in {
+            "voting",
+            "weighted_voting",
+            "nearest_similarity",
+        }:
+            raise EmbeddingInputError(
+                "TransferProbe.scoring must be one of: voting, weighted_voting, "
+                "nearest_similarity."
+            )
         if self.search_backend not in {"numpy", "auto", "faiss_cpu", "faiss_gpu", "cuvs_gpu", "torch_gpu"}:
             raise EmbeddingInputError(
                 "TransferProbe.search_backend must be one of: numpy, auto, faiss_cpu, faiss_gpu, cuvs_gpu, torch_gpu."
@@ -228,11 +239,21 @@ class TransferProbe(ProbeBackend):
         scores: Dict[str, ProbeScoreOutput] = {}
         weighted_neighbors = self._weighted_neighbors(data)
         for item, neighbor_weights in weighted_neighbors.items():
-            total = sum(weight for _neighbor_id, _distance, weight in neighbor_weights)
-            score = sum(
-                _as_binary(data.labels[neighbor_id], neighbor_id) * weight
-                for neighbor_id, _distance, weight in neighbor_weights
-            ) / total
+            if self.scoring == "nearest_similarity":
+                score = max(
+                    (
+                        weight
+                        for neighbor_id, _distance, weight in neighbor_weights
+                        if _as_binary(data.labels[neighbor_id], neighbor_id) == 1
+                    ),
+                    default=0.0,
+                )
+            else:
+                total = sum(weight for _neighbor_id, _distance, weight in neighbor_weights)
+                score = sum(
+                    _as_binary(data.labels[neighbor_id], neighbor_id) * weight
+                    for neighbor_id, _distance, weight in neighbor_weights
+                ) / total
             threshold = 0.5 if self.threshold is None else self.threshold
             scores[item] = float(score)
             predictions[item] = 1 if score >= threshold else 0
@@ -267,7 +288,6 @@ class TransferProbe(ProbeBackend):
         scores: Dict[str, ProbeScoreOutput] = {}
         weighted_neighbors = self._weighted_neighbors(data)
         for item, neighbor_weights in weighted_neighbors.items():
-            total = sum(weight for _neighbor_id, _distance, weight in neighbor_weights)
             votes = dict.fromkeys(classes, 0.0)
             for neighbor_id, _distance, weight in neighbor_weights:
                 for label in _as_multilabel(data.labels[neighbor_id], neighbor_id):
@@ -275,8 +295,15 @@ class TransferProbe(ProbeBackend):
                         raise EmbeddingInputError(
                             f"Unknown multilabel class {label!r} for training example {neighbor_id!r}."
                         )
-                    votes[label] += weight
-            row = [votes[label] / total for label in classes]
+                    if self.scoring == "nearest_similarity":
+                        votes[label] = max(votes[label], weight)
+                    else:
+                        votes[label] += weight
+            if self.scoring == "nearest_similarity":
+                row = [votes[label] for label in classes]
+            else:
+                total = sum(weight for _neighbor_id, _distance, weight in neighbor_weights)
+                row = [votes[label] / total for label in classes]
             scores[item] = [float(value) for value in row]
             threshold = 0.5 if self.threshold is None else self.threshold
             predictions[item] = [
@@ -302,11 +329,14 @@ class TransferProbe(ProbeBackend):
             order = self._selected_neighbor_indices(distances, item=item)
             selected_distances = distances[order]
             weights = self._neighbor_weights(selected_distances)
-            weighted[item] = [
+            weighted_neighbors = [
                 (data.train_ids[int(index)], float(distance), float(weight))
                 for index, distance, weight in zip(order, selected_distances, weights)
                 if float(weight) > 0.0
             ]
+            if not weighted_neighbors:
+                raise EmbeddingInputError(f"TransferProbe found no positive transfer weights for example {item!r}.")
+            weighted[item] = weighted_neighbors
         return weighted
 
     def _weighted_neighbors_from_search(
@@ -340,11 +370,14 @@ class TransferProbe(ProbeBackend):
             neighbors = neighbors_by_test[str(item)]
             distances = _np.asarray([neighbor.distance for neighbor in neighbors], dtype=_np.float32)
             weights = self._neighbor_weights(distances)
-            weighted[str(item)] = [
+            weighted_neighbors = [
                 (neighbor.protein_id, float(neighbor.distance), float(weight))
                 for neighbor, weight in zip(neighbors, weights)
                 if float(weight) > 0.0
             ]
+            if not weighted_neighbors:
+                raise EmbeddingInputError(f"TransferProbe found no positive transfer weights for example {item!r}.")
+            weighted[str(item)] = weighted_neighbors
         return weighted
 
     def _neighbor_metadata(
@@ -384,10 +417,12 @@ class TransferProbe(ProbeBackend):
     def _neighbor_weights(self, distances: Any) -> list[float]:
         if self.scoring == "voting":
             return [1.0] * int(len(distances))
-        exact = distances <= 1e-12
-        if bool(exact.any()):
-            return [1.0 if bool(value) else 0.0 for value in exact]
-        return [1.0 / max(float(distance), 1e-12) for distance in distances]
+        if self.scoring in {"weighted_voting", "nearest_similarity"}:
+            return [
+                _bounded_similarity(float(distance), distance=self.distance)
+                for distance in distances
+            ]
+        raise EmbeddingInputError(f"Unsupported TransferProbe.scoring value {self.scoring!r}.")
 
 
 @dataclass(frozen=True)
@@ -742,6 +777,12 @@ def _distance_matrix(train_matrix: Any, test_matrix: Any, *, distance: TransferD
         return 1.0 - similarities
     differences = test_matrix[:, None, :] - train_matrix[None, :, :]
     return _np.linalg.norm(differences, axis=2)
+
+
+def _bounded_similarity(distance_value: float, *, distance: TransferDistance) -> float:
+    if distance == "cosine":
+        return max(0.0, min(1.0, 1.0 - float(distance_value)))
+    return 1.0 / (1.0 + max(0.0, float(distance_value)))
 
 
 def _normalize_rows(matrix: Any) -> Any:

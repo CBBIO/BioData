@@ -80,11 +80,6 @@ class GpuSearchState:
     cuvs_index: Any = None
 
 
-_BackendAvailability = BackendAvailability
-_ResolvedBackend = ResolvedBackend
-_GpuSearchState = GpuSearchState
-
-
 __all__ = [
     "ResolvedSearchBackend",
     "DEFAULT_BACKEND_THRESHOLDS",

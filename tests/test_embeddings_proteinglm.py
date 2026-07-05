@@ -9,12 +9,8 @@ import pytest
 from CBBIO.embeddings import EmbeddingInputError, GenerationInput
 from CBBIO.embeddings.factory import Generator, available_generator_classes, available_generator_models
 from CBBIO.embeddings.models import proteinglm as proteinglm_module
-from CBBIO.embeddings_proteinglm import (
-    PROTEINGLM_HF_MODEL_NAMES,
-    ProteinGlmEmbeddingGenerator,
-    ProteinGlmPreprocessor,
-    ProteinGlmTokenizerAdapter,
-)
+from CBBIO.embeddings.models.proteinglm import PROTEINGLM_HF_MODEL_NAMES
+from CBBIO import ProteinGlmEmbeddingGenerator, ProteinGlmPreprocessor, ProteinGlmTokenizerAdapter
 
 
 def _as_list(value: Any) -> Any:

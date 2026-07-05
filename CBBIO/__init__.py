@@ -45,9 +45,6 @@ from .embeddings import (
     EmbeddingGenerator,
     EmbeddingInputError,
     EmbeddingRecord,
-    FastaEmbeddingH5Result,
-    FastaEmbeddingNpyShardResult,
-    FastaEmbeddingPickleShardResult,
     GenerationInput,
     GenerationResult,
     H5WriteResult,
@@ -62,19 +59,13 @@ from .embeddings import (
     TokenizerAdapter,
     batch_generation_inputs,
     collect_generation_results,
-    generate_from_fasta,
-    generate_from_fasta_batches,
-    iter_embedding_records_from_fasta,
     iter_fasta_inputs,
     load_fasta_inputs,
 )
-from .embeddings.batcher import FastaBatcher, IterableBatcher
+from .embeddings.utils.batcher import FastaBatcher, IterableBatcher
 from .embeddings.factory import Generator, available_generator_classes, available_generator_models
-from .embeddings.io import (
+from .embeddings.utils.io import (
     H5EmbeddingReader,
-    generate_fasta_h5,
-    generate_fasta_npy_shards,
-    generate_fasta_pickle_shards,
     load_embedding_records,
     load_embedding_records_h5,
     load_embedding_records_npy,
@@ -86,9 +77,9 @@ from .embeddings.io import (
     save_embedding_records_pickle,
     save_embedding_records_pickle_shards,
 )
-from .embeddings.jobs import EmbeddingJobResult, ProgressCallback, run_embedding_generation
-from .embeddings.pooler import EmbeddingPooler, IdentityPooler, MeanPooler, pooler_factory
-from .embeddings.writer import EmbeddingWriter
+from .embeddings.utils.jobs import EmbeddingJobResult, ProgressCallback, run_embedding_generation
+from .embeddings.utils.pooler import EmbeddingPooler, IdentityPooler, MeanPooler, pooler_factory
+from .embeddings.utils.writer import EmbeddingWriter
 from .probing import (
     DBPTM_BENCHMARKS,
     compute_residue_feature_stats,
@@ -129,9 +120,6 @@ from .probing import (
     CleanSplitThreshold,
     CleanTestSet,
     DbptmBenchmarkSpec,
-    DatasetCatalogEntry,
-    DatasetCatalogLevel,
-    DatasetCatalogStatus,
     DatasetCollection,
     DatasetLevel,
     DatasetMetadata,
@@ -396,9 +384,6 @@ __all__ = [
     "PickleShardWriteResult",
     "NpyShardWriteResult",
     "H5WriteResult",
-    "FastaEmbeddingPickleShardResult",
-    "FastaEmbeddingNpyShardResult",
-    "FastaEmbeddingH5Result",
     "PreprocessorAdapter",
     "TokenizerAdapter",
     "ModelAdapter",
@@ -447,9 +432,6 @@ __all__ = [
     "CleanSplitThreshold",
     "CleanTestSet",
     "DbptmBenchmarkSpec",
-    "DatasetCatalogEntry",
-    "DatasetCatalogLevel",
-    "DatasetCatalogStatus",
     "DatasetCollection",
     "DatasetLevel",
     "DatasetMetadata",
@@ -623,14 +605,8 @@ __all__ = [
     "Esm1bPostprocessor",
     "Esm1bEmbeddingGenerator",
     "load_fasta_inputs",
-    "generate_from_fasta",
-    "generate_from_fasta_batches",
-    "generate_fasta_h5",
     "H5EmbeddingReader",
-    "generate_fasta_npy_shards",
-    "generate_fasta_pickle_shards",
     "iter_fasta_inputs",
-    "iter_embedding_records_from_fasta",
     "load_embedding_records",
     "load_embedding_records_pickle",
     "load_embedding_records_npy",

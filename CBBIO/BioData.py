@@ -20,12 +20,6 @@ from .types import DistanceMetric, EmbeddingModel, EmbeddingType, GOAnnotation, 
 Params = Sequence[Any] | Mapping[str, Any] | None
 ConfigDict = Dict[str, Any]
 
-# Backward-compatible aliases for older internal/test references.
-_BackendAvailability = BackendAvailability
-_GpuSearchState = GpuSearchState
-_ResolvedBackend = ResolvedBackend
-
-
 class BioDataError(Exception):
     """Base exception for ``CBBIO.BioData`` errors."""
 

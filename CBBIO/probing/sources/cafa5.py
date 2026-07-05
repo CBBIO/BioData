@@ -227,6 +227,7 @@ def _load_cafa5_subset_dataset(
     information_accretion_path = resolve_cafa_ia_path(root_path, ia_path=ia_path, spec=_CAFA5_SPEC)
     known_terms_path = _resolve_cafa5_known_terms_path(root_path, subset=subset)
     terms_of_interest_path = _resolve_cafa5_terms_of_interest_path(root_path)
+    test_protein_ids = set(test_labels)
 
     train_examples = [
         ProteinExample(
@@ -245,7 +246,7 @@ def _load_cafa5_subset_dataset(
             ),
         )
         for protein_id, labels in train_labels.items()
-        if protein_id in sequences
+        if protein_id in sequences and protein_id not in test_protein_ids
     ]
     missing_test_ids = sorted(protein_id for protein_id in test_labels if protein_id not in sequences)
     _handle_missing_subset_sequences(

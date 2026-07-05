@@ -11,21 +11,12 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Self, Sequence, Tuple, TypeAlias, cast
-import warnings
 
 
 _VALID_AA = set("ACDEFGHIKLMNPQRSTVWYBXZJUO")
 EmbeddingPayload: TypeAlias = Sequence[float] | Sequence[Sequence[float]]
 LayerSelection: TypeAlias = int | Sequence[int] | None
 PicklePayloadFormat: TypeAlias = Literal["records", "mapping"]
-
-
-def _warn_deprecated(name: str, replacement: str) -> None:
-    warnings.warn(
-        f"{name} is deprecated and will be removed soon. Use {replacement} instead.",
-        DeprecationWarning,
-        stacklevel=3,
-    )
 
 
 class EmbeddingGenerationError(Exception):
@@ -128,40 +119,6 @@ class H5WriteResult:
     """Result metadata for writing one HDF5 embedding file."""
     path: Path
     record_count: int
-
-
-@dataclass(frozen=True)
-class FastaEmbeddingPickleShardResult:
-    """Result metadata for FASTA-to-pickle embedding generation."""
-    paths: List[Path]
-    record_count: int
-    error_count: int = 0
-    skipped_count: int = 0
-    errors: List[Dict[str, Any]] = field(default_factory=_error_dict_list)
-    skipped: List[Dict[str, Any]] = field(default_factory=_error_dict_list)
-
-
-@dataclass(frozen=True)
-class FastaEmbeddingNpyShardResult:
-    """Result metadata for FASTA-to-NumPy embedding generation."""
-    paths: List[Path]
-    id_paths: List[Path]
-    record_count: int
-    error_count: int = 0
-    skipped_count: int = 0
-    errors: List[Dict[str, Any]] = field(default_factory=_error_dict_list)
-    skipped: List[Dict[str, Any]] = field(default_factory=_error_dict_list)
-
-
-@dataclass(frozen=True)
-class FastaEmbeddingH5Result:
-    """Result metadata for FASTA-to-HDF5 embedding generation."""
-    path: Path
-    record_count: int
-    error_count: int = 0
-    skipped_count: int = 0
-    errors: List[Dict[str, Any]] = field(default_factory=_error_dict_list)
-    skipped: List[Dict[str, Any]] = field(default_factory=_error_dict_list)
 
 
 class PreprocessorAdapter(ABC):
@@ -312,7 +269,7 @@ class EmbeddingGenerator:
         resolved_pooler: Any | None = None
         mean_pooler_type: type[Any] | None = None
         if pooler is not None:
-            from .pooler import MeanPooler, resolve_pooler
+            from .utils.pooler import MeanPooler, resolve_pooler
 
             resolved_pooler = resolve_pooler(pooler)
             mean_pooler_type = MeanPooler
@@ -337,7 +294,6 @@ class EmbeddingGenerator:
                     vector = _as_float_vector(vector_candidate)
                 except EmbeddingBackendError:
                     if mean_pooler_type is not None and isinstance(resolved_pooler, mean_pooler_type):
-                        # Backward compatibility: mean pooler is a no-op for already vector outputs.
                         vector = _as_float_vector(vector_out)
                     else:
                         raise
@@ -383,7 +339,7 @@ class EmbeddingGenerator:
         run_parameters: Dict[str, Any] | None,
     ) -> GenerationResult:
         self._validate_pooler_selection(pooler)
-        from .pooler import materialize_embedding_payload, resolve_pooler
+        from .utils.pooler import materialize_embedding_payload, resolve_pooler
 
         result = GenerationResult()
         resolved_pooler = resolve_pooler(pooler)
@@ -543,7 +499,7 @@ class EmbeddingGenerator:
         pooler: Any | None,
         missing_layers_error: str,
     ) -> None:
-        from .pooler import materialize_embedding_payload, resolve_pooler
+        from .utils.pooler import materialize_embedding_payload, resolve_pooler
 
         resolved_pooler = resolve_pooler(pooler)
         model_output_map = cast(Dict[str, Any], model_output) if isinstance(model_output, dict) else None
@@ -641,7 +597,7 @@ class EmbeddingGenerator:
         if supported_values is None:
             return
 
-        from .pooler import resolve_pooler
+        from .utils.pooler import resolve_pooler
 
         resolved_pooler = resolve_pooler(pooler)
         if resolved_pooler is None:
@@ -760,90 +716,6 @@ def batch_generation_inputs(
         batch_max_tokens = max(batch_max_tokens, record_tokens)
     if batch:
         yield batch
-
-
-def generate_from_fasta(
-    path: str | Path,
-    generator: EmbeddingGenerator,
-    *,
-    layer_index: LayerSelection = 0,
-    pooler: Any | None = None,
-    fail_fast: bool = False,
-    id_from: Literal["record_id", "description"] = "record_id",
-    batch_size: int | None = None,
-    max_batch_tokens: int | None = None,
-) -> GenerationResult:
-    """Deprecated wrapper around ``load_fasta_inputs`` and generator methods."""
-    _warn_deprecated(
-        "generate_from_fasta",
-        "load_fasta_inputs(...) with generator.generate(...) or generator.generate_batches(...)",
-    )
-    if batch_size is None:
-        records = load_fasta_inputs(path, id_from=id_from)
-        return generator.generate(records, layer_index=layer_index, pooler=pooler, fail_fast=fail_fast)
-
-    results = generator.generate_batches(
-        iter_fasta_inputs(path, id_from=id_from),
-        batch_size=int(batch_size),
-        max_batch_tokens=max_batch_tokens,
-        layer_index=layer_index,
-        pooler=pooler,
-        fail_fast=fail_fast,
-    )
-    return collect_generation_results(results)
-
-
-def generate_from_fasta_batches(
-    path: str | Path,
-    generator: EmbeddingGenerator,
-    *,
-    batch_size: int,
-    max_batch_tokens: int | None = None,
-    layer_index: LayerSelection = 0,
-    pooler: Any | None = None,
-    fail_fast: bool = False,
-    id_from: Literal["record_id", "description"] = "record_id",
-) -> Iterator[GenerationResult]:
-    """Deprecated wrapper around ``iter_fasta_inputs`` and ``generate_batches``."""
-    _warn_deprecated(
-        "generate_from_fasta_batches",
-        "generator.generate_batches(iter_fasta_inputs(...), ...)",
-    )
-    yield from generator.generate_batches(
-        iter_fasta_inputs(path, id_from=id_from),
-        batch_size=batch_size,
-        max_batch_tokens=max_batch_tokens,
-        layer_index=layer_index,
-        pooler=pooler,
-        fail_fast=fail_fast,
-    )
-
-
-def iter_embedding_records_from_fasta(
-    path: str | Path,
-    generator: EmbeddingGenerator,
-    *,
-    batch_size: int,
-    max_batch_tokens: int | None = None,
-    layer_index: LayerSelection = 0,
-    pooler: Any | None = None,
-    fail_fast: bool = False,
-    id_from: Literal["record_id", "description"] = "record_id",
-) -> Iterator[EmbeddingRecord]:
-    """Deprecated wrapper around ``iter_fasta_inputs`` and ``generate_batches``."""
-    _warn_deprecated(
-        "iter_embedding_records_from_fasta",
-        "generator.generate_batches(iter_fasta_inputs(...), ...)",
-    )
-    for result in generator.generate_batches(
-        iter_fasta_inputs(path, id_from=id_from),
-        batch_size=batch_size,
-        max_batch_tokens=max_batch_tokens,
-        layer_index=layer_index,
-        pooler=pooler,
-        fail_fast=fail_fast,
-    ):
-        yield from result.records
 
 
 def collect_generation_results(results: Iterable[GenerationResult]) -> GenerationResult:
@@ -1185,9 +1057,6 @@ __all__ = [
     "PickleShardWriteResult",
     "NpyShardWriteResult",
     "H5WriteResult",
-    "FastaEmbeddingPickleShardResult",
-    "FastaEmbeddingNpyShardResult",
-    "FastaEmbeddingH5Result",
     "PreprocessorAdapter",
     "TokenizerAdapter",
     "ModelAdapter",
@@ -1196,9 +1065,6 @@ __all__ = [
     "iter_fasta_inputs",
     "batch_generation_inputs",
     "load_fasta_inputs",
-    "generate_from_fasta",
-    "generate_from_fasta_batches",
-    "iter_embedding_records_from_fasta",
     "collect_generation_results",
     "validate_generation_input",
     "validate_sequence",

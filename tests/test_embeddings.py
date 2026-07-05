@@ -22,9 +22,6 @@ from CBBIO.embeddings import (
     PostprocessorAdapter,
     PreprocessorAdapter,
     TokenizerAdapter,
-    generate_from_fasta,
-    generate_from_fasta_batches,
-    iter_embedding_records_from_fasta,
     iter_fasta_inputs,
     load_fasta_inputs,
     RunMetadata,
@@ -42,9 +39,6 @@ from CBBIO import (
     Generator,
     H5EmbeddingReader,
     IterableBatcher,
-    generate_fasta_h5,
-    generate_fasta_npy_shards,
-    generate_fasta_pickle_shards,
     load_embedding_records,
     load_embedding_records_h5,
     load_embedding_records_npy,
@@ -563,62 +557,6 @@ def test_iter_fasta_inputs_yields_records_lazily(tmp_path: Path) -> None:
     assert first.id == "P1"
     assert first.sequence == "ACDE"
     assert second.id == "P2"
-
-
-@pytest.mark.skipif("Bio" not in sys.modules and __import__("importlib").util.find_spec("Bio") is None, reason="Biopython not installed")
-def test_generate_from_fasta_uses_generator(tmp_path: Path) -> None:
-    fasta_path = tmp_path / "input.fasta"
-    fasta_path.write_text(">Q1\nACDE\n", encoding="utf-8")
-    generator = _generator()
-
-    with pytest.warns(DeprecationWarning):
-        result = generate_from_fasta(fasta_path, generator, layer_index=2)
-
-    assert len(result.records) == 1
-    assert result.records[0].id == "Q1"
-    assert result.records[0].embedding == [4.0, 2.0]
-
-
-@pytest.mark.skipif("Bio" not in sys.modules and __import__("importlib").util.find_spec("Bio") is None, reason="Biopython not installed")
-def test_generate_from_fasta_batches_yields_one_result_per_batch(tmp_path: Path) -> None:
-    fasta_path = tmp_path / "input.fasta"
-    fasta_path.write_text(">Q1\nACDE\n>Q2\nAAAA\n>Q3\nVVVV\n", encoding="utf-8")
-    generator = _generator()
-
-    with pytest.warns(DeprecationWarning):
-        results = list(generate_from_fasta_batches(fasta_path, generator, batch_size=2, layer_index=5))
-
-    assert [len(result.records) for result in results] == [2, 1]
-    assert [[record.id for record in result.records] for result in results] == [["Q1", "Q2"], ["Q3"]]
-    assert results[0].records[0].embedding == [4.0, 5.0]
-
-
-@pytest.mark.skipif("Bio" not in sys.modules and __import__("importlib").util.find_spec("Bio") is None, reason="Biopython not installed")
-def test_generate_from_fasta_batch_size_aggregates_results(tmp_path: Path) -> None:
-    fasta_path = tmp_path / "input.fasta"
-    fasta_path.write_text(">Q1\nACDE\n>Q2\nAAAA\n>Q3\nVVVV\n", encoding="utf-8")
-    generator = _generator()
-
-    with pytest.warns(DeprecationWarning):
-        result = generate_from_fasta(fasta_path, generator, layer_index=6, batch_size=2)
-
-    assert [record.id for record in result.records] == ["Q1", "Q2", "Q3"]
-    assert result.run_metadata is not None
-    assert result.run_metadata.sequence_count == 3
-    assert result.run_metadata.failure_count == 0
-
-
-@pytest.mark.skipif("Bio" not in sys.modules and __import__("importlib").util.find_spec("Bio") is None, reason="Biopython not installed")
-def test_iter_embedding_records_from_fasta_streams_records(tmp_path: Path) -> None:
-    fasta_path = tmp_path / "input.fasta"
-    fasta_path.write_text(">Q1\nACDE\n>Q2\nAAAA\n>Q3\nVVVV\n", encoding="utf-8")
-    generator = _generator()
-
-    with pytest.warns(DeprecationWarning):
-        records = list(iter_embedding_records_from_fasta(fasta_path, generator, batch_size=2, layer_index=4))
-
-    assert [record.id for record in records] == ["Q1", "Q2", "Q3"]
-    assert records[1].embedding == [4.0, 4.0]
 
 
 def test_batch_generation_inputs_rejects_non_positive_batch_size() -> None:
@@ -1337,134 +1275,6 @@ def test_h5_embedding_reader_selects_pool_method_for_same_id_and_layer(tmp_path:
         reader.read("P1", layer_index=0)
     with h5py.File(path, "r") as handle:
         assert handle["pool_method"].asstr()[:].tolist() == ["none", "mean", "cls"]
-
-
-@pytest.mark.skipif("Bio" not in sys.modules and __import__("importlib").util.find_spec("Bio") is None, reason="Biopython not installed")
-def test_generate_fasta_pickle_shards_streams_generation_results(tmp_path: Path) -> None:
-    fasta_path = tmp_path / "input.fasta"
-    fasta_path.write_text(">Q1\nACDE\n>Q2\nAAAA\n>Q3\nVVVV\n", encoding="utf-8")
-    events: List[Dict[str, Any]] = []
-
-    with pytest.warns(DeprecationWarning):
-        result = generate_fasta_pickle_shards(
-            fasta_path,
-            _generator(),
-            tmp_path / "out.pkl",
-            batch_size=2,
-            records_per_shard=2,
-            layer_index=4,
-            progress_callback=events.append,
-        )
-
-    assert result.record_count == 3
-    assert result.error_count == 0
-    assert [path.name for path in result.paths] == ["out.shard_000001.pkl", "out.shard_000002.pkl"]
-    assert any(event["event"] == "batch_completed" for event in events)
-    loaded = load_embedding_records_pickle(result.paths[0])
-    assert [record.id for record in loaded] == ["Q1", "Q2"]
-    assert loaded[0].embedding == [4.0, 4.0]
-
-
-@pytest.mark.skipif("Bio" not in sys.modules and __import__("importlib").util.find_spec("Bio") is None, reason="Biopython not installed")
-def test_generate_fasta_pickle_shards_can_sort_by_length_window(tmp_path: Path) -> None:
-    fasta_path = tmp_path / "input.fasta"
-    fasta_path.write_text(">Q1\nA\n>Q2\nAAAAA\n>Q3\nAAA\n>Q4\nAA\n", encoding="utf-8")
-
-    with pytest.warns(DeprecationWarning):
-        result = generate_fasta_pickle_shards(
-            fasta_path,
-            _generator(),
-            tmp_path / "out.pkl",
-            batch_size=2,
-            records_per_shard=10,
-            length_sort_window=3,
-        )
-
-    assert result.record_count == 4
-    loaded = load_embedding_records_pickle(result.paths[0])
-    assert [record.id for record in loaded] == ["Q2", "Q3", "Q1", "Q4"]
-
-
-@pytest.mark.skipif("Bio" not in sys.modules and __import__("importlib").util.find_spec("Bio") is None, reason="Biopython not installed")
-def test_generate_fasta_pickle_shards_writes_all_length_skips(tmp_path: Path) -> None:
-    fasta_path = tmp_path / "input.fasta"
-    skipped_path = tmp_path / "skipped.tsv"
-    fasta_path.write_text(">Q1\nAAAAA\n>Q2\nAA\n>Q3\nAAAAAA\n", encoding="utf-8")
-
-    with pytest.warns(DeprecationWarning):
-        result = generate_fasta_pickle_shards(
-            fasta_path,
-            _generator(),
-            tmp_path / "out.pkl",
-            batch_size=2,
-            records_per_shard=10,
-            max_sequence_length=3,
-            skipped_path=skipped_path,
-        )
-
-    assert result.record_count == 1
-    assert result.skipped_count == 2
-    assert skipped_path.read_text(encoding="utf-8").splitlines() == [
-        "id\tlength\treason",
-        "Q1\t5\tlength>3",
-        "Q3\t6\tlength>3",
-    ]
-
-
-@pytest.mark.skipif("Bio" not in sys.modules and __import__("importlib").util.find_spec("Bio") is None, reason="Biopython not installed")
-def test_generate_fasta_npy_shards_streams_generation_results(tmp_path: Path) -> None:
-    np = pytest.importorskip("numpy")
-    fasta_path = tmp_path / "input.fasta"
-    fasta_path.write_text(">Q1\nACDE\n>Q2\nAAAA\n>Q3\nVVVV\n", encoding="utf-8")
-    events: List[Dict[str, Any]] = []
-
-    with pytest.warns(DeprecationWarning):
-        result = generate_fasta_npy_shards(
-            fasta_path,
-            _generator(),
-            tmp_path / "out.npy",
-            batch_size=2,
-            records_per_shard=2,
-            layer_index=4,
-            progress_callback=events.append,
-        )
-
-    assert result.record_count == 3
-    assert result.error_count == 0
-    assert [path.name for path in result.paths] == ["out.shard_000001.npy", "out.shard_000002.npy"]
-    assert [path.name for path in result.id_paths] == ["out.shard_000001.ids.txt", "out.shard_000002.ids.txt"]
-    assert any(event["event"] == "batch_completed" for event in events)
-    matrix = np.load(result.paths[0])
-    assert matrix.shape == (2, 2)
-    assert matrix[0].tolist() == pytest.approx([4.0, 4.0])
-    assert matrix[1].tolist() == pytest.approx([4.0, 4.0])
-    assert result.id_paths[0].read_text(encoding="utf-8").splitlines() == ["Q1", "Q2"]
-
-
-@pytest.mark.skipif("Bio" not in sys.modules and __import__("importlib").util.find_spec("Bio") is None, reason="Biopython not installed")
-def test_generate_fasta_h5_streams_generation_results(tmp_path: Path) -> None:
-    h5py = pytest.importorskip("h5py")
-    fasta_path = tmp_path / "input.fasta"
-    fasta_path.write_text(">Q1\nACDE\n>Q2\nAAAA\n>Q3\nVVVV\n", encoding="utf-8")
-    events: List[Dict[str, Any]] = []
-
-    with pytest.warns(DeprecationWarning):
-        result = generate_fasta_h5(
-            fasta_path,
-            _generator(),
-            tmp_path / "out.h5",
-            batch_size=2,
-            layer_index=4,
-            progress_callback=events.append,
-        )
-
-    assert result.record_count == 3
-    assert result.error_count == 0
-    assert any(event["event"] == "batch_completed" for event in events)
-    with h5py.File(result.path, "r") as handle:
-        assert handle["embeddings"].shape == (3, 2)
-        assert handle["embeddings"][0].tolist() == pytest.approx([4.0, 4.0])
-        assert handle["ids"].asstr()[:].tolist() == ["Q1", "Q2", "Q3"]
 
 
 def test_prott5_preprocessor_applies_expected_transform() -> None:

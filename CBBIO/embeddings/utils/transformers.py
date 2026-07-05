@@ -54,7 +54,7 @@ def load_esm_tokenizer(model_name: str) -> Any:
             if "Tokenizer class ESMTokenizer" not in message:
                 raise
 
-    # Some checkpoints reference legacy `ESMTokenizer`; retry with concrete class.
+    # Some checkpoints reference `ESMTokenizer`; retry with the concrete class.
     try:
         from transformers import EsmTokenizer  # type: ignore
     except Exception as exc:

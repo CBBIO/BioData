@@ -495,7 +495,7 @@ def test_custom_multiclass_probe_returns_canonical_class_names() -> None:
     assert result.metrics["accuracy"] == pytest.approx(1.0)
 
 
-def test_transfer_probe_scores_multilabel_classes_by_inverse_cosine_distance() -> None:
+def test_transfer_probe_scores_multilabel_classes_by_similarity_weighted_votes() -> None:
     dataset = ProteinDataset(
         [
             ProteinExample("near", "ACDE", {"terms": ["a"]}, "train"),
@@ -511,7 +511,7 @@ def test_transfer_probe_scores_multilabel_classes_by_inverse_cosine_distance() -
             objective="multilabel",
             classes=("a", "b"),
         ),
-        probe=TransferProbe(k=2, threshold=0.6),
+        probe=TransferProbe(k=2, threshold=0.52),
     )
 
     result = run_task_on_layer(
@@ -523,7 +523,7 @@ def test_transfer_probe_scores_multilabel_classes_by_inverse_cosine_distance() -
         },
     )
 
-    assert result.scores == {"test": pytest.approx([2.0 / 3.0, 1.0 / 3.0])}
+    assert result.scores == {"test": pytest.approx([0.9 / 1.7, 0.8 / 1.7])}
     assert result.predictions == {"test": ["a"]}
 
 
@@ -555,7 +555,39 @@ def test_transfer_probe_uses_half_threshold_for_default_multilabel_predictions()
         },
     )
 
-    assert result.scores == {"test": pytest.approx([2.0 / 3.0, 1.0 / 3.0])}
+    assert result.scores == {"test": pytest.approx([0.9 / 1.7, 0.8 / 1.7])}
+    assert result.predictions == {"test": ["a"]}
+
+
+def test_transfer_probe_can_score_terms_by_nearest_positive_similarity() -> None:
+    dataset = ProteinDataset(
+        [
+            ProteinExample("near", "ACDE", {"terms": ["a"]}, "train"),
+            ProteinExample("far", "FGHI", {"terms": ["b"]}, "train"),
+            ProteinExample("test", "KLMN", {"terms": ["a"]}, "test"),
+        ]
+    )
+    task = Task(
+        name="transfer_nearest_similarity_multilabel",
+        dataset=dataset,
+        prediction=PredictionSpec(
+            target="terms",
+            objective="multilabel",
+            classes=("a", "b"),
+        ),
+        probe=TransferProbe(k=2, scoring="nearest_similarity", threshold=0.85),
+    )
+
+    result = run_task_on_layer(
+        task=task,
+        embeddings={
+            "near": [0.9, 0.4358898944],
+            "far": [0.8, 0.6],
+            "test": [1.0, 0.0],
+        },
+    )
+
+    assert result.scores == {"test": pytest.approx([0.9, 0.8])}
     assert result.predictions == {"test": ["a"]}
 
 
@@ -2066,41 +2098,41 @@ def test_unified_dataset_catalog_is_filterable_and_searchable() -> None:
     assert "weighted_f1" in get_dataset_catalog_entry("ec:ec_4_main").metrics
     assert get_dataset_catalog_entry("ec:ec_4_full").sample_count == 60620
     assert get_dataset_catalog_entry("go:go_bp_head").split_counts == (20948, 2620, 2619)
-    assert get_dataset_catalog_entry("go_mf_main").sample_count == 41081
+    assert get_dataset_catalog_entry("go:go_mf_main").sample_count == 41081
     assert get_dataset_catalog_entry("go:go_mf_full").split_counts == (40395, 4994, 5057)
     assert get_dataset_catalog_entry("go:go_cc_main").loader == "load_go_dataset"
     assert get_dataset_catalog_entry("go:go_bp_head").preferred_metric == "go_fmax"
     assert get_dataset_catalog_entry("cafa:cafa5_bp").status == "adapter"
     assert get_dataset_catalog_entry("cafa:cafa5_bp").preferred_metric == "go_weighted_fmax"
-    assert get_dataset_catalog_entry("cafa5:cafa5_cc").id == "cafa:cafa5_cc"
+    assert get_dataset_catalog_entry("cafa:cafa5_cc").id == "cafa:cafa5_cc"
     assert get_dataset_catalog_entry("cafa:cafa5_partial_bp").target == "go_bp"
     assert get_dataset_catalog_entry("cafa:cafa5_partial_bp").loader == "load_cafa5_dataset"
-    assert get_dataset_catalog_entry("cafa5_pk_bp").id == "cafa:cafa5_partial_bp"
+    assert get_dataset_catalog_entry("cafa:cafa5_partial_bp").id == "cafa:cafa5_partial_bp"
     with pytest.raises(EmbeddingInputError, match="Unknown dataset"):
         get_dataset_catalog_entry("cafa:cafa6_bp")
-    assert get_dataset_catalog_entry("ec_2_head").target == "ec_2"
+    assert get_dataset_catalog_entry("ec:ec_2_head").target == "ec_2"
     assert get_dataset_catalog_entry("ec:single_ec_4_main").objective == "multiclass"
     assert "weighted_f1" in get_dataset_catalog_entry("ec:single_ec_4_main").metrics
-    assert get_dataset_catalog_entry("single_ec_4_main").split_counts == (34213, 4368, 4376)
-    assert get_dataset_catalog_entry("single_ec_4_full").sample_count == 56165
+    assert get_dataset_catalog_entry("ec:single_ec_4_main").split_counts == (34213, 4368, 4376)
+    assert get_dataset_catalog_entry("ec:single_ec_4_full").sample_count == 56165
     assert get_dataset_catalog_entry("ec:single_ec_1_head").target == "single_ec_1"
     assert get_dataset_catalog_entry("ec:ec_3_subclass_holdout_main").objective == "multiclass"
     assert get_dataset_catalog_entry("ec:ec_3_subclass_holdout_main").split_counts == (32143, 4040, 4021)
-    assert get_dataset_catalog_entry("ec_3_subclass_holdout_head").target == "ec_3"
+    assert get_dataset_catalog_entry("ec:ec_3_subclass_holdout_head").target == "ec_3"
     assert get_dataset_catalog_entry("ec:ec_2_subclass_holdout_main").split_counts == (29773, 3771, 3738)
-    assert get_dataset_catalog_entry("ec_2_subclass_holdout_head").target == "ec_2"
+    assert get_dataset_catalog_entry("ec:ec_2_subclass_holdout_head").target == "ec_2"
     assert get_dataset_catalog_entry("ec:ec_1_subclass_holdout_main").split_counts == (34592, 5057, 4485)
     assert get_dataset_catalog_entry("ec:ec_3_subclass_holdout_full").split_counts == (44304, 5542, 5543)
-    assert get_dataset_catalog_entry("ec_1_subclass_holdout_head").target == "ec_1"
+    assert get_dataset_catalog_entry("ec:ec_1_subclass_holdout_head").target == "ec_1"
     assert get_dataset_catalog_entry("clean:ec_4_split30_fold0").loader == "load_clean_dataset"
     assert get_dataset_catalog_entry("clean:ec_4_split30_fold0").preferred_metric == "fmax"
     assert get_dataset_catalog_entry("clean:ec_4_split30_fold0_price").target == "ec_4"
     assert get_dataset_catalog_entry("ecbench:ec_4_train_100").loader == "load_ecbench_dataset"
     assert get_dataset_catalog_entry("ecbench:ec_4_train_100").preferred_metric == "fmax"
     assert "weighted_f1" in get_dataset_catalog_entry("ecbench:ec_4_train_100").metrics
-    assert get_dataset_catalog_entry("ec-bench:ec_1_train_30_new").id == "ecbench:ec_1_train_30_new"
-    assert get_dataset_catalog_entry("source:phosphoelm_ltp").id == "phosphoelm:ltp"
-    assert get_dataset_catalog_entry("secondary_structure").id == "peer:secondary_structure"
+    assert get_dataset_catalog_entry("ecbench:ec_1_train_30_new").id == "ecbench:ec_1_train_30_new"
+    assert get_dataset_catalog_entry("phosphoelm:ltp").id == "phosphoelm:ltp"
+    assert get_dataset_catalog_entry("peer:secondary_structure").id == "peer:secondary_structure"
     for entry in list_dataset_catalog():
         description = entry.description.lower()
         assert entry.task_class
@@ -2259,7 +2291,7 @@ def test_load_clean_dataset_imports_level_targets_and_named_test_sets(tmp_path: 
 def test_load_ecbench_dataset_imports_level_targets_and_named_test_sets(tmp_path: Path) -> None:
     _write_ecbench_dataset_layout(tmp_path)
 
-    native = load_dataset("ec-bench:ec_3_train_30", tmp_path)
+    native = load_dataset("ecbench:ec_3_train_30", tmp_path)
     price = load_ecbench_dataset(tmp_path, name="ecbench:ec4_train100_price")
 
     assert native.split_counts() == {"train": 3, "val": 0, "test": 1}
@@ -2651,6 +2683,28 @@ def test_load_cafa5_partial_subset_uses_released_targets_as_test_split(tmp_path:
     assert test_metadata["subset"] == "partial"
     assert str(test_metadata["known_terms_path"]).endswith("known_t0.tsv")
     assert str(test_metadata["toi_path"]).endswith("toi_2025_03.tsv")
+
+
+def test_load_cafa5_partial_subset_moves_overlapping_train_ids_to_test(tmp_path: Path) -> None:
+    _write_cafa5_target_subset_layout(tmp_path)
+    (tmp_path / "Test (Targets)" / "eval_terms_partial_2025_03.tsv").write_text(
+        "\n".join(
+            [
+                "EntryID\tterm\taspect",
+                "P1\tGO:0009987\tBPO",
+                "T1\tGO:0009987\tBPO",
+                "T2\tGO:0008151\tBPO",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    dataset = load_cafa5_dataset(tmp_path, name="cafa5_partial_bp")
+
+    assert dataset.split_counts() == {"train": 9, "val": 0, "test": 3}
+    assert dataset.target_values("go_bp")["P1"] == ["GO:0009987"]
+    assert next(example.split for example in dataset.examples if example.id == "P1") == "test"
 
 
 def test_load_cafa5_partial_subset_requires_known_terms_file(tmp_path: Path) -> None:

@@ -6,7 +6,7 @@ import types
 
 import pytest
 
-from CBBIO.embeddings_transformers import load_esm_tokenizer, suppress_esm_tokenizer_class_warning
+from CBBIO.embeddings.utils.transformers import load_esm_tokenizer, suppress_esm_tokenizer_class_warning
 
 
 def test_suppress_esm_tokenizer_class_warning_filters_only_esm_name_mismatch() -> None:
