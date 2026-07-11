@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Dict, Sequence, cast
 
-from .. import EmbeddingBackendError, EmbeddingDependencyError, EmbeddingInputError
+from .. import EmbeddingBackendError, EmbeddingDependencyError, EmbeddingInputError, ModelDownloadResult
 
 from ._esm_hf import (
     HfEsmEmbeddingGenerator,
@@ -114,6 +115,48 @@ class Esm1bEmbeddingGenerator(HfEsmEmbeddingGenerator):
     FAMILY_MODELS = [DEFAULT_MODEL_NAME, "facebook/esm-1b"]
     MAX_SEQUENCE_LENGTH = 1022
     SUPPORTED_POOLERS = ("none", "mean", "cls")
+
+    @classmethod
+    def download(
+        cls,
+        model_name: str | None = None,
+        *,
+        trust_repo: bool | str | None = None,
+        **kwargs: Any,
+    ) -> ModelDownloadResult:
+        """Download the original ESM-1b torch.hub checkpoint into the local cache."""
+        model_reference = resolve_model_name(
+            model_name or cls.DEFAULT_MODEL_NAME,
+            cls.MODEL_ALIASES,
+            family="ESM1b",
+        )
+        try:
+            import torch  # type: ignore
+        except ModuleNotFoundError as exc:
+            raise EmbeddingDependencyError(
+                "PyTorch is required for ESM-1b downloads. Install with: pip install torch"
+            ) from exc
+        hub_kwargs = dict(kwargs)
+        if trust_repo is not None:
+            hub_kwargs.setdefault("trust_repo", trust_repo)
+        try:
+            torch_hub = cast(Any, torch.hub)
+            torch_hub.load(
+                "facebookresearch/esm:main",
+                "esm1b_t33_650M_UR50S",
+                **hub_kwargs,
+            )
+            hub_dir = Path(str(torch_hub.get_dir()))
+        except Exception as exc:
+            raise EmbeddingDependencyError(
+                "Failed to download ESM-1b with torch.hub. Run this on a node with internet access "
+                "and ensure the fair-esm torch.hub dependencies are installable."
+            ) from exc
+        return ModelDownloadResult(
+            model_reference=model_reference,
+            path=hub_dir,
+            backend="torch-hub",
+        )
 
     def __init__(
         self,

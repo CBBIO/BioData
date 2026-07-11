@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Dict, List, Sequence, cast
 
 from .. import (
@@ -11,10 +12,12 @@ from .. import (
     EmbeddingInputError,
     GenerationInput,
     GenerationResult,
+    ModelDownloadResult,
     ModelMetadata,
     ModelAdapter,
     TokenizerAdapter,
 )
+from ..utils.download import download_huggingface_snapshot
 from ..utils.pooler import PoolerInput
 from ..utils.torch import (
     BasePreprocessor,
@@ -207,6 +210,33 @@ class ProtT5EmbeddingGenerator(EmbeddingGenerator):
         "Rostlab/prot_t5_xl_half_uniref50-enc",
     ]
     SUPPORTED_POOLERS = ("none", "mean")
+
+    @classmethod
+    def download(
+        cls,
+        model_name: str | None = None,
+        *,
+        revision: str | None = None,
+        cache_dir: str | Path | None = None,
+        local_dir: str | Path | None = None,
+        token: str | bool | None = None,
+        allow_patterns: str | Sequence[str] | None = None,
+        ignore_patterns: str | Sequence[str] | None = None,
+        **kwargs: Any,
+    ) -> ModelDownloadResult:
+        """Download a ProtT5 checkpoint into the local Hugging Face cache."""
+        raw_model_name = model_name or cls.DEFAULT_MODEL_NAME
+        model_reference = resolve_model_name(raw_model_name, cls.MODEL_ALIASES, family="ProtT5")
+        return download_huggingface_snapshot(
+            model_reference,
+            revision=revision,
+            cache_dir=cache_dir,
+            local_dir=local_dir,
+            token=token,
+            allow_patterns=allow_patterns,
+            ignore_patterns=ignore_patterns,
+            **kwargs,
+        )
 
     def __init__(
         self,

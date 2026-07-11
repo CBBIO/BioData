@@ -121,6 +121,14 @@ class H5WriteResult:
     record_count: int
 
 
+@dataclass(frozen=True)
+class ModelDownloadResult:
+    """Result metadata for a cached model download."""
+    model_reference: str
+    path: Path | None = None
+    backend: str = "unknown"
+
+
 class PreprocessorAdapter(ABC):
     """Sequence preprocessing interface for embedding generators."""
     @abstractmethod
@@ -1057,6 +1065,7 @@ __all__ = [
     "PickleShardWriteResult",
     "NpyShardWriteResult",
     "H5WriteResult",
+    "ModelDownloadResult",
     "PreprocessorAdapter",
     "TokenizerAdapter",
     "ModelAdapter",

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Dict, List, Sequence, cast
 
 from .. import (
@@ -12,9 +13,11 @@ from .. import (
     GenerationInput,
     GenerationResult,
     ModelAdapter,
+    ModelDownloadResult,
     ModelMetadata,
     TokenizerAdapter,
 )
+from ..utils.download import download_huggingface_snapshot
 from ..utils.pooler import PoolerInput
 from ..utils.torch import (
     BasePreprocessor,
@@ -132,6 +135,37 @@ class HfEsmEmbeddingGenerator(EmbeddingGenerator):
     """Shared Hugging Face ESM embedding generator."""
 
     SUPPORTED_POOLERS = ("none", "mean", "cls")
+
+    @classmethod
+    def download(
+        cls,
+        model_name: str | None = None,
+        *,
+        revision: str | None = None,
+        cache_dir: str | Path | None = None,
+        local_dir: str | Path | None = None,
+        token: str | bool | None = None,
+        allow_patterns: str | Sequence[str] | None = None,
+        ignore_patterns: str | Sequence[str] | None = None,
+        **kwargs: Any,
+    ) -> ModelDownloadResult:
+        """Download this Hugging Face model family into the local cache."""
+        raw_model_name = model_name or str(getattr(cls, "DEFAULT_MODEL_NAME", "")).strip()
+        model_reference = resolve_model_name(
+            raw_model_name,
+            cast(Dict[str, str], getattr(cls, "MODEL_ALIASES", {})),
+            family=str(getattr(cls, "GENERATOR_CLASS", cls.__name__)),
+        )
+        return download_huggingface_snapshot(
+            model_reference,
+            revision=revision,
+            cache_dir=cache_dir,
+            local_dir=local_dir,
+            token=token,
+            allow_patterns=allow_patterns,
+            ignore_patterns=ignore_patterns,
+            **kwargs,
+        )
 
     def __init__(
         self,

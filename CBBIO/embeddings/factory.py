@@ -9,6 +9,7 @@ from . import (
     EmbeddingBackendError,
     EmbeddingGenerator,
     EmbeddingInputError,
+    ModelDownloadResult,
 )
 
 
@@ -65,6 +66,28 @@ def available_generator_models(model_class: str | None = None) -> Dict[str, List
             f"Unknown model class: {model_class!r}. Supported values: {supported}."
         )
     return _family_models_for_class(canonical, registry=registry)
+
+
+def download_generator_model(
+    *,
+    model_class: str,
+    name: str | None = None,
+    **kwargs: Any,
+) -> ModelDownloadResult:
+    """Download a generator model into the local cache without loading it for inference."""
+    registry, aliases = _generator_registry()
+    canonical = _normalize_model_class(model_class, aliases)
+    if canonical is None or canonical not in registry:
+        supported = ", ".join(registry.keys())
+        raise EmbeddingInputError(
+            f"Unknown model class: {model_class!r}. Supported values: {supported}."
+        )
+
+    generator_cls = registry[canonical]
+    download_fn = getattr(generator_cls, "download", None)
+    if not callable(download_fn):
+        raise EmbeddingBackendError(f"Generator class {canonical!r} does not support downloads.")
+    return cast(ModelDownloadResult, download_fn(name, **kwargs))
 
 
 def _normalize_model_class(value: str | None, aliases: Dict[str, str]) -> str | None:
@@ -162,4 +185,5 @@ __all__ = [
     "Generator",
     "available_generator_classes",
     "available_generator_models",
+    "download_generator_model",
 ]

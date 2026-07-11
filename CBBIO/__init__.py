@@ -48,6 +48,7 @@ from .embeddings import (
     GenerationInput,
     GenerationResult,
     H5WriteResult,
+    ModelDownloadResult,
     ModelMetadata,
     ModelAdapter,
     NpyShardWriteResult,
@@ -63,7 +64,12 @@ from .embeddings import (
     load_fasta_inputs,
 )
 from .embeddings.utils.batcher import FastaBatcher, IterableBatcher
-from .embeddings.factory import Generator, available_generator_classes, available_generator_models
+from .embeddings.factory import (
+    Generator,
+    available_generator_classes,
+    available_generator_models,
+    download_generator_model,
+)
 from .embeddings.utils.io import (
     H5EmbeddingReader,
     load_embedding_records,
@@ -384,6 +390,7 @@ __all__ = [
     "PickleShardWriteResult",
     "NpyShardWriteResult",
     "H5WriteResult",
+    "ModelDownloadResult",
     "PreprocessorAdapter",
     "TokenizerAdapter",
     "ModelAdapter",
@@ -562,6 +569,7 @@ __all__ = [
     "run_embedding_generation",
     "available_generator_classes",
     "available_generator_models",
+    "download_generator_model",
     "batch_generation_inputs",
     "collect_generation_results",
     "ProtT5Preprocessor",

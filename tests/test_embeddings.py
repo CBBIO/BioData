@@ -31,6 +31,7 @@ from CBBIO import (
     Ankh3EmbeddingGenerator,
     available_generator_classes,
     available_generator_models,
+    download_generator_model,
     EmbeddingWriter,
     Esm1bEmbeddingGenerator,
     Esm2EmbeddingGenerator,
@@ -361,6 +362,117 @@ def test_model_generators_share_catalog_interface(generator_type: type[Any]) -> 
     assert isinstance(generator_type.MODEL_ALIASES, dict)
     assert generator_type.DEFAULT_MODEL_NAME in generator_type.FAMILY_MODELS
     assert isinstance(generator_type.SUPPORTED_POOLERS, tuple)
+    assert callable(generator_type.download)
+
+
+@pytest.mark.parametrize(
+    ("generator_type", "model_alias", "expected_model_reference"),
+    [
+        (ProtT5EmbeddingGenerator, "prot-t5-xxl-bfd", "Rostlab/prot_t5_xxl_bfd"),
+        (ProstT5EmbeddingGenerator, "Rostlab/ProstT5", "Rostlab/ProstT5"),
+        (Ankh3EmbeddingGenerator, "ankh3_xl", "ElnaggarLab/ankh3-xl"),
+        (AmplifyEmbeddingGenerator, "amplify_350m", "nvidia/AMPLIFY_350M"),
+        (ProteinGlmEmbeddingGenerator, "pglm_3b", "biomap-research/proteinglm-3b-mlm"),
+        (EsmcEmbeddingGenerator, "esmc_300m", "biohub/ESMC-300M"),
+        (Esm2EmbeddingGenerator, "esm2_8m", "facebook/esm2_t6_8M_UR50D"),
+    ],
+)
+def test_model_generators_download_huggingface_snapshots_without_loading_models(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    generator_type: type[Any],
+    model_alias: str,
+    expected_model_reference: str,
+) -> None:
+    calls: list[Dict[str, Any]] = []
+
+    def _snapshot_download(**kwargs: Any) -> str:
+        calls.append(dict(kwargs))
+        return str(tmp_path / "snapshot")
+
+    fake_hub = types.SimpleNamespace(snapshot_download=_snapshot_download)
+    monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hub)
+
+    result = generator_type.download(
+        model_alias,
+        revision="main",
+        cache_dir=tmp_path / "cache",
+        local_dir=tmp_path / "local",
+        token=False,
+        allow_patterns=["*.json"],
+    )
+
+    assert result.model_reference == expected_model_reference
+    assert result.path == tmp_path / "snapshot"
+    assert result.backend == "huggingface-hub"
+    assert calls == [
+        {
+            "repo_id": expected_model_reference,
+            "revision": "main",
+            "cache_dir": str(tmp_path / "cache"),
+            "local_dir": str(tmp_path / "local"),
+            "token": False,
+            "allow_patterns": ["*.json"],
+            "ignore_patterns": None,
+        }
+    ]
+
+
+def test_download_generator_model_resolves_generator_and_model_aliases(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    calls: list[Dict[str, Any]] = []
+
+    def _snapshot_download(**kwargs: Any) -> str:
+        calls.append(dict(kwargs))
+        return str(tmp_path / "snapshot")
+
+    fake_hub = types.SimpleNamespace(snapshot_download=_snapshot_download)
+    monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hub)
+
+    result = download_generator_model(model_class="esm-2", name="esm2_35m")
+
+    assert result.model_reference == "facebook/esm2_t12_35M_UR50D"
+    assert calls[0]["repo_id"] == "facebook/esm2_t12_35M_UR50D"
+
+
+def test_download_generator_model_rejects_unknown_classes() -> None:
+    with pytest.raises(EmbeddingInputError, match="Unknown model class"):
+        download_generator_model(model_class="missing")
+
+
+def test_esm1b_download_uses_torch_hub(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    calls: list[tuple[str, str, Dict[str, Any]]] = []
+
+    class _FakeHub:
+        @staticmethod
+        def load(repo: str, model: str, **kwargs: Any) -> tuple[object, object]:
+            calls.append((repo, model, dict(kwargs)))
+            return object(), object()
+
+        @staticmethod
+        def get_dir() -> str:
+            return str(tmp_path / "torch-hub")
+
+    fake_torch = types.SimpleNamespace(hub=_FakeHub)
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+
+    result = Esm1bEmbeddingGenerator.download("facebook/esm-1b", trust_repo=True)
+
+    assert result.model_reference == "esm1b_t33_650M_UR50S"
+    assert result.path == tmp_path / "torch-hub"
+    assert result.backend == "torch-hub"
+    assert calls == [
+        (
+            "facebookresearch/esm:main",
+            "esm1b_t33_650M_UR50S",
+            {"trust_repo": True},
+        )
+    ]
 
 
 @pytest.mark.parametrize(

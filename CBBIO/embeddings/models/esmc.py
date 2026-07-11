@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Dict, List, Sequence, cast
 
 from .. import (
@@ -12,9 +13,11 @@ from .. import (
     GenerationInput,
     GenerationResult,
     ModelAdapter,
+    ModelDownloadResult,
     ModelMetadata,
     TokenizerAdapter,
 )
+from ..utils.download import download_huggingface_snapshot
 from ..utils.pooler import PoolerInput
 from ..utils.torch import BasePreprocessor, DefaultPostprocessor, framework_versions, normalize_requested_layers
 
@@ -187,6 +190,32 @@ class EsmcEmbeddingGenerator(EmbeddingGenerator):
     DEFAULT_MODEL_NAME = "esmc_600m"
     FAMILY_MODELS = ["esmc_300m", "esmc_600m", "biohub/ESMC-300M", "biohub/ESMC-600M", "biohub/ESMC-6B"]
     SUPPORTED_POOLERS = ("none", "mean", "cls")
+
+    @classmethod
+    def download(
+        cls,
+        model_name: str | None = None,
+        *,
+        revision: str | None = None,
+        cache_dir: str | Path | None = None,
+        local_dir: str | Path | None = None,
+        token: str | bool | None = None,
+        allow_patterns: str | Sequence[str] | None = None,
+        ignore_patterns: str | Sequence[str] | None = None,
+        **kwargs: Any,
+    ) -> ModelDownloadResult:
+        """Download an ESM-C checkpoint into the local Hugging Face cache."""
+        model_reference = _resolve_model_reference(model_name or cls.DEFAULT_MODEL_NAME)
+        return download_huggingface_snapshot(
+            model_reference,
+            revision=revision,
+            cache_dir=cache_dir,
+            local_dir=local_dir,
+            token=token,
+            allow_patterns=allow_patterns,
+            ignore_patterns=ignore_patterns,
+            **kwargs,
+        )
 
     def __init__(
         self,
