@@ -1086,6 +1086,17 @@ def test_binary_metrics_include_imbalance_aware_scores() -> None:
     assert metrics["auprc"] == 1.0
 
 
+def test_binary_metrics_average_tied_score_groups() -> None:
+    metrics = binary_metrics(
+        y_true=[1, 0, 1, 0],
+        y_pred=[1, 1, 0, 0],
+        y_score=[0.5, 0.5, 0.2, 0.2],
+    )
+
+    assert metrics["auroc"] == pytest.approx(0.5)
+    assert metrics["auprc"] == pytest.approx(0.5)
+
+
 def test_multilabel_metrics_report_micro_and_macro_f1() -> None:
     metrics = multilabel_metrics(
         y_true=[[1, 0], [0, 1], [1, 1]],
@@ -1356,6 +1367,41 @@ def test_residue_level_task_trains_probe_over_valid_positions() -> None:
     assert result.test_count == 1
     assert result.metrics["accuracy"] == 1.0
     assert result.predictions == {"rt:1": 0, "rt:2": 1, "rt:3": 1, "rt:4": 0}
+
+
+def test_builtin_residue_task_reuses_its_computed_evaluation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dataset = ResidueDataset(
+        [
+            ResidueExample("train", "AC", {"site": [0, 1]}, "train"),
+            ResidueExample("test", "AC", {"site": [0, 1]}, "test"),
+        ]
+    )
+    task = Task(
+        name="residue_single_evaluation",
+        dataset=dataset,
+        prediction=PredictionSpec(target="site", objective="binary", level="residue"),
+        probe=ProbeSpec(epochs=1, seed=3),
+    )
+
+    def fail_on_second_evaluation(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("built-in residue outputs were evaluated twice")
+
+    monkeypatch.setattr(
+        "CBBIO.probing.runner.evaluate_probe_backend_output",
+        fail_on_second_evaluation,
+    )
+
+    result = run_task_on_layer(
+        task=task,
+        embeddings={
+            "train": [[0.0], [1.0]],
+            "test": [[0.0], [1.0]],
+        },
+    )
+
+    assert set(result.predictions) == {"test:1", "test:2"}
 
 
 def test_filter_redundant_to_test_mmseqs_removes_train_and_val_hits(monkeypatch: pytest.MonkeyPatch) -> None:

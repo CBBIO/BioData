@@ -119,10 +119,15 @@ def binary_metrics(y_true: Sequence[int], y_pred: Sequence[int], y_score: Sequen
     """Compute binary classification metrics for labels, predictions, and scores."""
     _require_same_non_empty_length(y_true, y_pred)
     _require_same_non_empty_length(y_true, y_score)
-    tp = sum(1 for true, pred in zip(y_true, y_pred) if int(true) == 1 and int(pred) == 1)
-    tn = sum(1 for true, pred in zip(y_true, y_pred) if int(true) == 0 and int(pred) == 0)
-    fp = sum(1 for true, pred in zip(y_true, y_pred) if int(true) == 0 and int(pred) == 1)
-    fn = sum(1 for true, pred in zip(y_true, y_pred) if int(true) == 1 and int(pred) == 0)
+    true_values = _np.asarray(y_true, dtype=_np.int8)
+    pred_values = _np.asarray(y_pred, dtype=_np.int8)
+    score_values = _np.asarray(y_score, dtype=_np.float64)
+    true_positive = true_values == 1
+    predicted_positive = pred_values == 1
+    tp = int(_np.count_nonzero(true_positive & predicted_positive))
+    tn = int(_np.count_nonzero(~true_positive & ~predicted_positive))
+    fp = int(_np.count_nonzero(~true_positive & predicted_positive))
+    fn = int(_np.count_nonzero(true_positive & ~predicted_positive))
     accuracy = float(tp + tn) / float(len(y_true))
     precision = float(tp) / float(tp + fp) if tp + fp else 0.0
     recall = float(tp) / float(tp + fn) if tp + fn else 0.0
@@ -139,6 +144,7 @@ def binary_metrics(y_true: Sequence[int], y_pred: Sequence[int], y_score: Sequen
     macro_f1 = (negative_f1 + f1) / 2.0
     mcc_denominator = math.sqrt(float(tp + fp) * float(tp + fn) * float(tn + fp) * float(tn + fn))
     mcc = float(tp * tn - fp * fn) / mcc_denominator if mcc_denominator else 0.0
+    auroc, auprc = _binary_ranking_metrics(true_values, score_values)
     return {
         "accuracy": accuracy,
         "precision": precision,
@@ -147,8 +153,8 @@ def binary_metrics(y_true: Sequence[int], y_pred: Sequence[int], y_score: Sequen
         "macro_f1": macro_f1,
         "balanced_accuracy": balanced_accuracy,
         "mcc": mcc,
-        "auroc": _binary_auroc(y_true, y_score),
-        "auprc": _binary_auprc(y_true, y_score),
+        "auroc": auroc,
+        "auprc": auprc,
     }
 
 
@@ -1666,58 +1672,55 @@ def _metrics_for_aspect(metrics_by_aspect: Mapping[str, Mapping[str, float]], as
     raise ValueError(f"CAFA6 metrics are missing aspect {aspect!r}.")
 
 
-def _binary_auroc(y_true: Sequence[int], y_score: Sequence[float]) -> float:
-    positives = sum(1 for value in y_true if int(value) == 1)
-    negatives = len(y_true) - positives
-    if positives == 0 or negatives == 0:
-        return 0.0
+def _binary_ranking_metrics(y_true: Any, y_score: Any) -> tuple[float, float]:
+    true_values = _np.asarray(y_true, dtype=_np.int8)
+    score_values = _np.asarray(y_score, dtype=_np.float64)
+    positives = int(_np.count_nonzero(true_values == 1))
+    negatives = int(true_values.size) - positives
+    order = _np.argsort(score_values, kind="stable")
+    sorted_scores = score_values[order]
+    sorted_true = true_values[order]
 
-    pairs = sorted(
-        ((float(score), int(label)) for label, score in zip(y_true, y_score)),
-        key=lambda item: item[0],
-    )
-    rank_sum = 0.0
-    index = 0
-    while index < len(pairs):
-        end = index + 1
-        while end < len(pairs) and pairs[end][0] == pairs[index][0]:
-            end += 1
-        average_rank = (index + 1 + end) / 2.0
-        rank_sum += average_rank * sum(1 for _score, label in pairs[index:end] if label == 1)
-        index = end
-    return (rank_sum - positives * (positives + 1) / 2.0) / float(positives * negatives)
+    auroc = 0.0
+    if positives > 0 and negatives > 0:
+        group_starts = _np.flatnonzero(
+            _np.concatenate(
+                (_np.asarray([True]), sorted_scores[:-1] != sorted_scores[1:])
+            )
+        )
+        group_ends = _np.concatenate(
+            (group_starts[1:], _np.asarray([true_values.size]))
+        )
+        average_ranks = (group_starts + 1 + group_ends) / 2.0
+        positive_counts = _np.add.reduceat(
+            (sorted_true == 1).astype(_np.int64, copy=False),
+            group_starts,
+        )
+        rank_sum = float(_np.sum(average_ranks * positive_counts))
+        auroc = (rank_sum - positives * (positives + 1) / 2.0) / float(
+            positives * negatives
+        )
 
-
-def _binary_auprc(y_true: Sequence[int], y_score: Sequence[float]) -> float:
-    positives = sum(1 for value in y_true if int(value) == 1)
     if positives == 0:
-        return 0.0
-
-    pairs = sorted(
-        ((float(score), int(label)) for label, score in zip(y_true, y_score)),
-        key=lambda item: item[0],
-        reverse=True,
+        return auroc, 0.0
+    descending_scores = sorted_scores[::-1]
+    descending_true = sorted_true[::-1]
+    cumulative_true = _np.cumsum(descending_true, dtype=_np.int64)
+    group_ends = _np.flatnonzero(
+        _np.concatenate(
+            (
+                descending_scores[:-1] != descending_scores[1:],
+                _np.asarray([True]),
+            )
+        )
     )
-    area = 0.0
-    tp = 0
-    fp = 0
-    previous_recall = 0.0
-    index = 0
-    while index < len(pairs):
-        end = index + 1
-        while end < len(pairs) and pairs[end][0] == pairs[index][0]:
-            end += 1
-        for _score, label in pairs[index:end]:
-            if label == 1:
-                tp += 1
-            else:
-                fp += 1
-        recall = float(tp) / float(positives)
-        precision = float(tp) / float(tp + fp) if tp + fp else 1.0
-        area += (recall - previous_recall) * precision
-        previous_recall = recall
-        index = end
-    return area
+    true_at_group_end = cumulative_true[group_ends].astype(_np.float64)
+    true_by_group = _np.diff(
+        _np.concatenate((_np.asarray([0.0]), true_at_group_end))
+    )
+    precision = true_at_group_end / (group_ends + 1)
+    auprc = float(_np.sum((true_by_group / float(positives)) * precision))
+    return auroc, auprc
 
 
 def _binary_auprc_array(y_true: Any, y_score: Any) -> float:

@@ -126,8 +126,16 @@ def _run_backend(
         feature_std=feature_std,
         flat_data=flat_data,
     )
-    output = backend.fit_predict(data)
-    metrics, predictions, scores = evaluate_probe_backend_output(data, output)
+    if isinstance(backend, LinearProbe | MlpProbe) and data.level == "residue":
+        evaluation = backend.fit_evaluate(data)
+        metrics = evaluation.metrics
+        predictions = evaluation.predictions
+        scores = evaluation.scores
+        metadata = evaluation.metadata
+    else:
+        output = backend.fit_predict(data)
+        metrics, predictions, scores = evaluate_probe_backend_output(data, output)
+        metadata = output.metadata
     if _is_go_task(task):
         metrics.update(
             _evaluate_go_metrics(
@@ -140,7 +148,7 @@ def _run_backend(
         metrics=metrics,
         predictions=predictions,
         scores=scores,
-        metadata=output.metadata,
+        metadata=metadata,
     )
 
 

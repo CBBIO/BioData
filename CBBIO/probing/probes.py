@@ -83,9 +83,20 @@ class _TorchProbeBackend(ProbeBackend, ABC):
 
     def fit_predict(self, data: ProbeBackendInput) -> ProbeBackendOutput:
         """Train the built-in probe and return canonical test outputs."""
+        evaluation = self.fit_evaluate(data)
+        if data.level == "residue":
+            return _expand_residue_evaluation(data, evaluation)
+        return ProbeBackendOutput(
+            predictions=evaluation.predictions,
+            scores=evaluation.scores,
+            score_matrix=evaluation.score_matrix,
+        )
+
+    def fit_evaluate(self, data: ProbeBackendInput) -> ProbeEvaluation:
+        """Train the built-in probe and return its computed evaluation."""
         probe = self._probe_spec()
         if data.level == "protein":
-            evaluation = train_and_evaluate_probe(
+            return train_and_evaluate_probe(
                 train_ids=data.train_ids,
                 test_ids=data.test_ids,
                 embeddings=cast(Mapping[str, Sequence[float]], data.embeddings),
@@ -93,13 +104,8 @@ class _TorchProbeBackend(ProbeBackend, ABC):
                 prediction=data.prediction,
                 probe=probe,
             )
-            return ProbeBackendOutput(
-                predictions=evaluation.predictions,
-                scores=evaluation.scores,
-                score_matrix=evaluation.score_matrix,
-            )
         if data.level == "residue":
-            evaluation = train_and_evaluate_residue_probe(
+            return train_and_evaluate_residue_probe(
                 train_ids=data.train_ids,
                 test_ids=data.test_ids,
                 embeddings=cast(
@@ -114,7 +120,6 @@ class _TorchProbeBackend(ProbeBackend, ABC):
                 feature_std=data.feature_std,
                 flat_data=cast(ResidueDataFlat | None, data.flat_data),
             )
-            return _expand_residue_evaluation(data, evaluation)
         raise EmbeddingInputError(f"Unsupported built-in probe level: {data.level!r}.")
 
     def _probe_spec(self) -> ProbeSpec:
@@ -647,6 +652,16 @@ def train_and_evaluate_residue_probe(
     feature_std = feature_std.to(device)
     batch_size = int(probe.batch_size or min(train_count, DEFAULT_RESIDUE_BATCH_SIZE))
     x_pin: Any = _try_alloc_pinned(torch, device, rows=batch_size, cols=input_dim)
+    train_label_ids = (
+        flat_data.train_label_ids
+        if flat_data is not None
+        else ordered_labels[0][:train_count]
+    )
+    y_train_t = _label_tensor(
+        torch,
+        [encoded_labels[label_id] for label_id in train_label_ids],
+        prediction.objective,
+    )
 
     model.train()
     if flat_data is not None:
@@ -654,11 +669,6 @@ def train_and_evaluate_residue_probe(
         # its memory (zero copy).  Training loop does direct slicing — no pending_tensors
         # accumulation, no torch.cat, no per-protein Python overhead.
         x_train_t = torch.as_tensor(flat_data.x_train, dtype=torch.float32)
-        y_train_t = _label_tensor(
-            torch,
-            [encoded_labels[lid] for lid in flat_data.train_label_ids],
-            prediction.objective,
-        )
         for _epoch in range(int(probe.epochs)):
             for start in range(0, train_count, batch_size):
                 end = min(train_count, start + batch_size)
@@ -672,17 +682,25 @@ def train_and_evaluate_residue_probe(
                 optimizer.step()
     else:
         for _epoch in range(int(probe.epochs)):
-            for batch_x, batch_label_ids in _iter_residue_batches(
-                torch, train_ids, embeddings=embeddings, masks=masks, batch_size=batch_size,
+            label_start = 0
+            for batch_x, _batch_label_ids in _iter_residue_batches(
+                torch,
+                train_ids,
+                embeddings=embeddings,
+                masks=masks,
+                batch_size=batch_size,
+                include_label_ids=False,
             ):
+                label_end = label_start + int(batch_x.shape[0])
                 batch_x_dev = _send_to_device(batch_x, device, x_pin)
-                batch_y = _label_tensor(torch, [encoded_labels[item] for item in batch_label_ids], prediction.objective).to(device)
+                batch_y = y_train_t[label_start:label_end].to(device)
                 batch_x_dev = _standardize_features(batch_x_dev, mean=feature_mean, std=feature_std)
                 optimizer.zero_grad()
                 logits = model(batch_x_dev)
                 loss = _compute_loss(logits, batch_y, loss_fn, prediction.objective)
                 loss.backward()
                 optimizer.step()
+                label_start = label_end
 
     model.eval()
     test_logits: List[Any] = []
@@ -951,7 +969,8 @@ def _valid_residue_count(
     count = 0
     for item in ids:
         rows, _cols = _matrix_shape(embeddings[item])
-        count += len(_valid_residue_indices(rows, masks.get(item)))
+        mask = masks.get(item)
+        count += rows if mask is None else sum(bool(value) for value in mask)
     return count
 
 
@@ -962,8 +981,9 @@ def _residue_input_dim(
     masks: Mapping[str, Sequence[bool] | None],
 ) -> int:
     for item in ids:
-        rows, cols = _matrix_shape(embeddings[item])
-        if _valid_residue_indices(rows, masks.get(item)):
+        _rows, cols = _matrix_shape(embeddings[item])
+        mask = masks.get(item)
+        if mask is None or any(bool(value) for value in mask):
             return cols
     raise EmbeddingInputError("Residue-level probe requires at least one valid train residue.")
 
@@ -984,6 +1004,7 @@ def _residue_feature_standardization_stats(
         embeddings=embeddings,
         masks=masks,
         batch_size=DEFAULT_RESIDUE_BATCH_SIZE,
+        include_label_ids=False,
     ):
         if feature_sum is None:
             feature_sum = matrix.sum(dim=0, keepdim=True)
@@ -1032,6 +1053,7 @@ def _iter_residue_batches(
     embeddings: Mapping[str, Sequence[Sequence[float]]],
     masks: Mapping[str, Sequence[bool] | None],
     batch_size: int,
+    include_label_ids: bool = True,
 ) -> Any:
     resolved_batch_size = max(1, int(batch_size))
     pending_tensors: List[Any] = []
@@ -1039,18 +1061,34 @@ def _iter_residue_batches(
     pending_count = 0
     for item in ids:
         tensor = _residue_matrix_tensor(torch, item, embeddings[item])
-        keep_indices = _valid_residue_indices(int(tensor.shape[0]), masks.get(item))
-        if not keep_indices:
-            continue
-        index_tensor = torch.tensor(keep_indices, dtype=torch.long)
-        tensor = tensor.index_select(0, index_tensor)
-        label_ids = [f"{item}:{index + 1}" for index in keep_indices]
+        row_count = int(tensor.shape[0])
+        mask = masks.get(item)
+        if mask is None or all(bool(value) for value in mask):
+            selected_count = row_count
+            label_ids = (
+                [f"{item}:{index + 1}" for index in range(row_count)]
+                if include_label_ids
+                else None
+            )
+        else:
+            keep_indices = _valid_residue_indices(row_count, mask)
+            if not keep_indices:
+                continue
+            index_tensor = torch.tensor(keep_indices, dtype=torch.long)
+            tensor = tensor.index_select(0, index_tensor)
+            selected_count = len(keep_indices)
+            label_ids = (
+                [f"{item}:{index + 1}" for index in keep_indices]
+                if include_label_ids
+                else None
+            )
         start = 0
-        while start < len(label_ids):
+        while start < selected_count:
             available = resolved_batch_size - pending_count
-            end = min(len(label_ids), start + available)
+            end = min(selected_count, start + available)
             pending_tensors.append(tensor[start:end])
-            pending_label_ids.extend(label_ids[start:end])
+            if label_ids is not None:
+                pending_label_ids.extend(label_ids[start:end])
             pending_count += end - start
             start = end
             if pending_count >= resolved_batch_size:
