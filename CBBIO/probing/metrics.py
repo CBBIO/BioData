@@ -166,31 +166,39 @@ def multilabel_metrics(
         if len(true_row) != class_count or len(pred_row) != class_count or len(score_row) != class_count:
             raise ValueError("Multilabel metric rows must have the same class count.")
 
-    exact_match = sum(
-        1 for true_row, pred_row in zip(y_true, y_pred)
-        if [int(value) for value in true_row] == [int(value) for value in pred_row]
-    ) / float(len(y_true))
-    macro_f1_values: list[float] = []
-    supports: list[int] = []
-    average_precision_values: list[float] = []
-    micro_tp = 0
-    micro_fp = 0
-    micro_fn = 0
-    for class_index in range(class_count):
-        true_values = [int(row[class_index]) for row in y_true]
-        pred_values = [int(row[class_index]) for row in y_pred]
-        score_values = [float(row[class_index]) for row in y_score]
-        tp = sum(1 for true, pred in zip(true_values, pred_values) if true == 1 and pred == 1)
-        fp = sum(1 for true, pred in zip(true_values, pred_values) if true == 0 and pred == 1)
-        fn = sum(1 for true, pred in zip(true_values, pred_values) if true == 1 and pred == 0)
-        precision = float(tp) / float(tp + fp) if tp + fp else 0.0
-        recall = float(tp) / float(tp + fn) if tp + fn else 0.0
-        macro_f1_values.append(2.0 * precision * recall / (precision + recall) if precision + recall else 0.0)
-        supports.append(sum(true_values))
-        average_precision_values.append(_binary_auprc(true_values, score_values))
-        micro_tp += tp
-        micro_fp += fp
-        micro_fn += fn
+    true_matrix = _np.asarray(y_true, dtype=_np.int8)
+    pred_matrix = _np.asarray(y_pred, dtype=_np.int8)
+    score_matrix = _np.asarray(y_score, dtype=_np.float64)
+    exact_match = float(cast(float, _np.mean(_np.all(true_matrix == pred_matrix, axis=1))))
+    true_positive_by_class = _np.sum((true_matrix == 1) & (pred_matrix == 1), axis=0)
+    false_positive_by_class = _np.sum((true_matrix == 0) & (pred_matrix == 1), axis=0)
+    false_negative_by_class = _np.sum((true_matrix == 1) & (pred_matrix == 0), axis=0)
+    precision_by_class = _np.divide(
+        true_positive_by_class,
+        true_positive_by_class + false_positive_by_class,
+        out=_np.zeros(class_count, dtype=_np.float64),
+        where=(true_positive_by_class + false_positive_by_class) != 0,
+    )
+    recall_by_class = _np.divide(
+        true_positive_by_class,
+        true_positive_by_class + false_negative_by_class,
+        out=_np.zeros(class_count, dtype=_np.float64),
+        where=(true_positive_by_class + false_negative_by_class) != 0,
+    )
+    macro_f1_values = _np.divide(
+        2.0 * precision_by_class * recall_by_class,
+        precision_by_class + recall_by_class,
+        out=_np.zeros(class_count, dtype=_np.float64),
+        where=(precision_by_class + recall_by_class) != 0.0,
+    )
+    supports = _np.sum(true_matrix, axis=0)
+    average_precision_values = [
+        _binary_auprc(true_matrix[:, class_index].tolist(), score_matrix[:, class_index].tolist())
+        for class_index in range(class_count)
+    ]
+    micro_tp = int(_np.sum(true_positive_by_class))
+    micro_fp = int(_np.sum(false_positive_by_class))
+    micro_fn = int(_np.sum(false_negative_by_class))
     micro_precision = float(micro_tp) / float(micro_tp + micro_fp) if micro_tp + micro_fp else 0.0
     micro_recall = float(micro_tp) / float(micro_tp + micro_fn) if micro_tp + micro_fn else 0.0
     micro_f1 = (
@@ -198,9 +206,9 @@ def multilabel_metrics(
         if micro_precision + micro_recall
         else 0.0
     )
-    support_total = sum(supports)
+    support_total = int(_np.sum(supports))
     weighted_f1 = (
-        sum(f1 * support for f1, support in zip(macro_f1_values, supports)) / float(support_total)
+        float(cast(float, _np.sum(macro_f1_values * supports))) / float(support_total)
         if support_total
         else 0.0
     )
@@ -213,7 +221,7 @@ def multilabel_metrics(
         "exact_match": exact_match,
         "f1": micro_f1,
         "micro_f1": micro_f1,
-        "macro_f1": sum(macro_f1_values) / float(class_count),
+        "macro_f1": float(cast(float, _np.mean(macro_f1_values))),
         "weighted_f1": weighted_f1,
         "average_precision": sum(average_precision_values) / float(class_count),
         **ranking_metrics,
@@ -226,26 +234,31 @@ def _multilabel_fmax(
     y_score: Sequence[Sequence[float]],
     thresholds: Sequence[float],
 ) -> dict[str, float]:
+    true_values = _np.ravel(_np.asarray(y_true, dtype=_np.int8))
+    score_values = _np.ravel(_np.asarray(y_score, dtype=_np.float64))
+    order = _np.argsort(-score_values, kind="stable")
+    sorted_scores = score_values[order]
+    sorted_true = true_values[order]
+    actual_positive = int(_np.sum(true_values))
     best = {
         "fmax": -1.0,
         "fmax_threshold": 0.0,
         "precision_at_fmax": 0.0,
         "recall_at_fmax": 0.0,
     }
-    for threshold in thresholds:
-        true_positive = 0
-        false_positive = 0
-        false_negative = 0
-        for true_row, score_row in zip(y_true, y_score):
-            for true_value, score in zip(true_row, score_row):
-                predicted = float(score) >= threshold
-                actual = int(true_value) == 1
-                if predicted and actual:
-                    true_positive += 1
-                elif predicted:
-                    false_positive += 1
-                elif actual:
-                    false_negative += 1
+    cursor = 0
+    true_positive = 0
+    threshold_metrics: dict[float, tuple[float, float, float]] = {}
+    for threshold in sorted(set(thresholds), reverse=True):
+        end = cursor
+        while end < sorted_scores.size and sorted_scores[end] >= threshold:
+            end += 1
+        if end > cursor:
+            true_positive += int(_np.sum(sorted_true[cursor:end]))
+            cursor = end
+        predicted_positive = cursor
+        false_positive = predicted_positive - true_positive
+        false_negative = actual_positive - true_positive
         precision = (
             float(true_positive) / float(true_positive + false_positive)
             if true_positive + false_positive
@@ -256,7 +269,9 @@ def _multilabel_fmax(
             if true_positive + false_negative
             else 0.0
         )
-        f_score = _f_score(precision, recall)
+        threshold_metrics[threshold] = (_f_score(precision, recall), precision, recall)
+    for threshold in thresholds:
+        f_score, precision, recall = threshold_metrics[threshold]
         if f_score > best["fmax"]:
             best = {
                 "fmax": f_score,
