@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import argparse
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 import sys
@@ -23,8 +23,12 @@ from CBBIO import (  # noqa: E402
     ProteinGlmEmbeddingGenerator,
     ProstT5EmbeddingGenerator,
     ProtT5EmbeddingGenerator,
-    download_generator_model,
 )
+
+try:
+    from CBBIO import download_generator_model as _download_generator_model  # noqa: E402
+except ImportError:
+    _download_generator_model = None
 
 
 @dataclass(frozen=True)
@@ -35,6 +39,16 @@ class DownloadTarget:
     name: str
     model_reference: str
 
+
+@dataclass(frozen=True)
+class DownloadResult:
+    """Result metadata for one downloaded model."""
+
+    model_reference: str
+    path: Path | None
+
+
+DownloadGeneratorModel = Callable[..., Any]
 
 _GENERATOR_TYPES: tuple[type[Any], ...] = (
     ProtT5EmbeddingGenerator,
@@ -132,6 +146,12 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Optional Hugging Face token. If omitted, huggingface_hub uses its normal environment/cache config.",
     )
     parser.add_argument(
+        "-f",
+        "--force-download",
+        action="store_true",
+        help="Force files to be downloaded even when a cached snapshot exists.",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Print the download plan without contacting model providers.",
@@ -156,6 +176,53 @@ def _print_plan(targets: Iterable[DownloadTarget]) -> None:
         print(f"{target.model_class}\t{target.name}\t{target.model_reference}", flush=True)
 
 
+def _download_target(
+    target: DownloadTarget,
+    *,
+    revision: str | None,
+    cache_dir: Path | None,
+    local_dir: Path | None,
+    token: str | None,
+    force_download: bool,
+    download_generator_model_fn: DownloadGeneratorModel | None = _download_generator_model,
+) -> DownloadResult:
+    if download_generator_model_fn is not None:
+        result = download_generator_model_fn(
+            model_class=target.model_class,
+            name=target.name,
+            revision=revision,
+            cache_dir=cache_dir,
+            local_dir=local_dir,
+            token=token,
+            force_download=force_download,
+        )
+        return DownloadResult(
+            model_reference=str(getattr(result, "model_reference", target.model_reference)),
+            path=getattr(result, "path", None),
+        )
+
+    try:
+        from huggingface_hub import snapshot_download  # type: ignore
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "This installed CBBIO package does not expose download_generator_model, and "
+            "huggingface_hub is not installed. Install huggingface_hub or reinstall CBBIO from this branch."
+        ) from exc
+
+    path = snapshot_download(
+        repo_id=target.model_reference,
+        revision=revision,
+        cache_dir=str(cache_dir) if cache_dir is not None else None,
+        local_dir=str(local_dir) if local_dir is not None else None,
+        token=token,
+        force_download=force_download,
+    )
+    return DownloadResult(
+        model_reference=target.model_reference,
+        path=Path(path),
+    )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Run model downloads from the command line."""
     args = _parse_args(argv)
@@ -176,13 +243,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             flush=True,
         )
         try:
-            result = download_generator_model(
-                model_class=target.model_class,
-                name=target.name,
+            result = _download_target(
+                target,
                 revision=args.revision,
                 cache_dir=args.cache_dir,
                 local_dir=_local_dir_for_target(args.local_root, target),
                 token=args.token,
+                force_download=args.force_download,
+                download_generator_model_fn=_download_generator_model,
             )
         except Exception as exc:
             failures.append((target, exc))

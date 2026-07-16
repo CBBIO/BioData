@@ -316,7 +316,7 @@ Batching rules:
 - `length_sort_window=None`: no sorting.
 - `limit` means the first N accepted records after filtering and optional window sorting.
 
-ESM-C batching depends on the installed ESM SDK accepting multiple encoded proteins in one logits call. If your SDK version does not support that path, set `batch_size=1` for `model_class="esmc"`.
+ESM-C loads Biohub checkpoints through Hugging Face Transformers and supports the same fixed-size and token-budget batching controls as the other Hugging Face ESM adapters.
 
 ### `run_embedding_generation(...)`
 
@@ -410,7 +410,7 @@ FASTA helpers also remain:
 | `proteinglm` | `biomap-research/proteinglm-1b-mlm` | varies | `none`, `mean` | 1B / 3B / 10B variants |
 | `esm2` | `facebook/esm2_t33_650M_UR50D` | 6–48 (by size) | `none`, `mean`, `cls` | ESM2 family: 8M to 15B |
 | `esm1b` | `esm1b_t33_650M_UR50S` | 33 | `none`, `mean`, `cls` | Loads via torch.hub; `facebook/esm-1b` is an alias |
-| `esmc` | `esmc_600m` | varies | `none`, `mean`, `cls` | ESM-C SDK; use `batch_size=1` if SDK rejects batched input |
+| `esmc` | `esmc_600m` | read from model config | `none`, `mean`, `cls` | Biohub ESM-C checkpoints through Hugging Face Transformers |
 
 ### ESM-2 model sizes
 
@@ -439,7 +439,7 @@ FASTA helpers also remain:
 - **AMPLIFY**: On CUDA, defaults to `bfloat16` because its xFormers attention kernels do not support `float32`. Pass `dtype="float16"` explicitly if preferred. Short aliases `amplify_120m` and `amplify_350m` use NVIDIA TransformerEngine-optimized checkpoints (requires `transformer_engine.pytorch`). For CUDA 13: `pip install --no-build-isolation 'transformer-engine[pytorch,core-cu13]==2.16.0'`. For the upstream Chandar Lab checkpoints use `amplify_120m_chandar` / `amplify_350m_chandar`.
 - **ProteinGLM**: Short aliases `proteinglm_1b_mlm`, `proteinglm_3b_mlm`, `proteinglm_10b_mlm` resolve to Biomap checkpoints. Trailing EOS token is trimmed automatically.
 - **ESM-1b**: The HuggingFace checkpoint (`facebook/esm-1b`) was trained with post-norm but the HF model code uses pre-norm, which degrades accuracy. The generator loads via `torch.hub` by default to avoid this mismatch.
-- **ESM-C**: Multi-sequence batches require SDK support for batched logits. If the installed SDK rejects them, set `batch_size=1`.
+- **ESM-C**: Short aliases `esmc_300m`, `esmc_600m`, and `esmc_6b` resolve to Biohub checkpoints and load through Hugging Face Transformers. Layer indices remain transformer-layer-only (`0..N-1`); the Hugging Face embedding hidden state is not exposed as an ESM-C layer.
 
 ## Error Handling
 

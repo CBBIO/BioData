@@ -543,7 +543,8 @@ def test_generator_factory_builds_esmc_from_size_alias() -> None:
     assert isinstance(obj, EsmcEmbeddingGenerator)
     assert obj.model_reference == "biohub/ESMC-600M"
     assert obj.model_metadata.parameters is not None
-    assert obj.model_metadata.parameters["sdk_model_name"] == "esmc_600m"
+    assert obj.model_metadata.provider == "huggingface-transformers"
+    assert obj.model_metadata.parameters["layer_indexing"] == "hf_hidden_states_0_is_embedding_esmc_layers_skip_embedding"
 
 
 def test_generator_factory_builds_proteinglm() -> None:
