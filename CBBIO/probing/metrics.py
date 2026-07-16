@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 import math
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
+
+import numpy as _np
 
 if TYPE_CHECKING:
     from CBBIO.GO import GOOntology
@@ -16,6 +18,32 @@ if TYPE_CHECKING:
 class _PreparedGoMetricInputs:
     truth: Mapping[str, set[str]]
     scores: Mapping[str, Mapping[str, float]]
+
+
+@dataclass(frozen=True)
+class _PreparedGoScoreTerm:
+    term: str
+    score: float
+    weight: float
+    is_true: bool
+
+
+@dataclass(frozen=True)
+class _PreparedGoThresholdRow:
+    truth: set[str]
+    terms: tuple[_PreparedGoScoreTerm, ...]
+    truth_weight: float
+
+
+@dataclass(frozen=True)
+class _FlatGoThresholdRows:
+    protein_count: int
+    protein_indices: Any
+    scores: Any
+    true_values: Any
+    weights: Any
+    truth_counts: Any
+    truth_weights: Any
 
 
 @dataclass(frozen=True)
@@ -319,19 +347,12 @@ def go_combined_protein_centric_metrics(
     if not weighted_truth:
         raise ValueError("GO truth labels contain no positive-weight non-root terms.")
     metrics.update(
-        _go_weighted_fmax(
+        _go_weighted_metrics(
             propagated_truth=weighted_truth,
             propagated_scores=_select_score_rows(prepared.scores, weighted_truth),
             term_weights=term_weights,
             thresholds=thresholds,
-        )
-    )
-    metrics.update(
-        _go_weighted_semantic_distance(
-            propagated_truth=weighted_truth,
-            propagated_scores=_select_score_rows(prepared.scores, weighted_truth),
-            term_weights=term_weights,
-            thresholds=thresholds,
+            include_semantic_distance=True,
         )
     )
     return metrics
@@ -383,6 +404,10 @@ def _go_unweighted_fmax(
     propagated_scores: Mapping[str, Mapping[str, float]],
     thresholds: Sequence[float],
 ) -> dict[str, float]:
+    rows = _prepare_go_threshold_rows(
+        propagated_truth=propagated_truth,
+        propagated_scores=propagated_scores,
+    )
     best = {
         "go_fmax": -1.0,
         "go_macro_fmax": -1.0,
@@ -394,12 +419,16 @@ def _go_unweighted_fmax(
         "go_macro_recall_at_fmax": 0.0,
         "go_evaluated_protein_count": float(len(propagated_truth)),
     }
-    for threshold in thresholds:
-        threshold_metrics = _go_unweighted_at_threshold(
-            propagated_truth=propagated_truth,
-            propagated_scores=propagated_scores,
-            threshold=threshold,
-        )
+    micro_best = {
+        "go_micro_fmax": -1.0,
+        "go_micro_fmax_threshold": 0.0,
+        "go_micro_precision_at_fmax": 0.0,
+        "go_micro_recall_at_fmax": 0.0,
+    }
+    for threshold, threshold_metrics, micro_metrics in _iter_unweighted_go_threshold_metrics(
+        rows=rows,
+        thresholds=thresholds,
+    ):
         if threshold_metrics.f_score > best["go_fmax"]:
             best = {
                 "go_fmax": threshold_metrics.f_score,
@@ -412,13 +441,14 @@ def _go_unweighted_fmax(
                 "go_macro_recall_at_fmax": threshold_metrics.recall,
                 "go_evaluated_protein_count": float(len(propagated_truth)),
             }
-    best.update(
-        _go_micro_fmax(
-            propagated_truth=propagated_truth,
-            propagated_scores=propagated_scores,
-            thresholds=thresholds,
-        )
-    )
+        if micro_metrics.f_score > micro_best["go_micro_fmax"]:
+            micro_best = {
+                "go_micro_fmax": micro_metrics.f_score,
+                "go_micro_fmax_threshold": threshold,
+                "go_micro_precision_at_fmax": micro_metrics.precision,
+                "go_micro_recall_at_fmax": micro_metrics.recall,
+            }
+    best.update(micro_best)
     return best
 
 
@@ -428,10 +458,16 @@ def _go_unweighted_fixed_threshold(
     propagated_scores: Mapping[str, Mapping[str, float]],
     threshold: float,
 ) -> dict[str, float]:
-    threshold_metrics = _go_unweighted_at_threshold(
+    rows = _prepare_go_threshold_rows(
         propagated_truth=propagated_truth,
         propagated_scores=propagated_scores,
-        threshold=threshold,
+    )
+    threshold_metrics = next(
+        metrics
+        for _threshold, metrics, _micro_metrics in _iter_unweighted_go_threshold_metrics(
+            rows=rows,
+            thresholds=[threshold],
+        )
     )
     return {
         "go_propagated_f1": threshold_metrics.f_score,
@@ -440,71 +476,6 @@ def _go_unweighted_fixed_threshold(
         "go_propagated_threshold": threshold,
         "go_propagated_evaluated_protein_count": float(len(propagated_truth)),
     }
-
-
-def _go_unweighted_at_threshold(
-    *,
-    propagated_truth: Mapping[str, set[str]],
-    propagated_scores: Mapping[str, Mapping[str, float]],
-    threshold: float,
-) -> _ProteinCentricThresholdMetrics:
-    precision_values: list[float] = []
-    recall_values: list[float] = []
-    for protein_id, truth in propagated_truth.items():
-        predicted = _terms_at_threshold(propagated_scores[protein_id], threshold=threshold)
-        intersection = predicted.intersection(truth)
-        if predicted:
-            precision_values.append(len(intersection) / float(len(predicted)))
-        recall_values.append(len(intersection) / float(len(truth)))
-    precision = sum(precision_values) / float(len(precision_values)) if precision_values else 0.0
-    recall = sum(recall_values) / float(len(recall_values))
-    return _ProteinCentricThresholdMetrics(
-        f_score=_f_score(precision, recall),
-        precision=precision,
-        recall=recall,
-    )
-
-
-def _go_micro_fmax(
-    *,
-    propagated_truth: Mapping[str, set[str]],
-    propagated_scores: Mapping[str, Mapping[str, float]],
-    thresholds: Sequence[float],
-) -> dict[str, float]:
-    best = {
-        "go_micro_fmax": -1.0,
-        "go_micro_fmax_threshold": 0.0,
-        "go_micro_precision_at_fmax": 0.0,
-        "go_micro_recall_at_fmax": 0.0,
-    }
-    for threshold in thresholds:
-        true_positive = 0
-        false_positive = 0
-        false_negative = 0
-        for protein_id, truth in propagated_truth.items():
-            predicted = _terms_at_threshold(propagated_scores[protein_id], threshold=threshold)
-            true_positive += len(predicted.intersection(truth))
-            false_positive += len(predicted.difference(truth))
-            false_negative += len(truth.difference(predicted))
-        precision = (
-            float(true_positive) / float(true_positive + false_positive)
-            if true_positive + false_positive
-            else 0.0
-        )
-        recall = (
-            float(true_positive) / float(true_positive + false_negative)
-            if true_positive + false_negative
-            else 0.0
-        )
-        f_score = _f_score(precision, recall)
-        if f_score > best["go_micro_fmax"]:
-            best = {
-                "go_micro_fmax": f_score,
-                "go_micro_fmax_threshold": threshold,
-                "go_micro_precision_at_fmax": precision,
-                "go_micro_recall_at_fmax": recall,
-            }
-    return best
 
 
 def go_weighted_protein_centric_metrics(
@@ -547,6 +518,28 @@ def _go_weighted_fmax(
     term_weights: Mapping[str, float],
     thresholds: Sequence[float],
 ) -> dict[str, float]:
+    return _go_weighted_metrics(
+        propagated_truth=propagated_truth,
+        propagated_scores=propagated_scores,
+        term_weights=term_weights,
+        thresholds=thresholds,
+        include_semantic_distance=False,
+    )
+
+
+def _go_weighted_metrics(
+    *,
+    propagated_truth: Mapping[str, set[str]],
+    propagated_scores: Mapping[str, Mapping[str, float]],
+    term_weights: Mapping[str, float],
+    thresholds: Sequence[float],
+    include_semantic_distance: bool,
+) -> dict[str, float]:
+    rows = _prepare_go_threshold_rows(
+        propagated_truth=propagated_truth,
+        propagated_scores=propagated_scores,
+        term_weights=term_weights,
+    )
     best = {
         "go_weighted_fmax": -1.0,
         "go_weighted_macro_fmax": -1.0,
@@ -558,13 +551,23 @@ def _go_weighted_fmax(
         "go_weighted_macro_recall_at_fmax": 0.0,
         "go_weighted_evaluated_protein_count": float(len(propagated_truth)),
     }
-    for threshold in thresholds:
-        threshold_metrics = _go_weighted_at_threshold(
-            propagated_truth=propagated_truth,
-            propagated_scores=propagated_scores,
-            term_weights=term_weights,
-            threshold=threshold,
-        )
+    micro_best = {
+        "go_weighted_micro_fmax": -1.0,
+        "go_weighted_micro_fmax_threshold": 0.0,
+        "go_weighted_micro_precision_at_fmax": 0.0,
+        "go_weighted_micro_recall_at_fmax": 0.0,
+    }
+    distance_best = _SemanticDistanceMetrics(
+        threshold=0.0,
+        remaining_uncertainty=math.inf,
+        misinformation=math.inf,
+    )
+    best_distance = math.inf
+    for threshold, threshold_metrics, micro_metrics, distance_metrics in _iter_weighted_go_threshold_metrics(
+        rows=rows,
+        thresholds=thresholds,
+        include_semantic_distance=include_semantic_distance,
+    ):
         if threshold_metrics.f_score > best["go_weighted_fmax"]:
             best = {
                 "go_weighted_fmax": threshold_metrics.f_score,
@@ -577,143 +580,236 @@ def _go_weighted_fmax(
                 "go_weighted_macro_recall_at_fmax": threshold_metrics.recall,
                 "go_weighted_evaluated_protein_count": float(len(propagated_truth)),
             }
-    best.update(
-        _go_weighted_micro_fmax(
-            propagated_truth=propagated_truth,
-            propagated_scores=propagated_scores,
-            term_weights=term_weights,
-            thresholds=thresholds,
-        )
-    )
-    return best
-
-
-def _go_weighted_at_threshold(
-    *,
-    propagated_truth: Mapping[str, set[str]],
-    propagated_scores: Mapping[str, Mapping[str, float]],
-    term_weights: Mapping[str, float],
-    threshold: float,
-) -> _ProteinCentricThresholdMetrics:
-    precision_values: list[float] = []
-    recall_values: list[float] = []
-    for protein_id, truth in propagated_truth.items():
-        predicted = _terms_at_threshold(propagated_scores[protein_id], threshold=threshold)
-        intersection_weight = _term_weight_sum(
-            predicted.intersection(truth),
-            term_weights=term_weights,
-        )
-        predicted_weight = _term_weight_sum(predicted, term_weights=term_weights)
-        truth_weight = _term_weight_sum(truth, term_weights=term_weights)
-        if predicted_weight > 0.0:
-            precision_values.append(intersection_weight / predicted_weight)
-        recall_values.append(intersection_weight / truth_weight if truth_weight > 0.0 else 0.0)
-    precision = sum(precision_values) / float(len(precision_values)) if precision_values else 0.0
-    recall = sum(recall_values) / float(len(recall_values))
-    return _ProteinCentricThresholdMetrics(
-        f_score=_f_score(precision, recall),
-        precision=precision,
-        recall=recall,
-    )
-
-
-def _go_weighted_micro_fmax(
-    *,
-    propagated_truth: Mapping[str, set[str]],
-    propagated_scores: Mapping[str, Mapping[str, float]],
-    term_weights: Mapping[str, float],
-    thresholds: Sequence[float],
-) -> dict[str, float]:
-    best = {
-        "go_weighted_micro_fmax": -1.0,
-        "go_weighted_micro_fmax_threshold": 0.0,
-        "go_weighted_micro_precision_at_fmax": 0.0,
-        "go_weighted_micro_recall_at_fmax": 0.0,
-    }
-    for threshold in thresholds:
-        true_positive_weight = 0.0
-        false_positive_weight = 0.0
-        false_negative_weight = 0.0
-        for protein_id, truth in propagated_truth.items():
-            predicted = _terms_at_threshold(propagated_scores[protein_id], threshold=threshold)
-            true_positive_weight += _term_weight_sum(predicted.intersection(truth), term_weights=term_weights)
-            false_positive_weight += _term_weight_sum(predicted.difference(truth), term_weights=term_weights)
-            false_negative_weight += _term_weight_sum(truth.difference(predicted), term_weights=term_weights)
-        precision = (
-            true_positive_weight / (true_positive_weight + false_positive_weight)
-            if true_positive_weight + false_positive_weight
-            else 0.0
-        )
-        recall = (
-            true_positive_weight / (true_positive_weight + false_negative_weight)
-            if true_positive_weight + false_negative_weight
-            else 0.0
-        )
-        f_score = _f_score(precision, recall)
-        if f_score > best["go_weighted_micro_fmax"]:
-            best = {
-                "go_weighted_micro_fmax": f_score,
+        if micro_metrics.f_score > micro_best["go_weighted_micro_fmax"]:
+            micro_best = {
+                "go_weighted_micro_fmax": micro_metrics.f_score,
                 "go_weighted_micro_fmax_threshold": threshold,
-                "go_weighted_micro_precision_at_fmax": precision,
-                "go_weighted_micro_recall_at_fmax": recall,
+                "go_weighted_micro_precision_at_fmax": micro_metrics.precision,
+                "go_weighted_micro_recall_at_fmax": micro_metrics.recall,
             }
+        if include_semantic_distance:
+            distance = math.sqrt(
+                distance_metrics.remaining_uncertainty**2 + distance_metrics.misinformation**2
+            )
+            if distance < best_distance:
+                distance_best = distance_metrics
+                best_distance = distance
+    best.update(micro_best)
+    if include_semantic_distance:
+        best.update(
+            {
+                "go_weighted_smin": best_distance,
+                "go_weighted_smin_threshold": distance_best.threshold,
+                "go_weighted_remaining_uncertainty_at_smin": distance_best.remaining_uncertainty,
+                "go_weighted_misinformation_at_smin": distance_best.misinformation,
+            }
+        )
     return best
 
 
-def _go_weighted_semantic_distance(
+def _prepare_go_threshold_rows(
     *,
     propagated_truth: Mapping[str, set[str]],
     propagated_scores: Mapping[str, Mapping[str, float]],
-    term_weights: Mapping[str, float],
-    thresholds: Sequence[float],
-) -> dict[str, float]:
-    best = _SemanticDistanceMetrics(
-        threshold=0.0,
-        remaining_uncertainty=math.inf,
-        misinformation=math.inf,
-    )
-    best_distance = math.inf
-    for threshold in thresholds:
-        metrics = _go_weighted_semantic_distance_at_threshold(
-            propagated_truth=propagated_truth,
-            propagated_scores=propagated_scores,
-            term_weights=term_weights,
-            threshold=threshold,
-        )
-        distance = math.sqrt(metrics.remaining_uncertainty**2 + metrics.misinformation**2)
-        if distance < best_distance:
-            best = metrics
-            best_distance = distance
-    return {
-        "go_weighted_smin": best_distance,
-        "go_weighted_smin_threshold": best.threshold,
-        "go_weighted_remaining_uncertainty_at_smin": best.remaining_uncertainty,
-        "go_weighted_misinformation_at_smin": best.misinformation,
-    }
-
-
-def _go_weighted_semantic_distance_at_threshold(
-    *,
-    propagated_truth: Mapping[str, set[str]],
-    propagated_scores: Mapping[str, Mapping[str, float]],
-    term_weights: Mapping[str, float],
-    threshold: float,
-) -> _SemanticDistanceMetrics:
-    remaining_uncertainty_values: list[float] = []
-    misinformation_values: list[float] = []
+    term_weights: Mapping[str, float] | None = None,
+) -> tuple[_PreparedGoThresholdRow, ...]:
+    rows: list[_PreparedGoThresholdRow] = []
     for protein_id, truth in propagated_truth.items():
-        predicted = _terms_at_threshold(propagated_scores[protein_id], threshold=threshold)
-        remaining_uncertainty_values.append(
-            _term_weight_sum(truth.difference(predicted), term_weights=term_weights)
+        terms = tuple(
+            sorted(
+                (
+                    _PreparedGoScoreTerm(
+                        term=term,
+                        score=float(score),
+                        weight=(
+                            float(term_weights.get(term, 0.0))
+                            if term_weights is not None
+                            else 1.0
+                        ),
+                        is_true=term in truth,
+                    )
+                    for term, score in propagated_scores[protein_id].items()
+                ),
+                key=lambda item: item.score,
+                reverse=True,
+            )
         )
-        misinformation_values.append(
-            _term_weight_sum(predicted.difference(truth), term_weights=term_weights)
+        truth_weight = (
+            _term_weight_sum(truth, term_weights=term_weights)
+            if term_weights is not None
+            else float(len(truth))
         )
-    return _SemanticDistanceMetrics(
-        threshold=threshold,
-        remaining_uncertainty=sum(remaining_uncertainty_values) / float(len(remaining_uncertainty_values)),
-        misinformation=sum(misinformation_values) / float(len(misinformation_values)),
+        rows.append(
+            _PreparedGoThresholdRow(
+                truth=set(truth),
+                terms=terms,
+                truth_weight=truth_weight,
+            )
+        )
+    return tuple(rows)
+
+
+def _flatten_go_threshold_rows(rows: Sequence[_PreparedGoThresholdRow]) -> _FlatGoThresholdRows:
+    protein_indices: list[int] = []
+    scores: list[float] = []
+    true_values: list[float] = []
+    weights: list[float] = []
+    truth_counts: list[float] = []
+    truth_weights: list[float] = []
+    for protein_index, row in enumerate(rows):
+        truth_counts.append(float(len(row.truth)))
+        truth_weights.append(row.truth_weight)
+        for term in row.terms:
+            protein_indices.append(protein_index)
+            scores.append(term.score)
+            true_values.append(1.0 if term.is_true else 0.0)
+            weights.append(term.weight)
+    score_array = _np.asarray(scores, dtype=_np.float64)
+    if score_array.size:
+        order = _np.argsort(-score_array, kind="stable")
+        protein_index_array = _np.asarray(protein_indices, dtype=_np.int64)[order]
+        score_array = score_array[order]
+        true_value_array = _np.asarray(true_values, dtype=_np.float64)[order]
+        weight_array = _np.asarray(weights, dtype=_np.float64)[order]
+    else:
+        protein_index_array = _np.empty(0, dtype=_np.int64)
+        true_value_array = _np.empty(0, dtype=_np.float64)
+        weight_array = _np.empty(0, dtype=_np.float64)
+    return _FlatGoThresholdRows(
+        protein_count=len(rows),
+        protein_indices=protein_index_array,
+        scores=score_array,
+        true_values=true_value_array,
+        weights=weight_array,
+        truth_counts=_np.asarray(truth_counts, dtype=_np.float64),
+        truth_weights=_np.asarray(truth_weights, dtype=_np.float64),
     )
+
+
+def _iter_unweighted_go_threshold_metrics(
+    *,
+    rows: Sequence[_PreparedGoThresholdRow],
+    thresholds: Sequence[float],
+) -> Iterator[tuple[float, _ProteinCentricThresholdMetrics, _ProteinCentricThresholdMetrics]]:
+    flat = _flatten_go_threshold_rows(rows)
+    predicted = _np.zeros(flat.protein_count, dtype=_np.float64)
+    true_positive = _np.zeros(flat.protein_count, dtype=_np.float64)
+    metrics_by_threshold: dict[float, tuple[_ProteinCentricThresholdMetrics, _ProteinCentricThresholdMetrics]] = {}
+    cursor = 0
+    for threshold in sorted(set(thresholds), reverse=True):
+        end = cursor
+        while end < flat.scores.size and flat.scores[end] >= threshold:
+            end += 1
+        if end > cursor:
+            protein_indices = flat.protein_indices[cursor:end]
+            _np.add.at(predicted, protein_indices, 1.0)
+            _np.add.at(true_positive, protein_indices, flat.true_values[cursor:end])
+            cursor = end
+        has_prediction = predicted > 0.0
+        precision = (
+            float(_np.mean(true_positive[has_prediction] / predicted[has_prediction]))
+            if bool(_np.any(has_prediction))
+            else 0.0
+        )
+        recall = float(cast(float, _np.mean(true_positive / flat.truth_counts)))
+        micro_true_positive = float(_np.sum(true_positive))
+        micro_predicted = float(_np.sum(predicted))
+        truth_total = float(_np.sum(flat.truth_counts))
+        micro_precision = micro_true_positive / micro_predicted if micro_predicted else 0.0
+        micro_recall = micro_true_positive / truth_total if truth_total else 0.0
+        metrics_by_threshold[threshold] = (
+            _ProteinCentricThresholdMetrics(
+                f_score=_f_score(precision, recall),
+                precision=precision,
+                recall=recall,
+            ),
+            _ProteinCentricThresholdMetrics(
+                f_score=_f_score(micro_precision, micro_recall),
+                precision=micro_precision,
+                recall=micro_recall,
+            ),
+        )
+    for threshold in thresholds:
+        macro_metrics, micro_metrics = metrics_by_threshold[threshold]
+        yield threshold, macro_metrics, micro_metrics
+
+
+def _iter_weighted_go_threshold_metrics(
+    *,
+    rows: Sequence[_PreparedGoThresholdRow],
+    thresholds: Sequence[float],
+    include_semantic_distance: bool,
+) -> Iterator[
+    tuple[
+        float,
+        _ProteinCentricThresholdMetrics,
+        _ProteinCentricThresholdMetrics,
+        _SemanticDistanceMetrics,
+    ]
+]:
+    flat = _flatten_go_threshold_rows(rows)
+    predicted_weight = _np.zeros(flat.protein_count, dtype=_np.float64)
+    true_positive_weight = _np.zeros(flat.protein_count, dtype=_np.float64)
+    metrics_by_threshold: dict[
+        float,
+        tuple[_ProteinCentricThresholdMetrics, _ProteinCentricThresholdMetrics, _SemanticDistanceMetrics],
+    ] = {}
+    cursor = 0
+    for threshold in sorted(set(thresholds), reverse=True):
+        end = cursor
+        while end < flat.scores.size and flat.scores[end] >= threshold:
+            end += 1
+        if end > cursor:
+            protein_indices = flat.protein_indices[cursor:end]
+            weights = flat.weights[cursor:end]
+            _np.add.at(predicted_weight, protein_indices, weights)
+            _np.add.at(true_positive_weight, protein_indices, weights * flat.true_values[cursor:end])
+            cursor = end
+        has_prediction = predicted_weight > 0.0
+        precision = (
+            float(_np.mean(true_positive_weight[has_prediction] / predicted_weight[has_prediction]))
+            if bool(_np.any(has_prediction))
+            else 0.0
+        )
+        recall = float(cast(float, _np.mean(true_positive_weight / flat.truth_weights)))
+        micro_true_positive_weight = float(_np.sum(true_positive_weight))
+        micro_predicted_weight = float(_np.sum(predicted_weight))
+        truth_weight_total = float(_np.sum(flat.truth_weights))
+        micro_precision = (
+            micro_true_positive_weight / micro_predicted_weight
+            if micro_predicted_weight
+            else 0.0
+        )
+        micro_recall = (
+            micro_true_positive_weight / truth_weight_total
+            if truth_weight_total
+            else 0.0
+        )
+        remaining_uncertainty = 0.0
+        misinformation = 0.0
+        if include_semantic_distance:
+            remaining_uncertainty = float(_np.sum(flat.truth_weights - true_positive_weight))
+            misinformation = float(_np.sum(predicted_weight - true_positive_weight))
+        metrics_by_threshold[threshold] = (
+            _ProteinCentricThresholdMetrics(
+                f_score=_f_score(precision, recall),
+                precision=precision,
+                recall=recall,
+            ),
+            _ProteinCentricThresholdMetrics(
+                f_score=_f_score(micro_precision, micro_recall),
+                precision=micro_precision,
+                recall=micro_recall,
+            ),
+            _SemanticDistanceMetrics(
+                threshold=threshold,
+                remaining_uncertainty=remaining_uncertainty / float(len(rows)),
+                misinformation=misinformation / float(len(rows)),
+            ),
+        )
+    for threshold in thresholds:
+        macro_metrics, micro_metrics, distance_metrics = metrics_by_threshold[threshold]
+        yield threshold, macro_metrics, micro_metrics, distance_metrics
 
 
 def read_information_accretion_weights(path: str | Path) -> dict[str, float]:
@@ -863,14 +959,6 @@ def _score_thresholds(threshold_count: int, *, metric_name: str) -> list[float]:
     if count < 2:
         raise ValueError(f"{metric_name} threshold_count must be at least 2.")
     return [index / float(count - 1) for index in range(count)]
-
-
-def _terms_at_threshold(scores: Mapping[str, float], *, threshold: float) -> set[str]:
-    return {
-        term
-        for term, score in scores.items()
-        if score >= threshold
-    }
 
 
 def _f_score(precision: float, recall: float) -> float:
