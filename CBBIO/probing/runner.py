@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import time
 from typing import Any, Dict, cast
+import weakref
 
 from CBBIO.embeddings import EmbeddingInputError
 
@@ -21,8 +22,9 @@ from .backends import (
 )
 from .datasets import ProteinDataset, ResidueDataset
 from .metrics import (
-    go_combined_protein_centric_metrics,
-    go_fixed_threshold_protein_centric_metrics,
+    GoMetricContext,
+    evaluate_go_metric_context,
+    prepare_go_metric_context,
     read_information_accretion_weights,
 )
 from .probes import LinearProbe, MlpProbe, ProbeEvaluation, TransferProbe
@@ -43,6 +45,15 @@ class TaskLayerResult:
     val_count: int
     test_count: int
     elapsed_seconds: float
+
+
+@dataclass(frozen=True)
+class _CachedGoMetricContext:
+    task: weakref.ReferenceType[Task]
+    context: GoMetricContext
+
+
+_GO_METRIC_CONTEXT_CACHE: dict[int, _CachedGoMetricContext] = {}
 
 
 def run_task_on_layer(
@@ -149,6 +160,37 @@ def _evaluate_go_metrics(
 ) -> dict[str, float]:
     if scores is None:
         raise EmbeddingInputError("GO evaluation requires multilabel prediction scores.")
+    context = _go_metric_context_for_task(task)
+    try:
+        return evaluate_go_metric_context(
+            cast(Mapping[str, Sequence[float]], scores),
+            context=context,
+            fixed_threshold=fixed_threshold,
+        )
+    except ValueError as exc:
+        raise EmbeddingInputError(f"GO evaluation failed: {exc}") from exc
+
+
+def _go_metric_context_for_task(task: Task) -> GoMetricContext:
+    key = id(task)
+    cached = _GO_METRIC_CONTEXT_CACHE.get(key)
+    if cached is not None and cached.task() is task:
+        return cached.context
+    context = _build_go_metric_context(task)
+
+    def _remove_expired_task(task_reference: weakref.ReferenceType[Task]) -> None:
+        current = _GO_METRIC_CONTEXT_CACHE.get(key)
+        if current is not None and current.task is task_reference:
+            _GO_METRIC_CONTEXT_CACHE.pop(key, None)
+
+    _GO_METRIC_CONTEXT_CACHE[key] = _CachedGoMetricContext(
+        task=weakref.ref(task, _remove_expired_task),
+        context=context,
+    )
+    return context
+
+
+def _build_go_metric_context(task: Task) -> GoMetricContext:
     test_examples = task.dataset.by_split("test")
     true_labels: dict[str, Sequence[str]] = {}
     ontology_paths: set[str] = set()
@@ -193,11 +235,6 @@ def _evaluate_go_metrics(
         raise EmbeddingInputError(
             "CAFA weighted GO evaluation requires an IA.txt information-accretion weight file."
         )
-    score_rows: dict[str, Sequence[float]] = {}
-    for example_id, score in scores.items():
-        if not isinstance(score, Sequence) or isinstance(score, str | bytes):
-            raise EmbeddingInputError(f"GO prediction scores for {example_id!r} must be a sequence.")
-        score_rows[example_id] = [float(value) for value in score]
     scored_examples = [*task.dataset.by_split("train"), *test_examples]
     class_names = sorted(
         {
@@ -213,17 +250,15 @@ def _evaluate_go_metrics(
     except GOError as exc:
         raise EmbeddingInputError("GO evaluation could not load the generated GO ontology.") from exc
     try:
-        term_weights = (
-            read_information_accretion_weights(next(iter(ia_paths)))
-            if ia_paths
-            else None
-        )
-        metrics = go_combined_protein_centric_metrics(
-            score_rows,
+        return prepare_go_metric_context(
             class_names=class_names,
             true_labels=true_labels,
             ontology=ontology,
-            term_weights=term_weights,
+            term_weights=(
+                read_information_accretion_weights(next(iter(ia_paths)))
+                if ia_paths
+                else None
+            ),
             known_labels=(
                 _read_go_terms_by_protein(
                     next(iter(known_terms_paths)),
@@ -240,31 +275,6 @@ def _evaluate_go_metrics(
             ),
             threshold_count=_go_threshold_count(sources),
         )
-        if fixed_threshold is not None:
-            metrics.update(
-                go_fixed_threshold_protein_centric_metrics(
-                    score_rows,
-                    class_names=class_names,
-                    true_labels=true_labels,
-                    ontology=ontology,
-                    threshold=fixed_threshold,
-                    known_labels=(
-                        _read_go_terms_by_protein(
-                            next(iter(known_terms_paths)),
-                            target=task.prediction.target,
-                            protein_ids=true_labels,
-                        )
-                        if known_terms_paths
-                        else None
-                    ),
-                    terms_of_interest=(
-                        _read_go_terms_of_interest(next(iter(terms_of_interest_paths)))
-                        if terms_of_interest_paths
-                        else None
-                    ),
-                )
-            )
-        return metrics
     except ValueError as exc:
         raise EmbeddingInputError(f"GO evaluation failed: {exc}") from exc
 
@@ -292,21 +302,31 @@ def _read_go_terms_by_protein(
     terms_by_protein: dict[str, set[str]] = {}
     accepted_aspects = _go_aspect_values(target)
     with Path(path).expanduser().open("r", encoding="utf-8", newline="") as handle:
-        reader = csv.DictReader(handle, delimiter="\t")
-        fieldnames = {field.strip().lower(): field for field in reader.fieldnames or []}
-        id_field = fieldnames.get("entryid")
-        term_field = fieldnames.get("term")
-        aspect_field = fieldnames.get("aspect")
-        if id_field is None or term_field is None or aspect_field is None:
+        reader = csv.reader(handle, delimiter="\t")
+        try:
+            header = next(reader)
+        except StopIteration:
+            header = []
+        field_indices = {
+            field.strip().lower(): index
+            for index, field in enumerate(header)
+        }
+        id_index = field_indices.get("entryid")
+        term_index = field_indices.get("term")
+        aspect_index = field_indices.get("aspect")
+        if id_index is None or term_index is None or aspect_index is None:
             raise EmbeddingInputError(f"GO known-terms file {path} must contain EntryID, term, and aspect.")
+        required_index = max(id_index, term_index, aspect_index)
         for row in reader:
-            protein_id = str(row.get(id_field, "")).strip()
+            if len(row) <= required_index:
+                continue
+            protein_id = row[id_index].strip()
             if protein_id not in protein_ids:
                 continue
-            aspect = str(row.get(aspect_field, "")).strip().upper()
+            aspect = row[aspect_index].strip().upper()
             if aspect not in accepted_aspects:
                 continue
-            term = str(row.get(term_field, "")).strip()
+            term = row[term_index].strip()
             if term:
                 terms_by_protein.setdefault(protein_id, set()).add(term)
     return {protein_id: sorted(terms) for protein_id, terms in terms_by_protein.items()}

@@ -7,10 +7,15 @@ from .backends import (
     evaluate_probe_backend_output,
 )
 from .metrics import (
+    GoMetricContext,
+    evaluate_go_metric_context,
     go_combined_protein_centric_metrics,
     go_fixed_threshold_protein_centric_metrics,
     go_protein_centric_metrics,
     go_weighted_protein_centric_metrics,
+    multiclass_metrics,
+    multilabel_metrics,
+    prepare_go_metric_context,
     read_information_accretion_weights,
 )
 from .datasets import (
@@ -208,6 +213,7 @@ __all__ = [
     "ECBENCH_DATASETS",
     "EC_COLLECTION",
     "GO_COLLECTION",
+    "GoMetricContext",
     "EC_COLLECTION_METADATA",
     "EC_DATASETS",
     "GO_COLLECTION_METADATA",
@@ -298,10 +304,14 @@ __all__ = [
     "download_peer_dataset",
     "download_residue_source",
     "evaluate_probe_backend_output",
+    "evaluate_go_metric_context",
     "go_combined_protein_centric_metrics",
     "go_fixed_threshold_protein_centric_metrics",
     "go_protein_centric_metrics",
     "go_weighted_protein_centric_metrics",
+    "multiclass_metrics",
+    "multilabel_metrics",
+    "prepare_go_metric_context",
     "filter_redundant_to_test_mmseqs",
     "get_dataset_catalog_entry",
     "get_dataset_collection",

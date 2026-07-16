@@ -59,6 +59,7 @@ class ProbeEvaluation:
     predictions: Dict[str, ProbePredictionOutput]
     scores: Dict[str, ProbeScoreOutput] | None = None
     metadata: Mapping[str, Any] | None = None
+    score_matrix: Any = None
 
 
 @dataclass(frozen=True)
@@ -95,6 +96,7 @@ class _TorchProbeBackend(ProbeBackend, ABC):
             return ProbeBackendOutput(
                 predictions=evaluation.predictions,
                 scores=evaluation.scores,
+                score_matrix=evaluation.score_matrix,
             )
         if data.level == "residue":
             evaluation = train_and_evaluate_residue_probe(
@@ -284,34 +286,50 @@ class TransferProbe(ProbeBackend):
 
     def _predict_multilabel(self, data: ProbeBackendInput) -> ProbeBackendOutput:
         classes = _transfer_multilabel_classes(data)
+        class_indices = {label: index for index, label in enumerate(classes)}
+        training_label_indices: dict[str, _np.ndarray[Any, _np.dtype[_np.int64]]] = {}
         predictions: Dict[str, ProbePredictionOutput] = {}
-        scores: Dict[str, ProbeScoreOutput] = {}
+        score_matrix = _np.zeros(
+            (len(data.test_ids), len(classes)),
+            dtype=_np.float64,
+        )
         weighted_neighbors = self._weighted_neighbors(data)
-        for item, neighbor_weights in weighted_neighbors.items():
-            votes = dict.fromkeys(classes, 0.0)
+        for row_index, item in enumerate(data.test_ids):
+            neighbor_weights = weighted_neighbors[item]
+            row = score_matrix[row_index]
             for neighbor_id, _distance, weight in neighbor_weights:
-                for label in _as_multilabel(data.labels[neighbor_id], neighbor_id):
-                    if label not in votes:
+                label_indices = training_label_indices.get(neighbor_id)
+                if label_indices is None:
+                    neighbor_labels = _as_multilabel(data.labels[neighbor_id], neighbor_id)
+                    unknown_labels = [
+                        label for label in neighbor_labels if label not in class_indices
+                    ]
+                    if unknown_labels:
                         raise EmbeddingInputError(
-                            f"Unknown multilabel class {label!r} for training example {neighbor_id!r}."
+                            f"Unknown multilabel class {unknown_labels[0]!r} for "
+                            f"training example {neighbor_id!r}."
                         )
-                    if self.scoring == "nearest_similarity":
-                        votes[label] = max(votes[label], weight)
-                    else:
-                        votes[label] += weight
-            if self.scoring == "nearest_similarity":
-                row = [votes[label] for label in classes]
-            else:
+                    label_indices = _np.fromiter(
+                        (class_indices[label] for label in neighbor_labels),
+                        dtype=_np.int64,
+                        count=len(neighbor_labels),
+                    )
+                    training_label_indices[neighbor_id] = label_indices
+                if self.scoring == "nearest_similarity":
+                    row[label_indices] = _np.maximum(row[label_indices], weight)
+                else:
+                    row[label_indices] += weight
+            if self.scoring != "nearest_similarity":
                 total = sum(weight for _neighbor_id, _distance, weight in neighbor_weights)
-                row = [votes[label] / total for label in classes]
-            scores[item] = [float(value) for value in row]
+                row /= total
             threshold = 0.5 if self.threshold is None else self.threshold
             predictions[item] = [
-                label for label, value in zip(classes, row) if value >= threshold
+                classes[int(index)]
+                for index in _np.flatnonzero(row >= threshold)
             ]
         return ProbeBackendOutput(
             predictions=predictions,
-            scores=scores,
+            score_matrix=score_matrix,
             metadata=self._neighbor_metadata(data, weighted_neighbors) if self.return_neighbors else None,
         )
 
@@ -1255,27 +1273,24 @@ def _evaluate_outputs(
         names = list(class_names or [])
         if not names:
             raise EmbeddingInputError("Multilabel evaluation requires class names.")
-        score_matrix = cast(List[List[float]], torch.sigmoid(logits).detach().cpu().tolist())
-        pred_matrix = [
-            [1 if score >= 0.5 else 0 for score in row]
-            for row in score_matrix
-        ]
-        true_matrix = [
-            [int(value) for value in cast(Sequence[float], labels[item])]
-            for item in test_ids
-        ]
+        score_matrix = torch.sigmoid(logits).detach().cpu().numpy()
+        pred_matrix = (score_matrix >= 0.5).astype(_np.int8, copy=False)
+        true_matrix = _np.asarray(
+            [cast(Sequence[float], labels[item]) for item in test_ids],
+            dtype=_np.int8,
+        )
         predictions = {
             item: [names[index] for index, value in enumerate(row) if value == 1]
             for item, row in zip(test_ids, pred_matrix)
         }
-        multilabel_scores: Dict[str, ProbeScoreOutput] = {
-            item: [float(value) for value in row]
-            for item, row in zip(test_ids, score_matrix)
-        }
         return ProbeEvaluation(
-            metrics=multilabel_metrics(true_matrix, pred_matrix, score_matrix),
+            metrics=multilabel_metrics(
+                cast(Sequence[Sequence[int]], true_matrix),
+                cast(Sequence[Sequence[int]], pred_matrix),
+                cast(Sequence[Sequence[float]], score_matrix),
+            ),
             predictions=predictions,
-            scores=multilabel_scores,
+            score_matrix=score_matrix,
         )
     raise EmbeddingInputError(f"Unsupported probe objective: {objective!r}.")
 

@@ -7,6 +7,9 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, TypeAlias, cast
 
+import numpy as _np
+import numpy.typing as _npt
+
 from CBBIO.embeddings import EmbeddingInputError
 
 from .datasets import TaskLevel
@@ -20,7 +23,8 @@ ProbeFeature: TypeAlias = Sequence[float] | Sequence[Sequence[float]]
 ProbeLabel: TypeAlias = object | Sequence[object]
 ProbePrediction: TypeAlias = float | int | str
 ProbePredictionOutput: TypeAlias = ProbePrediction | Sequence[ProbePrediction]
-ProbeScoreOutput: TypeAlias = float | Sequence[float]
+ProbeScoreRow: TypeAlias = Sequence[float] | _npt.NDArray[_np.float64]
+ProbeScoreOutput: TypeAlias = float | ProbeScoreRow
 
 
 @dataclass(frozen=True)
@@ -41,11 +45,17 @@ class ProbeBackendInput:
 
 @dataclass(frozen=True)
 class ProbeBackendOutput:
-    """Predictions and optional binary scores produced by a custom backend."""
+    """Predictions and optional scores produced by a custom backend.
+
+    Multilabel backends may return ``score_matrix`` instead of ``scores``. Its
+    rows must follow ``ProbeBackendInput.test_ids`` and its columns must follow
+    ``PredictionSpec.classes`` or the inferred sorted class order.
+    """
 
     predictions: Mapping[str, ProbePredictionOutput]
     scores: Mapping[str, ProbeScoreOutput] | None = None
     metadata: Mapping[str, Any] | None = None
+    score_matrix: Any = None
 
 
 class ProbeBackend(ABC):
@@ -63,6 +73,13 @@ def evaluate_probe_backend_output(
 ) -> tuple[dict[str, float], dict[str, ProbePredictionOutput], dict[str, ProbeScoreOutput] | None]:
     """Validate custom backend output and compute canonical probe metrics."""
 
+    if output.score_matrix is not None and not (
+        data.level == "protein" and data.prediction.objective == "multilabel"
+    ):
+        raise EmbeddingInputError(
+            "Custom probe score_matrix is supported only for protein-level "
+            "multilabel tasks."
+        )
     if data.level == "protein":
         return _evaluate_protein_output(data, output)
     if data.prediction.objective == "multilabel":
@@ -112,30 +129,91 @@ def _evaluate_protein_multilabel_output(
     classes = _multilabel_names(data)
     class_index = {name: index for index, name in enumerate(classes)}
     predictions: dict[str, ProbePredictionOutput] = {}
-    true_matrix: list[list[int]] = []
-    pred_matrix: list[list[int]] = []
-    score_matrix: list[list[float]] = []
-    if output.scores is None:
-        raise EmbeddingInputError("Multilabel custom probe backends must return scores for every test example.")
-    _require_output_ids(data.test_ids, output.scores, name="scores")
+    true_matrix = _np.zeros((len(data.test_ids), len(classes)), dtype=_np.int8)
+    pred_matrix = _np.zeros_like(true_matrix)
+    score_matrix = _multilabel_score_matrix(
+        data,
+        output,
+        class_count=len(classes),
+    )
     scores: dict[str, ProbeScoreOutput] = {}
-    for item in data.test_ids:
+    for row_index, item in enumerate(data.test_ids):
         true_labels = _multilabel_values(data.labels[item], item=item, name="labels")
         predicted_labels = _multilabel_values(output.predictions[item], item=item, name="predictions")
+        true_indices = _multilabel_indices(true_labels, item=item, indices=class_index, name="label")
+        pred_indices = _multilabel_indices(
+            predicted_labels,
+            item=item,
+            indices=class_index,
+            name="prediction",
+        )
+        true_matrix[row_index, true_indices] = 1
+        pred_matrix[row_index, pred_indices] = 1
+        predictions[item] = list(predicted_labels)
+        scores[item] = score_matrix[row_index]
+    return (
+        multilabel_metrics(
+            cast(Sequence[Sequence[int]], true_matrix),
+            cast(Sequence[Sequence[int]], pred_matrix),
+            cast(Sequence[Sequence[float]], score_matrix),
+        ),
+        predictions,
+        scores,
+    )
+
+
+def _multilabel_score_matrix(
+    data: ProbeBackendInput,
+    output: ProbeBackendOutput,
+    *,
+    class_count: int,
+) -> _npt.NDArray[_np.float64]:
+    expected_shape = (len(data.test_ids), class_count)
+    if output.score_matrix is not None:
+        if output.scores is not None:
+            raise EmbeddingInputError(
+                "Multilabel custom probe backends must return either scores or "
+                "score_matrix, not both."
+            )
+        return _require_float_matrix(output.score_matrix, expected_shape=expected_shape)
+    if output.scores is None:
+        raise EmbeddingInputError(
+            "Multilabel custom probe backends must return scores or score_matrix."
+        )
+    _require_output_ids(data.test_ids, output.scores, name="scores")
+    score_matrix = _np.empty(expected_shape, dtype=_np.float64)
+    for row_index, item in enumerate(data.test_ids):
         score_values = _require_float_sequence(output.scores[item], item=item)
-        if len(score_values) != len(classes):
+        if len(score_values) != class_count:
             raise EmbeddingInputError(
                 f"Custom probe score length {len(score_values)} does not match "
-                f"class count {len(classes)} for {item!r}."
+                f"class count {class_count} for {item!r}."
             )
-        true_row = _multilabel_indicator(true_labels, item=item, indices=class_index, name="label")
-        pred_row = _multilabel_indicator(predicted_labels, item=item, indices=class_index, name="prediction")
-        predictions[item] = list(predicted_labels)
-        scores[item] = [float(value) for value in score_values]
-        true_matrix.append(true_row)
-        pred_matrix.append(pred_row)
-        score_matrix.append([float(value) for value in score_values])
-    return multilabel_metrics(true_matrix, pred_matrix, score_matrix), predictions, scores
+        score_matrix[row_index] = score_values
+    return score_matrix
+
+
+def _require_float_matrix(
+    value: object,
+    *,
+    expected_shape: tuple[int, int],
+) -> _npt.NDArray[_np.float64]:
+    try:
+        matrix = _np.asarray(value, dtype=_np.float64)
+    except (TypeError, ValueError) as exc:
+        raise EmbeddingInputError(
+            "Custom probe score_matrix must contain numeric values."
+        ) from exc
+    if matrix.shape != expected_shape:
+        raise EmbeddingInputError(
+            f"Custom probe score_matrix shape {matrix.shape} does not match "
+            f"expected shape {expected_shape}."
+        )
+    if not bool(_np.isfinite(matrix).all()):
+        raise EmbeddingInputError(
+            "Custom probe score_matrix must contain only finite numeric values."
+        )
+    return matrix
 
 
 def _evaluate_residue_output(
@@ -314,19 +392,19 @@ def _multilabel_values(value: object, *, item: str, name: str) -> list[str]:
     return sorted({str(label).strip() for label in values if str(label).strip()})
 
 
-def _multilabel_indicator(
+def _multilabel_indices(
     values: Sequence[str],
     *,
     item: str,
     indices: Mapping[str, int],
     name: str,
 ) -> list[int]:
-    row = [0] * len(indices)
+    resolved: list[int] = []
     for value in values:
         if value not in indices:
             raise EmbeddingInputError(f"Unknown multilabel {name} {value!r} for example {item!r}.")
-        row[indices[value]] = 1
-    return row
+        resolved.append(indices[value])
+    return resolved
 
 
 def _class_index(
@@ -436,5 +514,6 @@ __all__ = [
     "ProbePrediction",
     "ProbePredictionOutput",
     "ProbeScoreOutput",
+    "ProbeScoreRow",
     "evaluate_probe_backend_output",
 ]

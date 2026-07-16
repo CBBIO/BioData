@@ -9,6 +9,7 @@ import sys
 import tarfile
 import zipfile
 
+import numpy as np
 import pytest
 
 from CBBIO import (
@@ -39,6 +40,7 @@ from CBBIO import (
     download_disprot_current_tsv,
     download_musitedeep_testdata,
     download_residue_source,
+    evaluate_go_metric_context,
     filter_redundant_to_test_mmseqs,
     get_dbptm_benchmark,
     get_dtu_service,
@@ -77,6 +79,7 @@ from CBBIO import (
     read_ec_manifest,
     read_go_manifest,
     read_information_accretion_weights,
+    prepare_go_metric_context,
     run_task_on_layer,
     search_dataset_catalog,
     train_and_evaluate_residue_probe,
@@ -386,6 +389,102 @@ def test_custom_probe_backend_uses_canonical_protein_splits_and_metrics() -> Non
     assert result.predictions == {"test_0": 0, "test_1": 1}
 
 
+def test_custom_multilabel_probe_accepts_an_array_native_score_matrix() -> None:
+    dataset = ProteinDataset(
+        [
+            ProteinExample("train_a", "ACDE", {"terms": ["a"]}, "train"),
+            ProteinExample("train_b", "FGHI", {"terms": ["b"]}, "train"),
+            ProteinExample("test_a", "KLMN", {"terms": ["a"]}, "test"),
+            ProteinExample("test_b", "PQRS", {"terms": ["b"]}, "test"),
+        ]
+    )
+    score_matrix = np.asarray([[0.9, 0.1], [0.2, 0.8]], dtype=np.float64)
+    task = Task(
+        name="custom_multilabel_matrix",
+        dataset=dataset,
+        prediction=PredictionSpec(
+            target="terms",
+            objective="multilabel",
+            classes=("a", "b"),
+        ),
+        probe=_FixedProbeBackend(
+            ProbeBackendOutput(
+                predictions={"test_a": ["a"], "test_b": ["b"]},
+                score_matrix=score_matrix,
+            )
+        ),
+    )
+
+    result = run_task_on_layer(
+        task=task,
+        embeddings={example.id: [0.0] for example in dataset.examples},
+    )
+
+    assert result.metrics["micro_f1"] == pytest.approx(1.0)
+    assert result.scores is not None
+    np.testing.assert_allclose(result.scores["test_a"], [0.9, 0.1])
+    assert np.shares_memory(result.scores["test_a"], score_matrix)
+
+
+def test_custom_multilabel_probe_raises_when_score_matrix_shape_is_wrong() -> None:
+    dataset = ProteinDataset(
+        [
+            ProteinExample("train", "ACDE", {"terms": ["a"]}, "train"),
+            ProteinExample("test", "FGHI", {"terms": ["a"]}, "test"),
+        ]
+    )
+    task = Task(
+        name="custom_multilabel_matrix_shape",
+        dataset=dataset,
+        prediction=PredictionSpec(
+            target="terms",
+            objective="multilabel",
+            classes=("a", "b"),
+        ),
+        probe=_FixedProbeBackend(
+            ProbeBackendOutput(
+                predictions={"test": ["a"]},
+                score_matrix=np.asarray([[0.9]], dtype=np.float64),
+            )
+        ),
+    )
+
+    with pytest.raises(EmbeddingInputError, match="score_matrix shape"):
+        run_task_on_layer(
+            task=task,
+            embeddings={"train": [0.0], "test": [0.0]},
+        )
+
+
+def test_custom_residue_probe_raises_when_score_matrix_is_used() -> None:
+    dataset = ResidueDataset(
+        [
+            ResidueExample("train", "AC", {"site": [0, 1]}, "train"),
+            ResidueExample("test", "DE", {"site": [1, 0]}, "test"),
+        ]
+    )
+    task = Task(
+        name="custom_residue_matrix",
+        dataset=dataset,
+        prediction=PredictionSpec(target="site", objective="binary", level="residue"),
+        probe=_FixedProbeBackend(
+            ProbeBackendOutput(
+                predictions={"test": [1, 0]},
+                score_matrix=np.asarray([0.9, 0.1], dtype=np.float64),
+            )
+        ),
+    )
+
+    with pytest.raises(EmbeddingInputError, match="protein-level multilabel"):
+        run_task_on_layer(
+            task=task,
+            embeddings={
+                "train": [[0.0], [1.0]],
+                "test": [[1.0], [0.0]],
+            },
+        )
+
+
 def test_custom_probe_backend_applies_residue_masks_before_evaluation() -> None:
     dataset = ResidueDataset(
         [
@@ -589,6 +688,70 @@ def test_transfer_probe_can_score_terms_by_nearest_positive_similarity() -> None
 
     assert result.scores == {"test": pytest.approx([0.9, 0.8])}
     assert result.predictions == {"test": ["a"]}
+
+
+def test_transfer_probe_accumulates_repeated_multilabel_votes_by_class_index() -> None:
+    dataset = ProteinDataset(
+        [
+            ProteinExample("train_a", "ACDE", {"terms": ["a", "b"]}, "train"),
+            ProteinExample("train_b", "FGHI", {"terms": ["b"]}, "train"),
+            ProteinExample("test", "KLMN", {"terms": ["c"]}, "test"),
+        ]
+    )
+    task = Task(
+        name="transfer_indexed_multilabel",
+        dataset=dataset,
+        prediction=PredictionSpec(
+            target="terms",
+            objective="multilabel",
+            classes=("a", "b", "c"),
+        ),
+        probe=TransferProbe(
+            distance="euclidean",
+            neighbor_selection="all",
+            scoring="voting",
+            threshold=0.75,
+        ),
+    )
+
+    result = run_task_on_layer(
+        task=task,
+        embeddings={
+            "train_a": [0.0],
+            "train_b": [1.0],
+            "test": [0.5],
+        },
+    )
+
+    assert result.scores is not None
+    np.testing.assert_allclose(result.scores["test"], [0.5, 1.0, 0.0])
+    assert result.predictions == {"test": ["b"]}
+
+
+def test_transfer_probe_includes_zero_score_classes_at_zero_threshold() -> None:
+    dataset = ProteinDataset(
+        [
+            ProteinExample("train", "ACDE", {"terms": ["a"]}, "train"),
+            ProteinExample("test", "FGHI", {"terms": ["b"]}, "test"),
+        ]
+    )
+    task = Task(
+        name="transfer_zero_threshold_multilabel",
+        dataset=dataset,
+        prediction=PredictionSpec(
+            target="terms",
+            objective="multilabel",
+            classes=("a", "b"),
+        ),
+        probe=TransferProbe(k=1, threshold=0.0),
+    )
+
+    result = run_task_on_layer(
+        task=task,
+        embeddings={"train": [1.0, 0.0], "test": [1.0, 0.0]},
+    )
+
+    assert result.predictions == {"test": ["a", "b"]}
 
 
 def test_transfer_probe_uses_ten_neighbors_for_knn_selection() -> None:
@@ -954,6 +1117,16 @@ def test_multilabel_metrics_do_not_propagate_hierarchical_labels() -> None:
     assert metrics["fmax"] == pytest.approx(0.0)
 
 
+def test_multilabel_metrics_average_precision_groups_tied_scores() -> None:
+    metrics = multilabel_metrics(
+        y_true=[[1, 0], [0, 1], [1, 0]],
+        y_pred=[[1, 1], [1, 1], [1, 0]],
+        y_score=[[0.5, 0.7], [0.5, 0.7], [0.5, 0.1]],
+    )
+
+    assert metrics["average_precision"] == pytest.approx((2.0 / 3.0 + 1.0 / 2.0) / 2.0)
+
+
 def test_multiclass_metrics_report_weighted_f1() -> None:
     metrics = multiclass_metrics(
         y_true=[0, 0, 0, 1, 2],
@@ -964,6 +1137,23 @@ def test_multiclass_metrics_report_weighted_f1() -> None:
     assert metrics["accuracy"] == pytest.approx(0.6)
     assert metrics["macro_f1"] == pytest.approx(((4.0 / 5.0) + (1.0 / 2.0) + 0.0) / 3.0)
     assert metrics["weighted_f1"] == pytest.approx(((4.0 / 5.0) * 3.0 + (1.0 / 2.0)) / 5.0)
+
+
+def test_multiclass_metrics_support_sparse_labels_with_large_class_count() -> None:
+    metrics = multiclass_metrics(
+        y_true=[0, 99_999, 99_999],
+        y_pred=[0, 0, 99_999],
+        class_count=100_000,
+    )
+
+    assert metrics["accuracy"] == pytest.approx(2.0 / 3.0)
+    assert metrics["macro_f1"] == pytest.approx((2.0 / 3.0 + 2.0 / 3.0) / 100_000.0)
+    assert metrics["weighted_f1"] == pytest.approx(2.0 / 3.0)
+
+
+def test_multiclass_metrics_raise_when_prediction_index_is_out_of_range() -> None:
+    with pytest.raises(ValueError, match="valid class indices"):
+        multiclass_metrics(y_true=[0], y_pred=[2], class_count=2)
 
 
 def test_multilabel_task_trains_probe_with_label_sets() -> None:
@@ -2558,6 +2748,32 @@ def test_go_combined_protein_centric_metrics_matches_separate_metrics(tmp_path: 
     assert combined["go_weighted_smin"] == pytest.approx(0.5)
     assert combined["go_weighted_remaining_uncertainty_at_smin"] == pytest.approx(0.5)
     assert combined["go_weighted_misinformation_at_smin"] == pytest.approx(0.0)
+
+
+def test_go_metric_context_reuses_ontology_preparation_across_score_matrices(tmp_path: Path) -> None:
+    _write_cafa6_dataset_layout(tmp_path)
+    ontology = load_go(str(tmp_path / "Train" / "go-basic.obo"))
+    context = prepare_go_metric_context(
+        class_names=["GO:0008151", "GO:0009987"],
+        true_labels={"p1": ["GO:0009987"]},
+        ontology=ontology,
+        threshold_count=101,
+    )
+
+    correct = evaluate_go_metric_context(
+        {"p1": [0.1, 0.9]},
+        context=context,
+        fixed_threshold=0.5,
+    )
+    incorrect = evaluate_go_metric_context(
+        {"p1": [0.9, 0.1]},
+        context=context,
+        fixed_threshold=0.5,
+    )
+
+    assert correct["go_fmax"] == pytest.approx(1.0)
+    assert correct["go_propagated_f1"] == pytest.approx(1.0)
+    assert incorrect["go_propagated_f1"] == pytest.approx(0.0)
 
 
 def test_go_combined_protein_centric_metrics_excludes_known_partial_knowledge_terms(
