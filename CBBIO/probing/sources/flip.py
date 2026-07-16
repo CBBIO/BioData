@@ -27,6 +27,7 @@ class FlipDatasetSpec:
     url: str
     md5: str
     splits: Tuple[str, ...]
+    default_split: str | None = None
     target_fields: Tuple[str, ...] = ("target",)
     mutation_region: Tuple[int, int] | None = None
 
@@ -44,12 +45,14 @@ FLIP_DATASETS: Dict[str, FlipDatasetSpec] = {
         url="https://github.com/J-SNACKKB/FLIP/raw/d5c35cc716ca93c3c74a0b43eef5b60cbf88521f/splits/gb1/splits.zip",
         md5="14216947834e6db551967c2537332a12",
         splits=("one_vs_rest", "two_vs_rest", "three_vs_rest", "low_vs_high", "sampled"),
+        default_split="two_vs_rest",
     ),
     "thermostability": FlipDatasetSpec(
         name="thermostability",
         url="https://github.com/J-SNACKKB/FLIP/raw/d5c35cc716ca93c3c74a0b43eef5b60cbf88521f/splits/meltome/splits.zip",
         md5="0f8b1e848568f7566713d53594c0ca90",
         splits=("human", "human_cell", "mixed_split"),
+        default_split="mixed_split",
     ),
 }
 
@@ -112,7 +115,7 @@ def load_flip_dataset(
     root: str | Path,
     *,
     name: FlipDatasetName,
-    split: str,
+    split: str | None = None,
     download: bool = False,
     keep_mutation_region: bool = False,
 ) -> ProteinDataset:
@@ -122,12 +125,20 @@ def load_flip_dataset(
     if spec is None:
         supported = ", ".join(sorted(FLIP_DATASETS))
         raise EmbeddingInputError(f"Unknown FLIP dataset {name!r}. Supported values: {supported}.")
-    if split not in spec.splits:
+    resolved_split = split or spec.default_split
+    if resolved_split is None:
         supported_splits = ", ".join(spec.splits)
-        raise EmbeddingInputError(f"Unsupported FLIP split {split!r} for {name!r}. Supported values: {supported_splits}.")
+        raise EmbeddingInputError(
+            f"FLIP dataset {name!r} requires one split protocol string. Supported values: {supported_splits}."
+        )
+    if resolved_split not in spec.splits:
+        supported_splits = ", ".join(spec.splits)
+        raise EmbeddingInputError(
+            f"Unsupported FLIP split {resolved_split!r} for {name!r}. Supported values: {supported_splits}."
+        )
 
     dataset_root = Path(root).expanduser() / name
-    csv_path = dataset_root / "splits" / f"{split}.csv"
+    csv_path = dataset_root / "splits" / f"{resolved_split}.csv"
     if not csv_path.exists() and download:
         _download_and_extract_flip(spec, dataset_root)
     if not csv_path.exists():

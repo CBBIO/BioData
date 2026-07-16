@@ -260,6 +260,9 @@ dataset = load_peer_dataset(
 ```
 
 PEER provides protein-level fitness and function benchmarks as well as residue-level tasks.
+FLIP-backed PEER tasks use benchmark split protocols.
+GB1 defaults to `two_vs_rest`.
+Thermostability defaults to `mixed_split`.
 
 ### Gene Ontology Tasks
 

@@ -1345,6 +1345,49 @@ def test_load_flip_dataset_uses_named_split_and_mutation_region(tmp_path) -> Non
     assert {len(example.sequence) for example in dataset.examples} == {200}
 
 
+def test_load_flip_dataset_uses_default_gb1_split(tmp_path) -> None:
+    split_dir = tmp_path / "gb1" / "splits"
+    split_dir.mkdir(parents=True)
+    (split_dir / "two_vs_rest.csv").write_text(
+        "\n".join(
+            [
+                "sequence,target,set,validation",
+                "AAAA,1.0,train,False",
+                "CCCC,2.0,test,False",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    dataset = load_flip_dataset(tmp_path, name="gb1")
+
+    assert dataset.split_counts() == {"train": 1, "val": 0, "test": 1}
+    assert dataset.target_values("target") == {"0": 1.0, "1": 2.0}
+
+
+def test_load_peer_dataset_uses_default_thermostability_split(tmp_path) -> None:
+    split_dir = tmp_path / "thermostability" / "splits"
+    split_dir.mkdir(parents=True)
+    (split_dir / "mixed_split.csv").write_text(
+        "\n".join(
+            [
+                "sequence,target,set,validation",
+                "AAAA,40.0,train,False",
+                "CCCC,50.0,train,True",
+                "DDDD,60.0,test,False",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    dataset = load_peer_dataset(tmp_path, name="thermostability")
+
+    assert dataset.split_counts() == {"train": 1, "val": 1, "test": 1}
+    assert dataset.target_values("target") == {"0": 40.0, "1": 50.0, "2": 60.0}
+
+
 def test_load_flip_dataset_rejects_unknown_split(tmp_path) -> None:
     with pytest.raises(EmbeddingInputError, match="Unsupported FLIP split"):
         load_flip_dataset(tmp_path, name="gb1", split="two_vs_many")

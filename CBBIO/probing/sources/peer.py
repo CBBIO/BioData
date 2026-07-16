@@ -407,14 +407,15 @@ def load_peer_dataset(
 
     Native LMDB import is available for PEER sequence datasets represented by
     ``ProteinDataset`` or ``ResidueDataset``. FLIP tasks dispatch to the native
-    FLIP CSV importer and require an explicit FLIP split protocol.
+    FLIP CSV importer and use the task's default FLIP split protocol when
+    ``split`` is omitted.
     """
 
     task = get_peer_task(name)
     if task.source == "flip":
-        if split is None or not isinstance(split, str):
+        if split is not None and not isinstance(split, str):
             raise EmbeddingInputError(f"FLIP PEER task {task.name!r} requires one split protocol string.")
-        return load_flip_dataset(root, name=cast(Any, task.name), split=str(split), download=download)
+        return load_flip_dataset(root, name=cast(Any, task.name), split=split, download=download)
 
     if task.name not in PEER_NATIVE_DATASETS:
         raise EmbeddingInputError(
