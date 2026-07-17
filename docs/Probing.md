@@ -544,6 +544,41 @@ for record in writer.records:
     embeddings_by_layer[record.layer_index][record.id] = record.embedding
 ```
 
+When a sweep trains several seeds on one layer, prepare that layer once and
+reuse its standardized matrices:
+
+```python
+from dataclasses import replace
+
+from CBBIO import LinearProbe, compute_protein_flat_data, run_task_on_layer
+
+train_examples, test_examples = task.dataset.require_training_and_test_splits()
+train_ids = [example.id for example in train_examples]
+test_ids = [example.id for example in test_examples]
+layer_embeddings = embeddings_by_layer[33]
+prepared = compute_protein_flat_data(
+    train_ids=train_ids,
+    test_ids=test_ids,
+    embeddings=layer_embeddings,
+)
+
+seed_results = []
+for seed in (7, 17, 27):
+    seeded_task = replace(task, probe=LinearProbe(epochs=100, seed=seed))
+    seed_results.append(
+        run_task_on_layer(
+            task=seeded_task,
+            embeddings=layer_embeddings,
+            layer_index=33,
+            flat_data=prepared,
+        )
+    )
+```
+
+`ProteinDataFlat` is tied to the ordered train and test identifiers used to
+create it. Build one object per layer and discard it before preparing the next
+layer to keep peak memory bounded.
+
 ---
 
 ## Custom Datasets

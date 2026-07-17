@@ -88,8 +88,10 @@ from .embeddings.utils.pooler import EmbeddingPooler, IdentityPooler, MeanPooler
 from .embeddings.utils.writer import EmbeddingWriter
 from .probing import (
     DBPTM_BENCHMARKS,
+    compute_protein_flat_data,
     compute_residue_feature_stats,
     compute_residue_flat_data,
+    ProteinDataFlat,
     ResidueDataFlat,
     DATASET_CATALOG,
     DATASET_COLLECTIONS,
@@ -569,8 +571,10 @@ __all__ = [
     "IdentityPooler",
     "MeanPooler",
     "pooler_factory",
+    "compute_protein_flat_data",
     "compute_residue_feature_stats",
     "compute_residue_flat_data",
+    "ProteinDataFlat",
     "ResidueDataFlat",
     "run_task_on_layer",
     "search_dataset_catalog",

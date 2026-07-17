@@ -6,6 +6,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 import numpy as _np
+import numpy.typing as _npt
 from typing import Any, Dict, List, Literal, Tuple, TypeAlias, cast
 
 from CBBIO.BioData import DriverDependencyError
@@ -35,6 +36,7 @@ from .tasks import PredictionSpec, ProbeKind, ProbeSpec
 
 
 DEFAULT_RESIDUE_BATCH_SIZE = 8192
+_CPU_MANUAL_MULTICLASS_MIN_CLASSES = 128
 TransferDistance: TypeAlias = Literal["cosine", "euclidean"]
 TransferNeighborSelection: TypeAlias = Literal["knn", "all", "cutoff_distance"]
 TransferScoring: TypeAlias = Literal[
@@ -103,6 +105,7 @@ class _TorchProbeBackend(ProbeBackend, ABC):
                 labels=cast(Mapping[str, object], data.labels),
                 prediction=data.prediction,
                 probe=probe,
+                flat_data=cast(ProteinDataFlat | None, data.flat_data),
             )
         if data.level == "residue":
             return train_and_evaluate_residue_probe(
@@ -449,6 +452,20 @@ class TransferProbe(ProbeBackend):
 
 
 @dataclass(frozen=True)
+class ProteinDataFlat:
+    """Pre-standardized protein embeddings for one task split and layer.
+
+    Build once per layer with ``compute_protein_flat_data`` and reuse across
+    probe seeds that have the same train and test identifiers.
+    """
+
+    x_train: _npt.NDArray[_np.float32]
+    train_ids: tuple[str, ...]
+    x_test: _npt.NDArray[_np.float32]
+    test_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class ResidueDataFlat:
     """Pre-flattened residue embeddings for a single layer.
 
@@ -474,12 +491,20 @@ def train_and_evaluate_probe(
     labels: Mapping[str, object],
     prediction: PredictionSpec,
     probe: ProbeSpec,
+    flat_data: ProteinDataFlat | None = None,
 ) -> ProbeEvaluation:
     """Train a small PyTorch probe and evaluate it on the test split."""
 
     torch = _import_torch()
     ordered_ids = list(train_ids) + list(test_ids)
-    input_dim = _validate_embeddings(ordered_ids, embeddings)
+    if flat_data is None:
+        input_dim = _validate_embeddings(ordered_ids, embeddings)
+    else:
+        input_dim = _validate_protein_flat_data(
+            flat_data,
+            train_ids=train_ids,
+            test_ids=test_ids,
+        )
     encoded_labels, output_dim, class_names = _encode_labels(
         ordered_ids,
         labels,
@@ -498,13 +523,28 @@ def train_and_evaluate_probe(
     )
     loss_fn = _loss_fn(torch, prediction.objective)
 
-    train_x = _tensor_for_ids(torch, train_ids, embeddings)
-    feature_mean, feature_std = _feature_standardization_stats(torch, train_x)
-    feature_mean = feature_mean.to(device)
-    feature_std = feature_std.to(device)
-    train_x = _standardize_features(train_x.to(device), mean=feature_mean, std=feature_std)
+    feature_mean: Any = None
+    feature_std: Any = None
+    if flat_data is None:
+        train_x = _tensor_for_ids(torch, train_ids, embeddings)
+        feature_mean, feature_std = _feature_standardization_stats(torch, train_x)
+        feature_mean = feature_mean.to(device)
+        feature_std = feature_std.to(device)
+        train_x = _standardize_features(
+            train_x.to(device),
+            mean=feature_mean,
+            std=feature_std,
+        )
+    else:
+        train_x = torch.from_numpy(flat_data.x_train).to(device)
     train_y = _label_tensor(torch, [encoded_labels[item] for item in train_ids], prediction.objective).to(device)
     batch_size = int(probe.batch_size or len(train_ids))
+    use_manual_multiclass_gradient = (
+        probe.kind == "linear"
+        and prediction.objective == "multiclass"
+        and output_dim >= _CPU_MANUAL_MULTICLASS_MIN_CLASSES
+        and getattr(device, "type", None) == "cpu"
+    )
 
     model.train()
     for _epoch in range(int(probe.epochs)):
@@ -512,16 +552,32 @@ def train_and_evaluate_probe(
             end = start + batch_size
             batch_x = train_x[start:end]
             batch_y = train_y[start:end]
-            optimizer.zero_grad()
-            logits = model(batch_x)
-            loss = _compute_loss(logits, batch_y, loss_fn, prediction.objective)
-            loss.backward()
-            optimizer.step()
+            if use_manual_multiclass_gradient:
+                _train_linear_multiclass_batch(
+                    torch,
+                    model=model,
+                    optimizer=optimizer,
+                    batch_x=batch_x,
+                    batch_y=batch_y,
+                )
+            else:
+                optimizer.zero_grad()
+                logits = model(batch_x)
+                loss = _compute_loss(logits, batch_y, loss_fn, prediction.objective)
+                loss.backward()
+                optimizer.step()
 
     model.eval()
     with torch.inference_mode():
-        test_x = _tensor_for_ids(torch, test_ids, embeddings).to(device)
-        test_x = _standardize_features(test_x, mean=feature_mean, std=feature_std)
+        if flat_data is None:
+            test_x = _tensor_for_ids(torch, test_ids, embeddings).to(device)
+            test_x = _standardize_features(
+                test_x,
+                mean=feature_mean,
+                std=feature_std,
+            )
+        else:
+            test_x = torch.from_numpy(flat_data.x_test).to(device)
         logits = model(test_x)
 
     return _evaluate_outputs(
@@ -531,6 +587,45 @@ def train_and_evaluate_probe(
         labels={item: encoded_labels[item] for item in test_ids},
         objective=prediction.objective,
         class_names=class_names,
+    )
+
+
+def compute_protein_flat_data(
+    *,
+    train_ids: Sequence[str],
+    test_ids: Sequence[str],
+    embeddings: Mapping[str, Sequence[float]],
+) -> ProteinDataFlat:
+    """Prepare standardized protein embeddings for reuse across probe seeds."""
+
+    torch = _import_torch()
+    if len(train_ids) < 1:
+        raise EmbeddingInputError(
+            "Prepared protein data requires at least one train identifier."
+        )
+    if len(test_ids) < 1:
+        raise EmbeddingInputError(
+            "Prepared protein data requires at least one test identifier."
+        )
+    ordered_ids = list(train_ids) + list(test_ids)
+    _validate_embeddings(ordered_ids, embeddings)
+    train_x = _tensor_for_ids(torch, train_ids, embeddings)
+    feature_mean, feature_std = _feature_standardization_stats(torch, train_x)
+    train_x = _standardize_features(
+        train_x,
+        mean=feature_mean,
+        std=feature_std,
+    )
+    test_x = _standardize_features(
+        _tensor_for_ids(torch, test_ids, embeddings),
+        mean=feature_mean,
+        std=feature_std,
+    )
+    return ProteinDataFlat(
+        x_train=train_x.numpy(),
+        train_ids=tuple(train_ids),
+        x_test=test_x.numpy(),
+        test_ids=tuple(test_ids),
     )
 
 
@@ -905,6 +1000,42 @@ def _validate_embeddings(ids: Sequence[str], embeddings: Mapping[str, Sequence[f
     return input_dim
 
 
+def _validate_protein_flat_data(
+    flat_data: ProteinDataFlat,
+    *,
+    train_ids: Sequence[str],
+    test_ids: Sequence[str],
+) -> int:
+    if flat_data.train_ids != tuple(train_ids):
+        raise EmbeddingInputError(
+            "Prepared protein train identifiers do not match the task train split."
+        )
+    if flat_data.test_ids != tuple(test_ids):
+        raise EmbeddingInputError(
+            "Prepared protein test identifiers do not match the task test split."
+        )
+    if flat_data.x_train.ndim != 2 or flat_data.x_test.ndim != 2:
+        raise EmbeddingInputError("Prepared protein embeddings must be rank-2 matrices.")
+    if flat_data.x_train.dtype != _np.float32 or flat_data.x_test.dtype != _np.float32:
+        raise EmbeddingInputError(
+            "Prepared protein embeddings must use float32 matrices."
+        )
+    if int(flat_data.x_train.shape[0]) != len(train_ids):
+        raise EmbeddingInputError(
+            "Prepared protein train embeddings do not match the train split length."
+        )
+    if int(flat_data.x_test.shape[0]) != len(test_ids):
+        raise EmbeddingInputError(
+            "Prepared protein test embeddings do not match the test split length."
+        )
+    input_dim = int(flat_data.x_train.shape[1])
+    if input_dim < 1 or int(flat_data.x_test.shape[1]) != input_dim:
+        raise EmbeddingInputError(
+            "Prepared protein train and test embeddings must have the same non-empty dimension."
+        )
+    return input_dim
+
+
 def _validate_residue_examples(
     ids: Sequence[str],
     *,
@@ -1168,8 +1299,36 @@ def _compute_loss(logits: Any, target: Any, loss_fn: Any, objective: ObjectiveNa
     return loss_fn(logits, target)
 
 
-def _tensor_for_ids(torch: Any, ids: Sequence[str], embeddings: Mapping[str, Sequence[float]]) -> Any:
-    return torch.tensor([[float(value) for value in embeddings[item]] for item in ids], dtype=torch.float32)
+def _train_linear_multiclass_batch(
+    torch: Any,
+    *,
+    model: Any,
+    optimizer: Any,
+    batch_x: Any,
+    batch_y: Any,
+) -> None:
+    # High-class-count CPU probes spend most of their time constructing the
+    # autograd graph. This is the exact gradient of mean cross-entropy for a
+    # linear layer and leaves parameter updates to the configured optimizer.
+    with torch.no_grad():
+        logits = model(batch_x)
+        output_gradient = torch.softmax(logits, dim=1)
+        row_indices = torch.arange(int(batch_y.shape[0]), device=batch_y.device)
+        output_gradient[row_indices, batch_y] -= 1.0
+        output_gradient /= int(batch_y.shape[0])
+        model.weight.grad = output_gradient.transpose(0, 1).matmul(batch_x)
+        if model.bias is not None:
+            model.bias.grad = output_gradient.sum(dim=0)
+        optimizer.step()
+
+
+def _tensor_for_ids(
+    torch: Any,
+    ids: Sequence[str],
+    embeddings: Mapping[str, Sequence[float]],
+) -> Any:
+    values = _np.asarray([embeddings[item] for item in ids], dtype=_np.float32)
+    return torch.from_numpy(values)
 
 
 def _label_tensor(torch: Any, values: Sequence[float | int | Sequence[float]], objective: ObjectiveName) -> Any:
@@ -1371,6 +1530,7 @@ def _expand_residue_evaluation(
 __all__ = [
     "LinearProbe",
     "MlpProbe",
+    "ProteinDataFlat",
     "ProbeEvaluation",
     "ResidueDataFlat",
     "TransferDistance",
@@ -1378,6 +1538,7 @@ __all__ = [
     "TransferProbe",
     "TransferScoring",
     "TransferSearchBackend",
+    "compute_protein_flat_data",
     "compute_residue_feature_stats",
     "compute_residue_flat_data",
     "train_and_evaluate_probe",

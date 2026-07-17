@@ -32,6 +32,7 @@ from CBBIO import (
     StratifiedDatasetSplitter,
     Task,
     CAFA5_TARGET_SUBSETS,
+    compute_protein_flat_data,
     get_dataset_collection,
     get_dataset_catalog_entry,
     download_dbptm_benchmark,
@@ -1249,6 +1250,117 @@ def test_probe_standardizes_embedding_features_from_train_split() -> None:
     assert result.predictions == {"nt": 0, "pt": 1}
 
 
+def test_protein_binary_probe_accepts_numpy_embedding_rows() -> None:
+    dataset = ProteinDataset(
+        [
+            ProteinExample("n0", "ACDE", {"label": 0}, "train"),
+            ProteinExample("n1", "ACDE", {"label": 0}, "train"),
+            ProteinExample("p0", "ACDE", {"label": 1}, "train"),
+            ProteinExample("p1", "ACDE", {"label": 1}, "train"),
+            ProteinExample("nt", "ACDE", {"label": 0}, "test"),
+            ProteinExample("pt", "ACDE", {"label": 1}, "test"),
+        ]
+    )
+    matrix = np.asarray(
+        [
+            [-2.0, -1.0],
+            [-1.5, -1.0],
+            [1.5, 1.0],
+            [2.0, 1.0],
+            [-1.8, -1.0],
+            [1.8, 1.0],
+        ],
+        dtype=np.float32,
+    )
+    embeddings = {
+        example.id: matrix[index]
+        for index, example in enumerate(dataset.examples)
+    }
+    task = Task(
+        name="numpy_binary",
+        dataset=dataset,
+        prediction=PredictionSpec(target="label", objective="binary"),
+        probe=ProbeSpec(epochs=100, learning_rate=0.1, seed=17),
+    )
+
+    result = run_task_on_layer(task=task, embeddings=embeddings)
+
+    assert result.metrics["accuracy"] == pytest.approx(1.0)
+    assert result.predictions == {"nt": 0, "pt": 1}
+
+
+def test_prepared_protein_data_reproduces_direct_results_across_probe_seeds() -> None:
+    dataset = ProteinDataset(
+        [
+            ProteinExample("n0", "ACDE", {"label": 0}, "train"),
+            ProteinExample("n1", "ACDE", {"label": 0}, "train"),
+            ProteinExample("p0", "ACDE", {"label": 1}, "train"),
+            ProteinExample("p1", "ACDE", {"label": 1}, "train"),
+            ProteinExample("nt", "ACDE", {"label": 0}, "test"),
+            ProteinExample("pt", "ACDE", {"label": 1}, "test"),
+        ]
+    )
+    embeddings = {
+        "n0": [-2.0, -1.0],
+        "n1": [-1.5, -1.0],
+        "p0": [1.5, 1.0],
+        "p1": [2.0, 1.0],
+        "nt": [-1.8, -1.0],
+        "pt": [1.8, 1.0],
+    }
+    prepared = compute_protein_flat_data(
+        train_ids=("n0", "n1", "p0", "p1"),
+        test_ids=("nt", "pt"),
+        embeddings=embeddings,
+    )
+
+    for seed in (5, 17):
+        task = Task(
+            name=f"prepared_binary_{seed}",
+            dataset=dataset,
+            prediction=PredictionSpec(target="label", objective="binary"),
+            probe=ProbeSpec(epochs=25, learning_rate=0.1, seed=seed),
+        )
+        direct = run_task_on_layer(task=task, embeddings=embeddings)
+        cached = run_task_on_layer(
+            task=task,
+            embeddings=embeddings,
+            flat_data=prepared,
+        )
+
+        assert cached.metrics == pytest.approx(direct.metrics)
+        assert cached.predictions == direct.predictions
+        assert cached.scores == pytest.approx(direct.scores)
+
+
+def test_prepared_protein_data_raises_when_train_identifiers_do_not_match() -> None:
+    dataset = ProteinDataset(
+        [
+            ProteinExample("a", "ACDE", {"label": 0}, "train"),
+            ProteinExample("b", "ACDE", {"label": 1}, "train"),
+            ProteinExample("test", "ACDE", {"label": 1}, "test"),
+        ]
+    )
+    embeddings = {"a": [-1.0], "b": [1.0], "test": [0.5]}
+    prepared = compute_protein_flat_data(
+        train_ids=("b", "a"),
+        test_ids=("test",),
+        embeddings=embeddings,
+    )
+    task = Task(
+        name="mismatched_prepared_data",
+        dataset=dataset,
+        prediction=PredictionSpec(target="label", objective="binary"),
+    )
+
+    with pytest.raises(EmbeddingInputError, match="train identifiers"):
+        run_task_on_layer(
+            task=task,
+            embeddings=embeddings,
+            flat_data=prepared,
+        )
+
+
 def test_regression_task_trains_linear_probe() -> None:
     dataset = ProteinDataset(
         [
@@ -1318,6 +1430,43 @@ def test_multiclass_task_returns_class_names() -> None:
 
     assert result.metrics["accuracy"] == 1.0
     assert result.predictions == {"at": "a", "bt": "b", "ct": "c"}
+
+
+def test_high_class_count_multiclass_task_returns_class_names() -> None:
+    class_names = tuple(f"class_{index}" for index in range(128))
+    dataset = ProteinDataset(
+        [
+            ProteinExample("a0", "ACDE", {"family": "class_0"}, "train"),
+            ProteinExample("a1", "ACDE", {"family": "class_0"}, "train"),
+            ProteinExample("b0", "ACDE", {"family": "class_127"}, "train"),
+            ProteinExample("b1", "ACDE", {"family": "class_127"}, "train"),
+            ProteinExample("at", "ACDE", {"family": "class_0"}, "test"),
+            ProteinExample("bt", "ACDE", {"family": "class_127"}, "test"),
+        ]
+    )
+    embeddings = {
+        "a0": [-2.0],
+        "a1": [-1.5],
+        "b0": [1.5],
+        "b1": [2.0],
+        "at": [-1.8],
+        "bt": [1.8],
+    }
+    task = Task(
+        name="large_family_multiclass",
+        dataset=dataset,
+        prediction=PredictionSpec(
+            target="family",
+            objective="multiclass",
+            classes=class_names,
+        ),
+        probe=ProbeSpec(epochs=100, learning_rate=0.1, seed=5),
+    )
+
+    result = run_task_on_layer(task=task, embeddings=embeddings)
+
+    assert result.metrics["accuracy"] == pytest.approx(1.0)
+    assert result.predictions == {"at": "class_0", "bt": "class_127"}
 
 
 def test_dataset_owns_labels_and_prediction_selects_target() -> None:

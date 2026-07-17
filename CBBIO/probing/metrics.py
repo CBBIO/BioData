@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 import numpy as _np
+import numpy.typing as _npt
 
 if TYPE_CHECKING:
     from CBBIO.GO import GOOntology
@@ -95,24 +96,31 @@ class _GoThresholdStatistics:
 def regression_metrics(y_true: Sequence[float], y_pred: Sequence[float]) -> dict[str, float]:
     """Compute regression metrics for true and predicted values."""
     _require_same_non_empty_length(y_true, y_pred)
-    count = float(len(y_true))
-    errors = [float(pred) - float(true) for true, pred in zip(y_true, y_pred)]
-    mae = sum(abs(error) for error in errors) / count
-    rmse = math.sqrt(sum(error * error for error in errors) / count)
-    mean_true = sum(float(value) for value in y_true) / count
-    ss_tot = sum((float(value) - mean_true) ** 2 for value in y_true)
-    ss_res = sum(error * error for error in errors)
+    true_values = _np.asarray(y_true, dtype=_np.float64)
+    pred_values = _np.asarray(y_pred, dtype=_np.float64)
+    errors = pred_values - true_values
+    squared_errors = errors * errors
+    mae = float(cast(float, _np.mean(_np.abs(errors))))
+    rmse = math.sqrt(float(cast(float, _np.mean(squared_errors))))
+    centered_true = true_values - _np.mean(true_values)
+    ss_tot = float(cast(float, _np.dot(centered_true, centered_true)))
+    ss_res = float(cast(float, _np.sum(squared_errors)))
     r2 = 1.0 - (ss_res / ss_tot) if ss_tot > 0 else 0.0
-    return {"mae": mae, "rmse": rmse, "r2": r2, "spearmanr": spearmanr(y_true, y_pred)}
+    return {
+        "mae": mae,
+        "rmse": rmse,
+        "r2": r2,
+        "spearmanr": _spearmanr_arrays(true_values, pred_values),
+    }
 
 
 def spearmanr(y_true: Sequence[float], y_pred: Sequence[float]) -> float:
     """Spearman rank correlation with average ranks for ties."""
 
     _require_same_non_empty_length(y_true, y_pred)
-    true_ranks = _average_ranks([float(value) for value in y_true])
-    pred_ranks = _average_ranks([float(value) for value in y_pred])
-    return _pearsonr(true_ranks, pred_ranks)
+    true_values = _np.asarray(y_true, dtype=_np.float64)
+    pred_values = _np.asarray(y_pred, dtype=_np.float64)
+    return _spearmanr_arrays(true_values, pred_values)
 
 
 def binary_metrics(y_true: Sequence[int], y_pred: Sequence[int], y_score: Sequence[float]) -> dict[str, float]:
@@ -1742,33 +1750,38 @@ def _binary_auprc_array(y_true: Any, y_score: Any) -> float:
     return float(_np.sum((true_by_group / float(positives)) * precision))
 
 
-def _average_ranks(values: Sequence[float]) -> list[float]:
-    ordered = sorted((float(value), index) for index, value in enumerate(values))
-    ranks = [0.0] * len(ordered)
-    cursor = 0
-    while cursor < len(ordered):
-        end = cursor + 1
-        while end < len(ordered) and ordered[end][0] == ordered[cursor][0]:
-            end += 1
-        average_rank = (cursor + 1 + end) / 2.0
-        for _value, original_index in ordered[cursor:end]:
-            ranks[original_index] = average_rank
-        cursor = end
-    return ranks
-
-
-def _pearsonr(a: Sequence[float], b: Sequence[float]) -> float:
-    _require_same_non_empty_length(a, b)
-    count = float(len(a))
-    mean_a = sum(float(value) for value in a) / count
-    mean_b = sum(float(value) for value in b) / count
-    centered_a = [float(value) - mean_a for value in a]
-    centered_b = [float(value) - mean_b for value in b]
-    numerator = sum(left * right for left, right in zip(centered_a, centered_b))
-    denom_a = sum(value * value for value in centered_a)
-    denom_b = sum(value * value for value in centered_b)
-    denominator = math.sqrt(denom_a * denom_b)
+def _spearmanr_arrays(
+    true_values: _npt.NDArray[_np.float64],
+    pred_values: _npt.NDArray[_np.float64],
+) -> float:
+    true_ranks = _average_ranks_array(true_values)
+    pred_ranks = _average_ranks_array(pred_values)
+    centered_true = true_ranks - _np.mean(true_ranks)
+    centered_pred = pred_ranks - _np.mean(pred_ranks)
+    numerator = float(cast(float, _np.dot(centered_true, centered_pred)))
+    true_sum_squares = float(cast(float, _np.dot(centered_true, centered_true)))
+    pred_sum_squares = float(cast(float, _np.dot(centered_pred, centered_pred)))
+    denominator = math.sqrt(true_sum_squares * pred_sum_squares)
     return numerator / denominator if denominator > 0.0 else 0.0
+
+
+def _average_ranks_array(
+    values: _npt.NDArray[_np.float64],
+) -> _npt.NDArray[_np.float64]:
+    order = _np.argsort(values, kind="stable")
+    sorted_values = values[order]
+    group_starts = _np.flatnonzero(
+        _np.concatenate(
+            (_np.asarray([True]), sorted_values[:-1] != sorted_values[1:])
+        )
+    )
+    group_ends = _np.concatenate(
+        (group_starts[1:], _np.asarray([values.size]))
+    )
+    average_ranks = (group_starts + 1 + group_ends) / 2.0
+    ranks = _np.empty(values.size, dtype=_np.float64)
+    ranks[order] = _np.repeat(average_ranks, group_ends - group_starts)
+    return ranks
 
 
 def _require_same_non_empty_length(a: Sequence[object], b: Sequence[object]) -> None:
