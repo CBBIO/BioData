@@ -72,13 +72,22 @@ def _normalize_distance(
         return -distance
     if metric == "cosine":
         if cosine_value_is_distance:
-            return distance
-        return 1.0 - distance
+            return _bounded_distance(distance, metric=metric)
+        return _bounded_distance(1.0 - distance, metric=metric)
     if not l2_squared:
-        return distance
+        return _bounded_distance(distance, metric=metric)
     if distance < 0.0:
         return 0.0
-    return distance ** 0.5 if distance > 0.0 else 0.0
+    return _bounded_distance(distance ** 0.5 if distance > 0.0 else 0.0, metric=metric)
+
+
+def _bounded_distance(value: float, *, metric: DistanceMetric) -> float:
+    distance = float(value)
+    if metric == "cosine":
+        return max(0.0, min(2.0, distance))
+    if metric == "l2":
+        return max(0.0, distance)
+    return distance
 
 
 def _import_torch() -> Any:

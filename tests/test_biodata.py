@@ -1353,6 +1353,36 @@ def test_search_cuvs_state_preserves_cosine_distances(monkeypatch: pytest.Monkey
     assert grouped["Q1"][1].distance == pytest.approx(0.25)
 
 
+def test_normalize_distance_bounds_cosine_and_l2_distances() -> None:
+    assert search_utils.normalize_distance(
+        metric="cosine",
+        value=1.000001,
+        l2_squared=False,
+    ) == pytest.approx(0.0)
+    assert search_utils.normalize_distance(
+        metric="cosine",
+        value=-1.000001,
+        l2_squared=False,
+    ) == pytest.approx(2.0)
+    assert search_utils.normalize_distance(
+        metric="cosine",
+        value=-0.000001,
+        l2_squared=False,
+        cosine_value_is_distance=True,
+    ) == pytest.approx(0.0)
+    assert search_utils.normalize_distance(
+        metric="cosine",
+        value=2.000001,
+        l2_squared=False,
+        cosine_value_is_distance=True,
+    ) == pytest.approx(2.0)
+    assert search_utils.normalize_distance(
+        metric="l2",
+        value=-0.000001,
+        l2_squared=False,
+    ) == pytest.approx(0.0)
+
+
 def test_as_numpy_matrix_accepts_vector_like_rows() -> None:
     np = pytest.importorskip("numpy")
 

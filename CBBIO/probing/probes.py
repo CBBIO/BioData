@@ -348,7 +348,8 @@ class TransferProbe(ProbeBackend):
         _validate_distance_matrix(test_matrix, "test", distance=self.distance)
         if self.search_backend != "numpy":
             return self._weighted_neighbors_from_search(data, train_matrix=train_matrix, test_matrix=test_matrix)
-        distances_by_test = _distance_matrix(train_matrix, test_matrix, distance=self.distance)
+        raw_distances_by_test = _raw_distance_matrix(train_matrix, test_matrix, distance=self.distance)
+        distances_by_test = _bounded_positive_distances(raw_distances_by_test, distance=self.distance)
         weighted: Dict[str, list[tuple[str, float, float]]] = {}
         for row_index, item in enumerate(data.test_ids):
             distances = distances_by_test[row_index]
@@ -445,7 +446,7 @@ class TransferProbe(ProbeBackend):
             return [1.0] * int(len(distances))
         if self.scoring in {"weighted_voting", "nearest_similarity"}:
             return [
-                _bounded_similarity(float(distance), distance=self.distance)
+                _bounded_positive_similarity(float(distance), distance=self.distance)
                 for distance in distances
             ]
         raise EmbeddingInputError(f"Unsupported TransferProbe.scoring value {self.scoring!r}.")
@@ -900,7 +901,7 @@ def _validate_distance_matrix(
             )
 
 
-def _distance_matrix(train_matrix: Any, test_matrix: Any, *, distance: TransferDistance) -> Any:
+def _raw_distance_matrix(train_matrix: Any, test_matrix: Any, *, distance: TransferDistance) -> Any:
     if distance == "cosine":
         train_unit = _normalize_rows(train_matrix)
         test_unit = _normalize_rows(test_matrix)
@@ -910,10 +911,23 @@ def _distance_matrix(train_matrix: Any, test_matrix: Any, *, distance: TransferD
     return _np.linalg.norm(differences, axis=2)
 
 
-def _bounded_similarity(distance_value: float, *, distance: TransferDistance) -> float:
+def _bounded_positive_distances(distance_values: Any, *, distance: TransferDistance) -> Any:
     if distance == "cosine":
-        return max(0.0, min(1.0, 1.0 - float(distance_value)))
-    return 1.0 / (1.0 + max(0.0, float(distance_value)))
+        return _np.clip(distance_values, 0.0, 2.0)
+    return _np.maximum(distance_values, 0.0)
+
+
+def _bounded_positive_distance(distance_value: float, *, distance: TransferDistance) -> float:
+    if distance == "cosine":
+        return max(0.0, min(2.0, float(distance_value)))
+    return max(0.0, float(distance_value))
+
+
+def _bounded_positive_similarity(distance_value: float, *, distance: TransferDistance) -> float:
+    bounded_distance = _bounded_positive_distance(distance_value, distance=distance)
+    if distance == "cosine":
+        return max(0.0, min(1.0, 1.0 - bounded_distance))
+    return 1.0 / (1.0 + bounded_distance)
 
 
 def _normalize_rows(matrix: Any) -> Any:

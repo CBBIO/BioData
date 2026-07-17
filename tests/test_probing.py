@@ -823,6 +823,82 @@ def test_transfer_probe_returns_neighbor_metadata_when_requested() -> None:
     assert neighbors[1] == {"id": "far", "distance": pytest.approx(2.0), "weight": 1.0, "label": 0}
 
 
+def test_transfer_probe_reports_bounded_cosine_distances_when_voting() -> None:
+    dataset = ProteinDataset(
+        [
+            ProteinExample("same", "ACDE", {"active": 1}, "train"),
+            ProteinExample("orthogonal", "FGHI", {"active": 0}, "train"),
+            ProteinExample("opposite", "LMNP", {"active": 0}, "train"),
+            ProteinExample("test", "KLMN", {"active": 0}, "test"),
+        ]
+    )
+    task = Task(
+        name="transfer_cosine_distance_metadata",
+        dataset=dataset,
+        prediction=PredictionSpec(target="active", objective="binary"),
+        probe=TransferProbe(
+            distance="cosine",
+            neighbor_selection="all",
+            scoring="voting",
+            return_neighbors=True,
+        ),
+    )
+
+    result = run_task_on_layer(
+        task=task,
+        embeddings={
+            "same": [1.0, 0.0],
+            "orthogonal": [0.0, 1.0],
+            "opposite": [-1.0, 0.0],
+            "test": [1.0, 0.0],
+        },
+    )
+
+    assert result.metadata is not None
+    neighbors = result.metadata["transfer_neighbors"]["test"]
+    assert [neighbor["id"] for neighbor in neighbors] == ["same", "orthogonal", "opposite"]
+    assert [neighbor["distance"] for neighbor in neighbors] == pytest.approx([0.0, 1.0, 2.0])
+    assert [neighbor["weight"] for neighbor in neighbors] == pytest.approx([1.0, 1.0, 1.0])
+
+
+def test_transfer_probe_uses_bounded_positive_cosine_similarity_weights() -> None:
+    dataset = ProteinDataset(
+        [
+            ProteinExample("same", "ACDE", {"active": 1}, "train"),
+            ProteinExample("orthogonal", "FGHI", {"active": 0}, "train"),
+            ProteinExample("opposite", "LMNP", {"active": 0}, "train"),
+            ProteinExample("test", "KLMN", {"active": 1}, "test"),
+        ]
+    )
+    task = Task(
+        name="transfer_cosine_similarity_weights",
+        dataset=dataset,
+        prediction=PredictionSpec(target="active", objective="binary"),
+        probe=TransferProbe(
+            distance="cosine",
+            neighbor_selection="all",
+            scoring="weighted_voting",
+            return_neighbors=True,
+        ),
+    )
+
+    result = run_task_on_layer(
+        task=task,
+        embeddings={
+            "same": [1.0, 0.0],
+            "orthogonal": [0.0, 1.0],
+            "opposite": [-1.0, 0.0],
+            "test": [1.0, 0.0],
+        },
+    )
+
+    assert result.scores == {"test": pytest.approx(1.0)}
+    assert result.metadata is not None
+    assert result.metadata["transfer_neighbors"]["test"] == [
+        {"id": "same", "distance": pytest.approx(0.0), "weight": pytest.approx(1.0), "label": 1}
+    ]
+
+
 def test_transfer_probe_uses_faiss_cpu_for_knn_selection_when_requested() -> None:
     pytest.importorskip("faiss")
     dataset = ProteinDataset(
