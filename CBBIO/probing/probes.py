@@ -912,7 +912,7 @@ def _distance_matrix(train_matrix: Any, test_matrix: Any, *, distance: TransferD
 
 def _bounded_similarity(distance_value: float, *, distance: TransferDistance) -> float:
     if distance == "cosine":
-        return max(0.0, min(1.0, 1.0 - float(distance_value) / 2.0))
+        return max(0.0, min(1.0, 1.0 - float(distance_value)))
     return 1.0 / (1.0 + max(0.0, float(distance_value)))
 
 
