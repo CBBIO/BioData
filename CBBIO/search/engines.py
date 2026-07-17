@@ -248,6 +248,7 @@ def search_cuvs_state(
                 k=k,
                 excluded_protein_ids=per_query_excluded.get(str(query_id), set()),
                 l2_squared=state.metric == "l2",
+                cosine_value_is_distance=True,
             )
         if _has_enough_neighbors(grouped, state, k=k) or requested >= len(state.protein_ids):
             return grouped
@@ -311,6 +312,7 @@ def neighbors_from_candidate_rows(
     k: int,
     excluded_protein_ids: set[str],
     l2_squared: bool,
+    cosine_value_is_distance: bool = False,
 ) -> list[Neighbor]:
     """Convert backend candidate rows into neighbor records."""
     neighbors: list[Neighbor] = []
@@ -329,6 +331,7 @@ def neighbors_from_candidate_rows(
                     metric=state.metric,
                     value=raw_distance,
                     l2_squared=l2_squared,
+                    cosine_value_is_distance=cosine_value_is_distance,
                 ),
             )
         )

@@ -60,11 +60,19 @@ def _prepare_index_vectors(vectors: Any, *, metric: DistanceMetric) -> Any:
     return matrix / norms
 
 
-def _normalize_distance(*, metric: DistanceMetric, value: Any, l2_squared: bool) -> float:
+def _normalize_distance(
+    *,
+    metric: DistanceMetric,
+    value: Any,
+    l2_squared: bool,
+    cosine_value_is_distance: bool = False,
+) -> float:
     distance = float(value)
     if metric == "inner_product":
         return -distance
     if metric == "cosine":
+        if cosine_value_is_distance:
+            return distance
         return 1.0 - distance
     if not l2_squared:
         return distance

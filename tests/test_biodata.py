@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import pytest
 
 import CBBIO.BioData as bd
+from CBBIO.search import engines as search_engines
 from CBBIO.search import utils as search_utils
 
 
@@ -1292,6 +1293,64 @@ def test_search_torch_state_returns_exact_neighbors_and_respects_exclusions() ->
 
     assert [neighbor.protein_id for neighbor in grouped["Q1"]] == ["B", "C"]
     assert grouped["Q1"][0].distance < grouped["Q1"][1].distance
+
+
+def test_search_cuvs_state_preserves_cosine_distances(monkeypatch: pytest.MonkeyPatch) -> None:
+    np = pytest.importorskip("numpy")
+
+    class _FakeCupy:
+        float32 = np.float32
+
+        def asarray(self, values: Any, dtype: Any = None) -> Any:
+            return np.asarray(values, dtype=dtype)
+
+        def asnumpy(self, values: Any) -> Any:
+            return np.asarray(values)
+
+    def _search(index: object, query_matrix: Any, requested: int) -> tuple[Any, Any]:
+        return (
+            np.asarray([[0.0, 0.25]], dtype=np.float32),
+            np.asarray([[0, 1]], dtype=np.int64),
+        )
+
+    fake_cupy = _FakeCupy()
+    brute_force_module = types.SimpleNamespace(search=_search)
+    cagra_module = types.SimpleNamespace()
+    neighbors_module = types.ModuleType("cuvs.neighbors")
+    setattr(neighbors_module, "brute_force", brute_force_module)
+    setattr(neighbors_module, "cagra", cagra_module)
+    cuvs_module = types.ModuleType("cuvs")
+    setattr(cuvs_module, "neighbors", neighbors_module)
+
+    monkeypatch.setattr(search_engines, "import_cupy", lambda: fake_cupy)
+    monkeypatch.setattr(search_engines, "import_cuvs", lambda: cuvs_module)
+    monkeypatch.setitem(sys.modules, "cuvs", cuvs_module)
+    monkeypatch.setitem(sys.modules, "cuvs.neighbors", neighbors_module)
+
+    state = bd.GpuSearchState(
+        backend="cuvs_gpu",
+        embedding_type_id=1,
+        layer_index=0,
+        metric="cosine",
+        device="cuda:0",
+        ann_enabled=False,
+        protein_ids=["A", "B"],
+        protein_rows={"A": [0], "B": [1]},
+        vectors=np.asarray([[1.0, 0.0], [0.75, 0.25]], dtype=np.float32),
+        cuvs_index=object(),
+    )
+
+    grouped = search_engines.search_cuvs_state(
+        state,
+        query_ids=["Q1"],
+        query_vectors=search_utils.as_numpy_matrix([[1.0, 0.0]]),
+        k=2,
+        per_query_excluded={"Q1": set()},
+    )
+
+    assert [neighbor.protein_id for neighbor in grouped["Q1"]] == ["A", "B"]
+    assert grouped["Q1"][0].distance == pytest.approx(0.0)
+    assert grouped["Q1"][1].distance == pytest.approx(0.25)
 
 
 def test_as_numpy_matrix_accepts_vector_like_rows() -> None:
