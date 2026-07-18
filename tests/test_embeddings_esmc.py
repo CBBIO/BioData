@@ -210,6 +210,7 @@ def test_esmc_generator_loads_biohub_transformers_model_for_aliases(
     fake_transformers = types.SimpleNamespace(
         AutoConfig=_FakeAutoConfig,
         AutoModel=_FakeAutoModel,
+        AutoModelForMaskedLM=_FakeAutoModel,
         AutoTokenizer=_FakeAutoTokenizer,
         EsmConfig=_FakeEsmConfig,
         EsmModel=_FakeEsmModel,
@@ -250,6 +251,7 @@ def test_register_hf_esmc_architecture_uses_matching_model_config_class(
     fake_transformers = types.SimpleNamespace(
         AutoConfig=_FakeAutoConfig,
         AutoModel=_FakeAutoModel,
+        AutoModelForMaskedLM=_FakeAutoModel,
         EsmConfig=_FakeEsmConfig,
         EsmModel=_FakeEsmModel,
     )
@@ -258,8 +260,10 @@ def test_register_hf_esmc_architecture_uses_matching_model_config_class(
     register_hf_esmc_architecture()
     register_hf_esmc_architecture()
 
-    assert len(registrations) == 2
-    assert registrations[0] == registrations[1]
+    assert len(registrations) == 4
+    assert registrations[0] == registrations[2]
+    assert registrations[1] == registrations[3]
+    assert registrations[0][0] is registrations[1][0]
 
 
 def test_register_hf_esmc_architecture_resolves_cached_config() -> None:

@@ -57,14 +57,10 @@ def test_load_esm_tokenizer_falls_back_to_esmc_sequence_tokenizer(
             _ = model_name
             raise ValueError("Tokenizer class ESMCTokenizer does not exist or is not currently imported.")
 
-    class _FakeEsmSequenceTokenizer:
-        pass
-
     fake_transformers = types.SimpleNamespace(AutoTokenizer=_FakeAutoTokenizer)
-    fake_sequence_tokenizer = types.SimpleNamespace(EsmSequenceTokenizer=_FakeEsmSequenceTokenizer)
     monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
-    monkeypatch.setitem(sys.modules, "esm.tokenization.sequence_tokenizer", fake_sequence_tokenizer)
 
     tokenizer = load_esm_tokenizer("biohub/ESMC-300M")
 
-    assert isinstance(tokenizer, _FakeEsmSequenceTokenizer)
+    assert tokenizer.__class__.__name__ == "EsmcSequenceTokenizer"
+    assert tokenizer("ACD")["input_ids"] == [[0, 5, 23, 13, 2]]

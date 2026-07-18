@@ -50,7 +50,7 @@ def load_esm_tokenizer(model_name: str) -> Any:
         except ValueError as exc:
             message = str(exc)
             if "Tokenizer class ESMCTokenizer" in message:
-                return _load_esmc_sequence_tokenizer()
+                return _load_esmc_sequence_tokenizer(model_name)
             if "Tokenizer class ESMTokenizer" not in message:
                 raise
 
@@ -65,15 +65,21 @@ def load_esm_tokenizer(model_name: str) -> Any:
     return cast(Any, EsmTokenizer).from_pretrained(model_name)
 
 
-def _load_esmc_sequence_tokenizer() -> Any:
+def _load_esmc_sequence_tokenizer(model_name: str) -> Any:
     try:
-        from esm.tokenization.sequence_tokenizer import EsmSequenceTokenizer  # type: ignore
+        from ..models.esmc import EsmcSequenceTokenizer, register_hf_esmc_architecture
     except Exception as exc:
         raise RuntimeError(
-            "Failed to load tokenizer via AutoTokenizer and ESM-C tokenizer fallback is unavailable"
+            "Failed to load tokenizer via AutoTokenizer and CBBIO ESM-C tokenizer fallback is unavailable"
         ) from exc
 
-    return EsmSequenceTokenizer()
+    try:
+        register_hf_esmc_architecture()
+        from transformers import AutoTokenizer  # type: ignore
+
+        return cast(Any, AutoTokenizer).from_pretrained(model_name)
+    except Exception:
+        return EsmcSequenceTokenizer()
 
 
 __all__ = ["load_esm_tokenizer", "suppress_esm_tokenizer_class_warning"]
