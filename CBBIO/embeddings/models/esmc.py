@@ -280,7 +280,7 @@ class _PackedLayerNormQkv(_ExtraStateMixin, nn.Module):
 
 class _LinearNoBias(_ExtraStateMixin, nn.Linear):
     def __init__(self, in_features: int, out_features: int) -> None:
-        super().__init__(in_features, out_features, bias=False)
+        super().__init__(in_features, out_features, bias=False)  # pyright: ignore[reportUnknownMemberType]
 
 
 class _EsmcSwiGluFfn(_ExtraStateMixin, nn.Module):
@@ -337,7 +337,7 @@ class _RotaryEmbedding(nn.Module):
             return
         self._seq_len_cached = seq_len
         t = torch.arange(seq_len, device=device, dtype=torch.float32)
-        inv_freq = self.inv_freq.to(device=device, dtype=torch.float32)
+        inv_freq = cast(torch.Tensor, self.inv_freq).to(device=device, dtype=torch.float32)
         freqs = torch.outer(t, inv_freq)
         self._cos_cached = torch.cos(freqs).to(dtype=dtype)
         self._sin_cached = torch.sin(freqs).to(dtype=dtype)
@@ -373,10 +373,10 @@ class _EsmcAttention(nn.Module):
         query, key, value = torch.chunk(qkv, 3, dim=-1)
         query = self.q_ln(query).to(query.dtype)
         key = self.k_ln(key).to(query.dtype)
-        query = query.unflatten(-1, (self.n_heads, self.d_head))
-        key = key.unflatten(-1, (self.n_heads, self.d_head))
+        query = query.reshape(*query.shape[:-1], self.n_heads, self.d_head)
+        key = key.reshape(*key.shape[:-1], self.n_heads, self.d_head)
         query, key = self.rotary(query, key)
-        value = value.unflatten(-1, (self.n_heads, self.d_head))
+        value = value.reshape(*value.shape[:-1], self.n_heads, self.d_head)
         query = query.transpose(1, 2)
         key = key.transpose(1, 2)
         value = value.transpose(1, 2)
@@ -584,6 +584,7 @@ def register_hf_esmc_architecture() -> None:
         BaseModelOutput = _SimpleBaseModelOutput
         MaskedLMOutput = _SimpleMaskedLMOutput
 
+    EsmcTokenizerClass: type[Any] | None
     if (
         _esmc_architecture_cache is not None
         and _esmc_architecture_cache[0] is PretrainedConfig
@@ -592,7 +593,7 @@ def register_hf_esmc_architecture() -> None:
         EsmcConfig = _esmc_architecture_cache[2]
         EsmcModel = _esmc_architecture_cache[3]
         EsmcForMaskedLM = _esmc_architecture_cache[4]
-        ESMCTokenizer = _esmc_architecture_cache[5]
+        EsmcTokenizerClass = _esmc_architecture_cache[5]
     else:
 
         class EsmcConfig(PretrainedConfig):  # type: ignore[misc]
@@ -664,7 +665,7 @@ def register_hf_esmc_architecture() -> None:
                         values += (hidden_states,)
                     return values
 
-                return BaseModelOutput(
+                return cast(Any, BaseModelOutput)(
                     last_hidden_state=output.embeddings,
                     hidden_states=hidden_states,
                 )
@@ -722,14 +723,14 @@ def register_hf_esmc_architecture() -> None:
                         values += (hidden_states,)
                     return values
 
-                return MaskedLMOutput(
+                return cast(Any, MaskedLMOutput)(
                     loss=loss,
                     logits=logits,
                     hidden_states=hidden_states,
                 )
 
         if PreTrainedTokenizer is None:
-            ESMCTokenizer = None
+            EsmcTokenizerClass = None
         else:
 
             class ESMCTokenizer(EsmcSequenceTokenizer, PreTrainedTokenizer):  # type: ignore[misc]
@@ -744,24 +745,26 @@ def register_hf_esmc_architecture() -> None:
                     kwargs.setdefault("mask_token", self.mask_token)
                     PreTrainedTokenizer.__init__(self, **kwargs)  # pyright: ignore[reportUnknownMemberType]
 
+            EsmcTokenizerClass = ESMCTokenizer
+
         _esmc_architecture_cache = (
             PretrainedConfig,
             PreTrainedModel,
             EsmcConfig,
             EsmcModel,
             EsmcForMaskedLM,
-            ESMCTokenizer,
+            EsmcTokenizerClass,
         )
 
-    cast(Any, AutoConfig).register("esmc", EsmcConfig, exist_ok=True)
-    cast(Any, AutoModel).register(EsmcConfig, EsmcModel, exist_ok=True)
+    AutoConfig.register("esmc", EsmcConfig, exist_ok=True)
+    AutoModel.register(EsmcConfig, EsmcModel, exist_ok=True)
     if AutoModelForMaskedLM is not None:
-        cast(Any, AutoModelForMaskedLM).register(EsmcConfig, EsmcForMaskedLM, exist_ok=True)
-    if AutoTokenizer is not None and ESMCTokenizer is not None:
-        setattr(transformers, "ESMCTokenizer", ESMCTokenizer)
-        cast(Any, AutoTokenizer).register(
+        AutoModelForMaskedLM.register(EsmcConfig, EsmcForMaskedLM, exist_ok=True)
+    if AutoTokenizer is not None and EsmcTokenizerClass is not None:
+        setattr(transformers, "ESMCTokenizer", EsmcTokenizerClass)
+        AutoTokenizer.register(
             EsmcConfig,
-            slow_tokenizer_class=ESMCTokenizer,
+            slow_tokenizer_class=EsmcTokenizerClass,
             fast_tokenizer_class=None,
             exist_ok=True,
         )
