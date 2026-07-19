@@ -269,6 +269,16 @@ def multilabel_metrics(
         else 0.0
     )
     support_total = int(_np.sum(supports))
+    weighted_precision = (
+        float(cast(float, _np.sum(precision_by_class * supports))) / float(support_total)
+        if support_total
+        else 0.0
+    )
+    weighted_recall = (
+        float(cast(float, _np.sum(recall_by_class * supports))) / float(support_total)
+        if support_total
+        else 0.0
+    )
     weighted_f1 = (
         float(cast(float, _np.sum(macro_f1_values * supports))) / float(support_total)
         if support_total
@@ -284,6 +294,8 @@ def multilabel_metrics(
         "f1": micro_f1,
         "micro_f1": micro_f1,
         "macro_f1": float(cast(float, _np.mean(macro_f1_values))),
+        "weighted_precision": weighted_precision,
+        "weighted_recall": weighted_recall,
         "weighted_f1": weighted_f1,
         "average_precision": average_precision,
         **ranking_metrics,

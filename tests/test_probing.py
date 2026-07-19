@@ -1185,6 +1185,8 @@ def test_multilabel_metrics_report_micro_and_macro_f1() -> None:
     assert metrics["f1"] == pytest.approx(0.75)
     assert metrics["micro_f1"] == pytest.approx(0.75)
     assert metrics["macro_f1"] == pytest.approx((0.8 + 2.0 / 3.0) / 2.0)
+    assert metrics["weighted_precision"] == pytest.approx(((2.0 / 3.0) * 2.0 + 1.0 * 2.0) / 4.0)
+    assert metrics["weighted_recall"] == pytest.approx((1.0 * 2.0 + 0.5 * 2.0) / 4.0)
     assert metrics["weighted_f1"] == pytest.approx((0.8 * 2.0 + (2.0 / 3.0) * 2.0) / 4.0)
     assert metrics["average_precision"] == pytest.approx(1.0)
     assert metrics["fmax"] == pytest.approx(8.0 / 9.0)
