@@ -234,7 +234,7 @@ def test_prostt5_generator_available_layers_and_count(
     assert generator.num_layers() == 3
 
 
-def test_prostt5_loader_keeps_tied_embeddings_when_loading_hf_checkpoint(
+def test_prostt5_loader_resolves_alias_and_keeps_tied_embeddings_when_loading_hf_checkpoint(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class _FakeConfig:
@@ -243,21 +243,29 @@ def test_prostt5_loader_keeps_tied_embeddings_when_loading_hf_checkpoint(
             self.num_layers = 2
 
     class _FakeAutoConfig:
+        observed_name: str | None = None
+
         @staticmethod
-        def from_pretrained(_name: str) -> _FakeConfig:
+        def from_pretrained(name: str) -> _FakeConfig:
+            _FakeAutoConfig.observed_name = name
             return _FakeConfig()
 
     class _FakeT5Tokenizer:
+        observed_name: str | None = None
+
         @staticmethod
-        def from_pretrained(_name: str, do_lower_case: bool = False) -> _FakeTokenizer:
+        def from_pretrained(name: str, do_lower_case: bool = False) -> _FakeTokenizer:
+            _FakeT5Tokenizer.observed_name = name
             assert do_lower_case is False
             return _FakeTokenizer()
 
     class _FakeT5EncoderModel:
+        observed_name: str | None = None
         observed_tie_flag: bool | None = None
 
         @staticmethod
-        def from_pretrained(_name: str, config: _FakeConfig) -> _FakeModel:
+        def from_pretrained(name: str, config: _FakeConfig) -> _FakeModel:
+            _FakeT5EncoderModel.observed_name = name
             _FakeT5EncoderModel.observed_tie_flag = bool(config.tie_word_embeddings)
             return _FakeModel()
 
@@ -268,7 +276,11 @@ def test_prostt5_loader_keeps_tied_embeddings_when_loading_hf_checkpoint(
     )
     monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
 
-    generator = ProstT5EmbeddingGenerator(model_name="Rostlab/ProstT5", device="cpu")
+    generator = ProstT5EmbeddingGenerator(model_name="prostT5", device="cpu")
 
-    assert generator.model_metadata.model_name == "Rostlab/ProstT5"
+    assert generator.model_metadata.model_name == "prostT5"
+    assert generator.model_reference == "Rostlab/ProstT5"
+    assert _FakeAutoConfig.observed_name == "Rostlab/ProstT5"
+    assert _FakeT5Tokenizer.observed_name == "Rostlab/ProstT5"
+    assert _FakeT5EncoderModel.observed_name == "Rostlab/ProstT5"
     assert _FakeT5EncoderModel.observed_tie_flag is True

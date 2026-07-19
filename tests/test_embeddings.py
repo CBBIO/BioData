@@ -369,7 +369,8 @@ def test_model_generators_share_catalog_interface(generator_type: type[Any]) -> 
     ("generator_type", "model_alias", "expected_model_reference"),
     [
         (ProtT5EmbeddingGenerator, "prot-t5-xxl-bfd", "Rostlab/prot_t5_xxl_bfd"),
-        (ProstT5EmbeddingGenerator, "Rostlab/ProstT5", "Rostlab/ProstT5"),
+        (ProtT5EmbeddingGenerator, "protT5_xl", "Rostlab/prot_t5_xl_uniref50"),
+        (ProstT5EmbeddingGenerator, "prostT5", "Rostlab/ProstT5"),
         (Ankh3EmbeddingGenerator, "ankh3_xl", "ElnaggarLab/ankh3-xl"),
         (AmplifyEmbeddingGenerator, "amplify_350m", "nvidia/AMPLIFY_350M"),
         (ProteinGlmEmbeddingGenerator, "pglm_3b", "biomap-research/proteinglm-3b-mlm"),
@@ -589,6 +590,8 @@ def test_generator_factory_builds_esm2_from_size_alias() -> None:
         ("esm1b", "esm1b_650m", Esm1bEmbeddingGenerator, "esm1b_t33_650M_UR50S"),
         ("proteinglm", "proteinglm_3b", ProteinGlmEmbeddingGenerator, "biomap-research/proteinglm-3b-mlm"),
         ("prott5", "prott5_xl_uniref50", ProtT5EmbeddingGenerator, "Rostlab/prot_t5_xl_uniref50"),
+        ("prott5", "protT5_xl", ProtT5EmbeddingGenerator, "Rostlab/prot_t5_xl_uniref50"),
+        ("prostt5", "prostT5", ProstT5EmbeddingGenerator, "Rostlab/ProstT5"),
     ],
 )
 def test_generator_factory_accepts_family_size_model_aliases(
@@ -1416,6 +1419,7 @@ def test_prott5_generator_raises_dependency_error_when_transformers_missing(
 @pytest.mark.parametrize(
     ("model_name", "expected_model_reference"),
     [
+        ("protT5_xl", "Rostlab/prot_t5_xl_uniref50"),
         ("prott5_xxl_bfd", "Rostlab/prot_t5_xxl_bfd"),
         ("prot_t5_xl_bfd", "Rostlab/prot_t5_xl_bfd"),
         ("prot-t5-xxl-uniref50", "Rostlab/prot_t5_xxl_uniref50"),

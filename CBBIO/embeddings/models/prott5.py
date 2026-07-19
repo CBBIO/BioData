@@ -35,6 +35,12 @@ from ._esm_hf import resolve_model_name
 
 
 _PROTT5_MODEL_ALIASES: Dict[str, str] = {
+    "prott5": "Rostlab/prot_t5_xl_uniref50",
+    "prot_t5": "Rostlab/prot_t5_xl_uniref50",
+    "prot-t5": "Rostlab/prot_t5_xl_uniref50",
+    "prott5_xl": "Rostlab/prot_t5_xl_uniref50",
+    "prot_t5_xl": "Rostlab/prot_t5_xl_uniref50",
+    "prot-t5-xl": "Rostlab/prot_t5_xl_uniref50",
     "prott5_xl_uniref50": "Rostlab/prot_t5_xl_uniref50",
     "prot_t5_xl_uniref50": "Rostlab/prot_t5_xl_uniref50",
     "prot-t5-xl-uniref50": "Rostlab/prot_t5_xl_uniref50",

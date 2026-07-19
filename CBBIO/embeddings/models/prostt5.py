@@ -31,6 +31,14 @@ from ..utils.torch import (
     normalize_torch_dtype_name,
     resolve_torch_dtype,
 )
+from ._esm_hf import resolve_model_name
+
+
+_PROSTT5_MODEL_ALIASES: Dict[str, str] = {
+    "prostt5": "Rostlab/ProstT5",
+    "prost_t5": "Rostlab/ProstT5",
+    "prost-t5": "Rostlab/ProstT5",
+}
 
 
 class ProstT5Preprocessor(BasePreprocessor):
@@ -190,7 +198,7 @@ class ProstT5EmbeddingGenerator(EmbeddingGenerator):
 
     GENERATOR_CLASS = "prostt5"
     GENERATOR_ALIASES = ("prost_t5", "prost-t5")
-    MODEL_ALIASES: Dict[str, str] = {}
+    MODEL_ALIASES = _PROSTT5_MODEL_ALIASES
     DEFAULT_MODEL_NAME = "Rostlab/ProstT5"
     FAMILY_MODELS = [DEFAULT_MODEL_NAME]
     SUPPORTED_POOLERS = ("none", "mean")
@@ -209,9 +217,8 @@ class ProstT5EmbeddingGenerator(EmbeddingGenerator):
         **kwargs: Any,
     ) -> ModelDownloadResult:
         """Download a ProstT5 checkpoint into the local Hugging Face cache."""
-        model_reference = str(model_name or cls.DEFAULT_MODEL_NAME).strip()
-        if not model_reference:
-            raise EmbeddingInputError("ProstT5 model_name must be non-empty.")
+        raw_model_name = model_name or cls.DEFAULT_MODEL_NAME
+        model_reference = resolve_model_name(raw_model_name, cls.MODEL_ALIASES, family="ProstT5")
         return download_huggingface_snapshot(
             model_reference,
             revision=revision,
@@ -232,6 +239,7 @@ class ProstT5EmbeddingGenerator(EmbeddingGenerator):
         tokenizer: Any | None = None,
         model: Any | None = None,
     ) -> None:
+        model_reference = resolve_model_name(model_name, self.MODEL_ALIASES, family="ProstT5")
         resolved_tokenizer: Any | None = tokenizer
         resolved_model: Any | None = model
         resolved_dtype_name = normalize_torch_dtype_name(dtype)
@@ -246,13 +254,13 @@ class ProstT5EmbeddingGenerator(EmbeddingGenerator):
                 ) from exc
 
             if resolved_tokenizer is None:
-                resolved_tokenizer = cast(Any, T5Tokenizer).from_pretrained(model_name, do_lower_case=False)
+                resolved_tokenizer = cast(Any, T5Tokenizer).from_pretrained(model_reference, do_lower_case=False)
             if resolved_model is None:
-                config = cast(Any, AutoConfig).from_pretrained(model_name)
+                config = cast(Any, AutoConfig).from_pretrained(model_reference)
                 model_kwargs: Dict[str, Any] = {"config": config}
                 if resolved_torch_dtype is not None:
                     model_kwargs["torch_dtype"] = resolved_torch_dtype
-                resolved_model = cast(Any, T5EncoderModel).from_pretrained(model_name, **model_kwargs)
+                resolved_model = cast(Any, T5EncoderModel).from_pretrained(model_reference, **model_kwargs)
 
         parameters: Dict[str, Any] = {
             "mode": "protein_to_embedding_only",
@@ -267,7 +275,7 @@ class ProstT5EmbeddingGenerator(EmbeddingGenerator):
             parameters["precision_policy"] = "explicit_torch_dtype"
 
         super().__init__(
-            model_reference=model_name,
+            model_reference=model_reference,
             preprocessor=ProstT5Preprocessor(),
             tokenizer=ProstT5TokenizerAdapter(resolved_tokenizer, device=device),
             model=ProstT5ModelAdapter(
@@ -281,7 +289,7 @@ class ProstT5EmbeddingGenerator(EmbeddingGenerator):
         self.model_metadata = ModelMetadata(
             provider="huggingface-transformers",
             model_name=model_name,
-            model_reference=model_name,
+            model_reference=model_reference,
             model_revision=extract_revision(resolved_model),
             tokenizer_name=extract_name_or_path(resolved_tokenizer),
             tokenizer_revision=extract_revision(resolved_tokenizer),
