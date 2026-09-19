@@ -321,7 +321,6 @@ def test_find_nearest_neighbors_for_embeddings_empty_input_short_circuits() -> N
 def test_find_nearest_neighbors_for_proteins_groups_rows_and_respects_include_query_flag() -> None:
     responses = [
         _Response(one={"embedding": [0.1, 0.2, 0.3]}),
-        _Response(one={"exists": True}),
         _Response(
             all=[
                 ("Q1", "N1", 0, 0.1),
@@ -343,11 +342,38 @@ def test_find_nearest_neighbors_for_proteins_groups_rows_and_respects_include_qu
 
     assert [n.protein_id for n in grouped["Q1"]] == ["N1", "N2"]
     assert grouped["Q2"] == []
-    sql, params = conn.executed[2]
+    sql, params = conn.executed[1]
     assert "<=>" in sql
     assert "halfvec(3)" in sql
     assert "query_sequence_id" in sql
-    assert params == (["Q1", "Q2"], 3, 0, 3, 0, 2)
+    assert params == (["Q1", "Q2"], 3, 0, 3, 0, 2, 2)
+
+
+def test_find_nearest_neighbors_for_proteins_ann_reranks_candidate_pool() -> None:
+    responses = [
+        _Response(one={"embedding": [0.1, 0.2, 0.3]}),
+        _Response(one={"exists": True}),
+        _Response(),
+        _Response(all=[("Q1", "N1", 0, 0.1)]),
+    ]
+    client, conn = _client_with_fake_conn(responses)
+
+    grouped = client.find_nearest_neighbors_for_proteins(
+        ["Q1"],
+        embedding_type_id=3,
+        layer_index=0,
+        k=10,
+        metric="cosine",
+        use_ann=True,
+        ann_ef_search=300,
+        ann_candidate_pool=500,
+    )
+
+    assert [neighbor.protein_id for neighbor in grouped["Q1"]] == ["N1"]
+    assert "SET hnsw.ef_search = 300;" in conn.executed[2][0]
+    sql, params = conn.executed[3]
+    assert "LIMIT %s" in sql
+    assert params == (["Q1"], 3, 0, 3, 0, 500, 10)
 
 
 def test_warn_if_missing_ann_index_no_warning_when_index_exists() -> None:

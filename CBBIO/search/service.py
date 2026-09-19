@@ -474,6 +474,9 @@ class SearchService:
         *,
         metric: DistanceMetric | None = None,
         include_query: bool = False,
+        use_ann: bool = False,
+        ann_ef_search: int = 200,
+        ann_candidate_pool: int | None = None,
         backend: SearchBackend | None = None,
         device: str | None = None,
     ) -> Dict[str, List[Neighbor]]:
@@ -493,7 +496,7 @@ class SearchService:
             layer_index=layer_index,
             metric=effective_metric,
             batch_size=len(ids),
-            ann_requested=False,
+            ann_requested=use_ann,
             device=device,
         )
         resolved = self._apply_auto_gpu_heuristics(
@@ -514,6 +517,9 @@ class SearchService:
                 k=effective_k,
                 metric=effective_metric,
                 include_query=include_query,
+                use_ann=resolved.ann_used,
+                ann_ef_search=ann_ef_search,
+                ann_candidate_pool=ann_candidate_pool,
             )
         else:
             query_map = self._client.get_protein_embeddings(ids, embedding_type_id=embedding_type_id, layer_index=layer_index)
@@ -536,6 +542,7 @@ class SearchService:
                         metric=effective_metric,
                         include_query=include_query,
                         device=resolved.device,
+                        use_ann=resolved.ann_used,
                     )
                 elif resolved.backend == "faiss_cpu":
                     partial = self._client._find_nearest_neighbors_for_queries_faiss_cpu(
@@ -546,7 +553,7 @@ class SearchService:
                         k=effective_k,
                         metric=effective_metric,
                         include_query=include_query,
-                        use_ann=False,
+                        use_ann=resolved.ann_used,
                     )
                 elif resolved.backend == "cuvs_gpu":
                     partial = self._client._find_nearest_neighbors_for_queries_cuvs(
@@ -558,7 +565,7 @@ class SearchService:
                         metric=effective_metric,
                         include_query=include_query,
                         device=resolved.device,
-                        use_ann=False,
+                        use_ann=resolved.ann_used,
                     )
                 else:
                     partial = self._client._find_nearest_neighbors_for_queries_torch(
@@ -802,6 +809,9 @@ class SearchService:
         k: int,
         metric: DistanceMetric,
         include_query: bool,
+        use_ann: bool,
+        ann_ef_search: int,
+        ann_candidate_pool: int | None,
     ) -> Dict[str, List[Neighbor]]:
         """Find stored-protein nearest neighbors through pgvector."""
         conn = self._client._require_connection()
@@ -819,12 +829,14 @@ class SearchService:
         if dim_row is None or dim_row.get("embedding") is None:
             return {}
         dim = embedding_dimension(dim_row["embedding"])
-        self._client._warn_if_missing_ann_index(embedding_type_id, layer_index, metric)
+        if use_ann:
+            self._client._warn_if_missing_ann_index(embedding_type_id, layer_index, metric)
 
         exclude_clause = ""
         if not include_query:
             exclude_clause = " AND se2.sequence_id <> q.query_sequence_id "
 
+        candidate_limit = max(k, int(ann_candidate_pool)) if ann_candidate_pool is not None else max(k * 20, 200)
         sql = (
             "WITH query_embeddings AS ("
             "    SELECT p.id AS query_protein_id, "
@@ -859,7 +871,8 @@ class SearchService:
             "        LIMIT %s"
             "    ) c "
             "    JOIN protein p2 ON p2.sequence_id = c.sequence_id "
-            "    ORDER BY c.distance"
+            "    ORDER BY c.distance "
+            "    LIMIT %s"
             ") n ON TRUE "
             "ORDER BY q.query_protein_id, n.distance;"
         )
@@ -870,10 +883,13 @@ class SearchService:
             layer_index,
             embedding_type_id,
             layer_index,
+            candidate_limit if use_ann else k,
             k,
         )
 
         with cursor(conn) as cur:
+            if use_ann and ann_ef_search > 0:
+                cur.execute(f"SET hnsw.ef_search = {int(ann_ef_search)};")
             cur.execute(sql, params)
             rows = cur.fetchall()
 
@@ -1025,6 +1041,7 @@ class SearchService:
         metric: DistanceMetric,
         include_query: bool,
         device: str | None,
+        use_ann: bool,
     ) -> Dict[str, List[Neighbor]]:
         """Find batch nearest neighbors through a FAISS GPU index."""
         state = self._client._get_or_load_gpu_search_state(
@@ -1033,7 +1050,7 @@ class SearchService:
             layer_index=layer_index,
             metric=metric,
             device=device,
-            ann_requested=False,
+            ann_requested=use_ann,
         )
         query_matrix = as_numpy_matrix(query_vectors)
         per_query_excluded: Dict[str, Set[str]] = {

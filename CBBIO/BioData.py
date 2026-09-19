@@ -996,10 +996,30 @@ class BioDataClient:
         *,
         metric: DistanceMetric | None = None,
         include_query: bool = False,
+        use_ann: bool = False,
+        ann_ef_search: int = 200,
+        ann_candidate_pool: int | None = None,
         backend: SearchBackend | None = None,
         device: str | None = None,
     ) -> Dict[str, List[Neighbor]]:
-        """Find nearest neighbors for many proteins using the configured backend."""
+        """Find nearest neighbors for many stored proteins.
+
+        Args:
+            protein_ids: Stored protein IDs used as query vectors.
+            embedding_type_id: Stored embedding type to search.
+            layer_index: Embedding layer to search.
+            k: Maximum neighbors returned for each query.
+            metric: Distance metric used to rank neighbors.
+            include_query: Whether a query protein may appear in its own result.
+            use_ann: Whether to enable approximate nearest-neighbor search where supported.
+            ann_ef_search: pgvector HNSW search breadth when ANN is enabled.
+            ann_candidate_pool: pgvector ANN candidate count before exact reranking.
+            backend: Search backend to use.
+            device: Optional accelerator device for GPU backends.
+
+        Returns:
+            Mapping from each protein ID to its nearest neighbors.
+        """
         return self._search.find_nearest_neighbors_for_proteins(
             protein_ids,
             embedding_type_id,
@@ -1007,6 +1027,9 @@ class BioDataClient:
             k=k,
             metric=metric,
             include_query=include_query,
+            use_ann=use_ann,
+            ann_ef_search=ann_ef_search,
+            ann_candidate_pool=ann_candidate_pool,
             backend=backend,
             device=device,
         )
@@ -1045,6 +1068,9 @@ class BioDataClient:
         k: int,
         metric: DistanceMetric,
         include_query: bool,
+        use_ann: bool,
+        ann_ef_search: int,
+        ann_candidate_pool: int | None,
     ) -> Dict[str, List[Neighbor]]:
         return self._search.find_nearest_neighbors_for_proteins_pgvector(
             protein_ids,
@@ -1053,6 +1079,9 @@ class BioDataClient:
             k=k,
             metric=metric,
             include_query=include_query,
+            use_ann=use_ann,
+            ann_ef_search=ann_ef_search,
+            ann_candidate_pool=ann_candidate_pool,
         )
 
     def _find_nearest_neighbors_faiss(
@@ -1154,6 +1183,7 @@ class BioDataClient:
         metric: DistanceMetric,
         include_query: bool,
         device: str | None,
+        use_ann: bool = False,
     ) -> Dict[str, List[Neighbor]]:
         return self._search.find_nearest_neighbors_for_queries_faiss(
             query_ids,
@@ -1164,6 +1194,7 @@ class BioDataClient:
             metric=metric,
             include_query=include_query,
             device=device,
+            use_ann=use_ann,
         )
 
     def _find_nearest_neighbors_for_queries_faiss_cpu(

@@ -215,6 +215,25 @@ results = client.find_nearest_neighbors_for_proteins(
 # → {"P12345": [Neighbor(...), ...], "Q67890": [...]}
 ```
 
+### Approximate batch query
+
+```python
+results = client.find_nearest_neighbors_for_proteins(
+    protein_ids=["P12345", "Q67890"],
+    embedding_type_id=3,
+    layer_index=0,
+    k=10,
+    metric="cosine",
+    use_ann=True,
+    ann_ef_search=200,
+    ann_candidate_pool=1000,
+)
+```
+
+For pgvector, `ann_ef_search` controls HNSW search breadth. `ann_candidate_pool` controls how
+many approximate candidates pgvector reranks exactly. A compatible HNSW or IVFFlat index must
+exist for the selected embedding type, layer, and metric.
+
 ### Batch query for external embeddings
 
 ```python
