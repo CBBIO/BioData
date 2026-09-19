@@ -15,7 +15,12 @@ client.health_check()
 
 ### config.yaml
 
-Place `config.yaml` in your working directory (or pass `config_path=`):
+Copy `config.yaml.example` to `config.yaml`, then set your local credentials. You can also pass
+`config_path=`:
+
+```bash
+cp config.yaml.example config.yaml
+```
 
 ```yaml
 database:
@@ -23,7 +28,7 @@ database:
   port: 5432
   user: biodata
   password: ""
-  database: biodata
+  name: biodata
 
 search:
   default_metric: cosine   # l2 | cosine | inner_product

@@ -4,6 +4,7 @@ __pycache__/
 .pytest_cache/
 .venv/
 config_test.yaml
+config.yaml
 .coverage
 taxdump/
 taxdump.tar.gz

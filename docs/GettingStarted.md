@@ -91,7 +91,13 @@ For a complete reference on models, poolers, and output formats see [Embeddings.
 
 ## 2. Connecting to the BioData Database
 
-Configuration is read from `config.yaml` in the working directory. The minimal file:
+Copy `config.yaml.example` to `config.yaml`, then set your local credentials:
+
+```bash
+cp config.yaml.example config.yaml
+```
+
+The minimal file:
 
 ```yaml
 database:
@@ -99,7 +105,7 @@ database:
   port: 5432
   user: biodata
   password: ""
-  database: biodata
+  name: biodata
 ```
 
 You can also override any value with an environment variable:

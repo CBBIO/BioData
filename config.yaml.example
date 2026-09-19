@@ -1,0 +1,15 @@
+database:
+  host: localhost
+  port: 5432
+  name: biodata
+  user: biodata
+  password: ""
+
+client:
+  autocommit: true
+  register_halfvec: true
+
+search:
+  default_metric: cosine
+  default_k: 10
+  default_backend: auto

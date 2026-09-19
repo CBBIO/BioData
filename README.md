@@ -14,7 +14,7 @@ Utilities for working with a PostgreSQL BioData database, protein language model
 | `CBBIO/Taxonomy.py` | Taxonomy utilities (`TaxonomyOntology`) for NCBI taxdump |
 | `CBBIO/similarity.py` | Pairwise sequence alignment via `parasail` |
 | `sql/schema.sql` | Database schema |
-| `config.yaml` | Default DB / search configuration |
+| `config.yaml.example` | Database and search configuration template |
 | `docs/` | Full documentation for all modules |
 | `notebooks/data/` | Small notebook input assets tracked with the repo |
 | `tests/assets/` | Test configuration templates and fixtures |
@@ -100,7 +100,11 @@ PGPASSWORD=secret pg_restore -h localhost -U biodata -d biodata /path/to/BioData
 
 ## Configuration
 
-`config.yaml` in the working directory (or pass `config_path=` to `connect()`):
+Copy the untracked template to `config.yaml` (or pass `config_path=` to `connect()`):
+
+```bash
+cp config.yaml.example config.yaml
+```
 
 ```yaml
 database:
@@ -108,7 +112,7 @@ database:
   port: 5432
   user: biodata
   password: ""
-  database: biodata
+  name: biodata
 
 search:
   default_metric: cosine    # l2 | cosine | inner_product
