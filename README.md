@@ -144,6 +144,7 @@ Environment variable overrides (highest precedence):
 | Agent example prompts | [docs/AgentExamplePrompts.md](docs/AgentExamplePrompts.md) |
 | Agent code examples | [docs/examples/README.md](docs/examples/README.md) |
 | Getting started tutorial | [docs/GettingStarted.md](docs/GettingStarted.md) |
+| Search benchmarks | [docs/Benchmarks.md](docs/Benchmarks.md) |
 | Embedding generation | [docs/Embeddings.md](docs/Embeddings.md) |
 | Probing tasks and benchmarks | [docs/Probing.md](docs/Probing.md) |
 | Database client and search | [docs/BioData.md](docs/BioData.md) |

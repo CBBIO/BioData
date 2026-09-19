@@ -82,6 +82,23 @@ def _parse_args() -> argparse.Namespace:
         help="Number of neighbors per query. Default: 10.",
     )
     parser.add_argument(
+        "--use-ann",
+        action="store_true",
+        help="Use the selected backend's ANN index instead of exact search.",
+    )
+    parser.add_argument(
+        "--ann-ef-search",
+        type=int,
+        default=200,
+        help="HNSW ef_search for pgvector ANN. Default: 200.",
+    )
+    parser.add_argument(
+        "--ann-candidate-pool",
+        type=int,
+        default=None,
+        help="Candidates reranked per query by pgvector ANN. Default: max(20*k, 200).",
+    )
+    parser.add_argument(
         "--seed",
         type=int,
         default=7,
@@ -99,7 +116,12 @@ def _parse_args() -> argparse.Namespace:
         default=_SCRIPT_REPO_ROOT / "benchmark_neighbor_search.json",
         help="JSON output path. Default: benchmark_neighbor_search.json",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.ann_ef_search < 1:
+        parser.error("--ann-ef-search must be >= 1")
+    if args.ann_candidate_pool is not None and args.ann_candidate_pool < args.k:
+        parser.error("--ann-candidate-pool must be >= --k")
+    return args
 
 
 def _load_protein_ids(path: Path) -> list[str]:
@@ -164,6 +186,9 @@ def _run_backend_once(
     metric: str,
     k: int,
     device: str | None,
+    use_ann: bool,
+    ann_ef_search: int,
+    ann_candidate_pool: int | None,
 ) -> Dict[str, Any]:
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
@@ -176,6 +201,9 @@ def _run_backend_once(
             metric=metric,  # type: ignore[arg-type]
             backend=backend,
             device=device,
+            use_ann=use_ann,
+            ann_ef_search=ann_ef_search,
+            ann_candidate_pool=ann_candidate_pool,
         )
         elapsed = time.perf_counter() - started
 
@@ -201,6 +229,9 @@ def _benchmark_backend(
     device: str | None,
     progress_start: int,
     progress_total: int,
+    use_ann: bool,
+    ann_ef_search: int,
+    ann_candidate_pool: int | None,
 ) -> Dict[str, Any]:
     backend_started = time.perf_counter()
     first_batch_size = min(samples)
@@ -219,6 +250,9 @@ def _benchmark_backend(
             metric=metric,
             k=min(k, 5),
             device=device,
+            use_ann=use_ann,
+            ann_ef_search=ann_ef_search,
+            ann_candidate_pool=ann_candidate_pool,
         )
     except Exception as exc:
         return {
@@ -255,6 +289,9 @@ def _benchmark_backend(
                     metric=metric,
                     k=k,
                     device=device,
+                    use_ann=use_ann,
+                    ann_ef_search=ann_ef_search,
+                    ann_candidate_pool=ann_candidate_pool,
                 )
             except Exception as exc:
                 return {
@@ -382,6 +419,9 @@ def main() -> None:
                     device=args.device,
                     progress_start=completed_runs,
                     progress_total=total_runs,
+                    use_ann=bool(args.use_ann),
+                    ann_ef_search=int(args.ann_ef_search),
+                    ann_candidate_pool=args.ann_candidate_pool,
                 )
             )
             completed_runs += runs_per_backend
@@ -395,6 +435,9 @@ def main() -> None:
         "layer_index": int(args.layer_index),
         "metric": args.metric,
         "k": int(args.k),
+        "use_ann": bool(args.use_ann),
+        "ann_ef_search": int(args.ann_ef_search),
+        "ann_candidate_pool": args.ann_candidate_pool,
         "seed": int(args.seed),
         "device": args.device,
         "results": results,
