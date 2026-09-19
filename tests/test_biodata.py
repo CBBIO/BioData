@@ -10,6 +10,7 @@ import pytest
 
 import CBBIO.BioData as bd
 from CBBIO.search import engines as search_engines
+from CBBIO.search import service as search_service
 from CBBIO.search import utils as search_utils
 
 
@@ -228,6 +229,93 @@ def test_get_protein_embeddings_variants() -> None:
     assert str(as_np["P1"].dtype) == "float32"
     assert empty == {}
     assert len(conn.executed) == 2
+
+
+def test_find_nearest_neighbors_for_embeddings_batches_external_queries_through_faiss(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, _ = _client_with_fake_conn([])
+    captured: Dict[str, Any] = {}
+
+    def _detect(*, device: str | None) -> bd.BackendAvailability:
+        return bd.BackendAvailability(
+            faiss_gpu=False,
+            torch_gpu=False,
+            preferred_device=None,
+            torch_device=None,
+            faiss_device=None,
+            hardware_class="cpu",
+            faiss_cpu=True,
+        )
+
+    def _search_state(state: Any, **kwargs: Any) -> Dict[str, List[bd.Neighbor]]:
+        captured["state"] = state
+        captured.update(kwargs)
+        return {
+            "new_1": [bd.Neighbor(protein_id="P1", layer_index=33, distance=0.1)],
+            "new_2": [bd.Neighbor(protein_id="P2", layer_index=33, distance=0.2)],
+        }
+
+    state = object()
+    monkeypatch.setattr(client, "_detect_backend_availability", _detect)
+    monkeypatch.setattr(client, "_get_or_load_gpu_search_state", lambda **kwargs: state)
+    monkeypatch.setattr(search_service, "search_state", _search_state)
+
+    grouped = client.find_nearest_neighbors_for_embeddings(
+        {"new_1": [0.1, 0.2], "new_2": [0.3, 0.4]},
+        embedding_type_id=1,
+        layer_index=33,
+        k=2,
+        exclude_protein_ids=["P0"],
+        backend="faiss_cpu",
+    )
+
+    assert [neighbor.protein_id for neighbor in grouped["new_1"]] == ["P1"]
+    assert captured["state"] is state
+    assert captured["query_ids"] == ["new_1", "new_2"]
+    query_vectors = captured["query_vectors"].tolist()
+    assert query_vectors[0] == pytest.approx([0.1, 0.2])
+    assert query_vectors[1] == pytest.approx([0.3, 0.4])
+    assert captured["per_query_excluded"] == {"new_1": {"P0"}, "new_2": {"P0"}}
+    assert client.last_search_diagnostics["query_count"] == 2
+
+
+def test_find_nearest_neighbors_for_embeddings_batches_external_queries_through_pgvector() -> None:
+    responses = [_Response(all=[("new_1", "P1", 33, 0.1), ("new_2", None, None, None)])]
+    client, conn = _client_with_fake_conn(responses)
+
+    grouped = client.find_nearest_neighbors_for_embeddings(
+        {"new_1": [0.1, 0.2], "new_2": [0.3, 0.4]},
+        embedding_type_id=1,
+        layer_index=33,
+        k=2,
+        metric="cosine",
+        exclude_protein_ids=["P0"],
+        backend="pgvector",
+    )
+
+    assert [neighbor.protein_id for neighbor in grouped["new_1"]] == ["P1"]
+    assert grouped["new_2"] == []
+    sql, params = conn.executed[0]
+    assert "VALUES (%s, %s::halfvec), (%s, %s::halfvec)" in sql
+    assert "LEFT JOIN LATERAL" in sql
+    assert "p.id <> ALL(%s)" in sql
+    assert "<=>" in sql
+    assert params == ("new_1", [0.1, 0.2], "new_2", [0.3, 0.4], 1, 33, ["P0"], 2)
+
+
+def test_find_nearest_neighbors_for_embeddings_rejects_invalid_k() -> None:
+    client, _ = _client_with_fake_conn([])
+
+    with pytest.raises(bd.BioDataError, match="k must be >= 1"):
+        client.find_nearest_neighbors_for_embeddings({"new_1": [0.1]}, embedding_type_id=1, k=0)
+
+
+def test_find_nearest_neighbors_for_embeddings_empty_input_short_circuits() -> None:
+    client, conn = _client_with_fake_conn([])
+
+    assert client.find_nearest_neighbors_for_embeddings({}, embedding_type_id=1) == {}
+    assert conn.executed == []
 
 
 def test_find_nearest_neighbors_for_proteins_groups_rows_and_respects_include_query_flag() -> None:

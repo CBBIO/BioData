@@ -92,6 +92,7 @@ Common client methods:
 | `get_protein_sequences()` | Fetches sequences by protein id |
 | `get_protein_embedding()` | Fetches one stored embedding |
 | `find_nearest_neighbors()` | Runs vector nearest-neighbor search |
+| `find_nearest_neighbors_for_embeddings()` | Runs batch nearest-neighbor search for external embeddings |
 | `neighbors_with_go()` | Retrieves neighbors and GO annotations together |
 
 ## Probing

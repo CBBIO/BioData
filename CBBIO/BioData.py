@@ -940,6 +940,53 @@ class BioDataClient:
             device=device,
         )
 
+    def find_nearest_neighbors_for_embeddings(
+        self,
+        query_embeddings: Mapping[str, Any],
+        embedding_type_id: int,
+        layer_index: int = 0,
+        k: int | None = None,
+        *,
+        metric: DistanceMetric | None = None,
+        exclude_protein_ids: Sequence[str] | None = None,
+        use_ann: bool = False,
+        ann_ef_search: int = 200,
+        ann_candidate_pool: int | None = None,
+        backend: SearchBackend | None = None,
+        device: str | None = None,
+    ) -> Dict[str, List[Neighbor]]:
+        """Find nearest neighbors for multiple external query embeddings.
+
+        Args:
+            query_embeddings: Mapping from caller-provided query ids to embedding vectors.
+            embedding_type_id: Stored embedding type to search.
+            layer_index: Embedding layer to search.
+            k: Maximum neighbors returned for each query.
+            metric: Distance metric used to rank neighbors.
+            exclude_protein_ids: Stored protein ids excluded from every query result.
+            use_ann: Whether to enable approximate nearest-neighbor search where supported.
+            ann_ef_search: pgvector HNSW search breadth when ANN is enabled.
+            ann_candidate_pool: pgvector ANN candidate count before exact reranking.
+            backend: Search backend to use.
+            device: Optional accelerator device for GPU backends.
+
+        Returns:
+            Mapping from each query id to its nearest neighbors.
+        """
+        return self._search.find_nearest_neighbors_for_embeddings(
+            query_embeddings,
+            embedding_type_id,
+            layer_index=layer_index,
+            k=k,
+            metric=metric,
+            exclude_protein_ids=exclude_protein_ids,
+            use_ann=use_ann,
+            ann_ef_search=ann_ef_search,
+            ann_candidate_pool=ann_candidate_pool,
+            backend=backend,
+            device=device,
+        )
+
     def find_nearest_neighbors_for_proteins(
         self,
         protein_ids: Sequence[str],

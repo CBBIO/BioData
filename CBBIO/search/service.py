@@ -12,6 +12,7 @@ from .engines import (
     neighbors_from_candidate_rows,
     search_cuvs_state,
     search_faiss_state,
+    search_state,
     search_torch_state,
 )
 from .types import (
@@ -368,6 +369,102 @@ class SearchService:
         )
         return neighbors
 
+    def find_nearest_neighbors_for_embeddings(
+        self,
+        query_embeddings: Mapping[str, Any],
+        embedding_type_id: int,
+        layer_index: int = 0,
+        k: int | None = None,
+        *,
+        metric: DistanceMetric | None = None,
+        exclude_protein_ids: Sequence[str] | None = None,
+        use_ann: bool = False,
+        ann_ef_search: int = 200,
+        ann_candidate_pool: int | None = None,
+        backend: SearchBackend | None = None,
+        device: str | None = None,
+    ) -> Dict[str, List[Neighbor]]:
+        """Find nearest neighbors for multiple external query embeddings."""
+        query_items = [(str(query_id), embedding) for query_id, embedding in query_embeddings.items()]
+        if not query_items:
+            return {}
+
+        effective_metric = metric or self._client.default_metric
+        effective_k = self._client.default_k if k is None else int(k)
+        if effective_k < 1:
+            raise BioDataError("k must be >= 1")
+
+        requested_backend = cast(SearchBackend, backend or self._client.default_backend)
+        resolved = self._client._resolve_search_backend(
+            requested_backend=requested_backend,
+            embedding_type_id=embedding_type_id,
+            layer_index=layer_index,
+            metric=effective_metric,
+            batch_size=len(query_items),
+            ann_requested=use_ann,
+            device=device,
+        )
+        resolved = self._apply_auto_gpu_heuristics(
+            resolved,
+            requested_backend=requested_backend,
+            embedding_type_id=embedding_type_id,
+            layer_index=layer_index,
+            metric=effective_metric,
+            batch_size=len(query_items),
+            device=device,
+        )
+
+        query_ids = [query_id for query_id, _ in query_items]
+        query_vectors = [embedding for _, embedding in query_items]
+        excluded_ids = {str(protein_id) for protein_id in (exclude_protein_ids or [])}
+        grouped: Dict[str, List[Neighbor]] = {}
+
+        if resolved.backend == "pgvector":
+            grouped = self.find_nearest_neighbors_for_embeddings_pgvector(
+                query_items,
+                embedding_type_id=embedding_type_id,
+                layer_index=layer_index,
+                k=effective_k,
+                metric=effective_metric,
+                exclude_protein_ids=excluded_ids,
+                use_ann=resolved.ann_used,
+                ann_ef_search=ann_ef_search,
+                ann_candidate_pool=ann_candidate_pool,
+            )
+        else:
+            state = self._client._get_or_load_gpu_search_state(
+                backend=resolved.backend,
+                embedding_type_id=embedding_type_id,
+                layer_index=layer_index,
+                metric=effective_metric,
+                device=resolved.device,
+                ann_requested=resolved.ann_used,
+            )
+            query_matrix = as_numpy_matrix(query_vectors)
+            per_query_excluded = {query_id: set(excluded_ids) for query_id in query_ids}
+            chunk_size = max(1, int(resolved.chunk_size or len(query_ids)))
+            for chunk_start in range(0, len(query_ids), chunk_size):
+                chunk_ids = query_ids[chunk_start:chunk_start + chunk_size]
+                partial = search_state(
+                    state,
+                    query_ids=chunk_ids,
+                    query_vectors=query_matrix[chunk_start:chunk_start + chunk_size],
+                    k=effective_k,
+                    per_query_excluded={query_id: per_query_excluded[query_id] for query_id in chunk_ids},
+                )
+                grouped.update(partial)
+
+        self._client._record_search_diagnostics(
+            resolved,
+            requested_backend=requested_backend,
+            embedding_type_id=embedding_type_id,
+            layer_index=layer_index,
+            metric=effective_metric,
+            k=effective_k,
+            query_count=len(query_items),
+        )
+        return grouped
+
     def find_nearest_neighbors_for_proteins(
         self,
         protein_ids: Sequence[str],
@@ -485,6 +582,119 @@ class SearchService:
             k=effective_k,
             query_count=len(ids),
         )
+        return grouped
+
+    def find_nearest_neighbors_for_embeddings_pgvector(
+        self,
+        query_items: Sequence[tuple[str, Any]],
+        *,
+        embedding_type_id: int,
+        layer_index: int,
+        k: int,
+        metric: DistanceMetric,
+        exclude_protein_ids: Set[str],
+        use_ann: bool,
+        ann_ef_search: int,
+        ann_candidate_pool: int | None,
+    ) -> Dict[str, List[Neighbor]]:
+        """Find nearest neighbors for external embeddings through pgvector."""
+        conn = self._client._require_connection()
+        operator = metric_operator(metric)
+        query_ids = [query_id for query_id, _ in query_items]
+        grouped: Dict[str, List[Neighbor]] = {query_id: [] for query_id in query_ids}
+        value_rows = ", ".join("(%s, %s::halfvec)" for _ in query_items)
+        params: List[Any] = [value for query_id, embedding in query_items for value in (query_id, embedding)]
+
+        exclusion_clause = ""
+        if exclude_protein_ids:
+            exclusion_clause = " AND p.id <> ALL(%s)"
+
+        if use_ann:
+            dim = embedding_dimension(query_items[0][1])
+            candidate_limit = max(k, int(ann_candidate_pool)) if ann_candidate_pool is not None else max(k * 20, 200)
+            sql = (
+                "WITH query_embeddings(query_id, query_embedding) AS (VALUES "
+                f"{value_rows}"
+                "), ranked_neighbors AS ("
+                "    SELECT q.query_id, "
+                "           n.protein_id, "
+                "           n.layer_index, "
+                "           n.distance "
+                "    FROM query_embeddings q "
+                "    LEFT JOIN LATERAL ("
+                "        WITH ann_candidates AS ("
+                "            SELECT se.sequence_id, se.layer_index, se.embedding "
+                "            FROM sequence_embeddings se "
+                "            WHERE se.embedding_type_id = %s "
+                "              AND se.layer_index = %s "
+                f"            ORDER BY (se.embedding::halfvec({dim})) {operator} q.query_embedding "
+                "            LIMIT %s"
+                "        ) "
+                "        SELECT p.id AS protein_id, "
+                "               c.layer_index, "
+                f"               c.embedding {operator} q.query_embedding AS distance "
+                "        FROM ann_candidates c "
+                "        JOIN protein p ON p.sequence_id = c.sequence_id "
+                "        WHERE TRUE"
+                f"{exclusion_clause} "
+                "        ORDER BY distance "
+                "        LIMIT %s"
+                "    ) n ON TRUE"
+                ") "
+                "SELECT query_id, protein_id, layer_index, distance "
+                "FROM ranked_neighbors "
+                "ORDER BY query_id, distance;"
+            )
+            params.extend([embedding_type_id, layer_index, candidate_limit])
+            if exclude_protein_ids:
+                params.append(sorted(exclude_protein_ids))
+            params.append(k)
+        else:
+            sql = (
+                "WITH query_embeddings(query_id, query_embedding) AS (VALUES "
+                f"{value_rows}"
+                ") "
+                "SELECT q.query_id, "
+                "       n.protein_id, "
+                "       n.layer_index, "
+                "       n.distance "
+                "FROM query_embeddings q "
+                "LEFT JOIN LATERAL ("
+                "    SELECT p.id AS protein_id, "
+                "           se.layer_index, "
+                f"           se.embedding {operator} q.query_embedding AS distance "
+                "    FROM sequence_embeddings se "
+                "    JOIN sequence s ON se.sequence_id = s.id "
+                "    JOIN protein p ON p.sequence_id = s.id "
+                "    WHERE se.embedding_type_id = %s "
+                "      AND se.layer_index = %s"
+                f"{exclusion_clause} "
+                f"    ORDER BY se.embedding {operator} q.query_embedding "
+                "    LIMIT %s"
+                ") n ON TRUE "
+                "ORDER BY q.query_id, n.distance;"
+            )
+            params.extend([embedding_type_id, layer_index])
+            if exclude_protein_ids:
+                params.append(sorted(exclude_protein_ids))
+            params.append(k)
+
+        with cursor(conn) as cur:
+            if use_ann and ann_ef_search > 0:
+                cur.execute(f"SET hnsw.ef_search = {int(ann_ef_search)};")
+            cur.execute(sql, tuple(params))
+            rows = cur.fetchall()
+
+        for query_id, protein_id, row_layer, distance in rows:
+            if protein_id is None:
+                continue
+            grouped[str(query_id)].append(
+                Neighbor(
+                    protein_id=str(protein_id),
+                    layer_index=int(row_layer),
+                    distance=float(distance),
+                )
+            )
         return grouped
 
     def find_nearest_neighbors_pgvector(

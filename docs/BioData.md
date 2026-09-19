@@ -198,7 +198,7 @@ for nb in neighbors:
     print(nb.protein_id, f"distance={nb.distance:.4f}")
 ```
 
-### Batch query
+### Batch query for stored proteins
 
 ```python
 results = client.find_nearest_neighbors_for_proteins(
@@ -209,6 +209,37 @@ results = client.find_nearest_neighbors_for_proteins(
 )
 # → {"P12345": [Neighbor(...), ...], "Q67890": [...]}
 ```
+
+### Batch query for external embeddings
+
+```python
+from CBBIO import GenerationInput, Generator, pooler_factory
+
+generator = Generator(model_class="esm2", device="cuda:0")
+generated = generator.generate(
+    [
+        GenerationInput(id="new_protein_1", sequence="MTEYKLVVVG"),
+        GenerationInput(id="new_protein_2", sequence="GAGGVGKSAL"),
+    ],
+    layer_index=33,
+    pooler=pooler_factory("mean"),
+)
+
+query_embeddings = {
+    record.id: record.embedding
+    for record in generated.records
+}
+
+results = client.find_nearest_neighbors_for_embeddings(
+    query_embeddings,
+    embedding_type_id=1,
+    layer_index=33,
+    k=10,
+)
+# → {"new_protein_1": [Neighbor(...), ...], "new_protein_2": [...]}
+```
+
+Pass embeddings generated with the same model, layer, and pooling method as the stored candidate embeddings.
 
 ### Search + GO annotations in one call
 
