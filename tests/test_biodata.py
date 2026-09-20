@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import dataclass
 import sys
 import types
 import warnings
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, cast
 
 import pytest
 
+from CBBIO import IndexKey
 import CBBIO.BioData as bd
 from CBBIO.search import engines as search_engines
 from CBBIO.search import service as search_service
@@ -22,24 +24,39 @@ class _Response:
 
 
 class _FakeCursor:
-    def __init__(self, conn: "_FakeConn") -> None:
+    def __init__(self, conn: "_FakeConn", *, binary: bool) -> None:
         self._conn = conn
+        self.binary = binary
         self._response = _Response()
+        self._row_offset = 0
         self.description = None
 
-    def execute(self, sql: str, params: Any = ()) -> None:
+    def execute(self, sql: str, params: Any = (), *, binary: bool | None = None) -> None:
         self._conn.executed.append((sql, params))
         if self._conn.responses:
             self._response = self._conn.responses.pop(0)
         else:
             self._response = _Response()
+        self._row_offset = 0
         self.description = self._response.description
+
+    def __enter__(self) -> "_FakeCursor":
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+        self.close()
 
     def fetchone(self) -> Any:
         return self._response.one
 
     def fetchall(self) -> List[Any]:
         return self._response.all or []
+
+    def fetchmany(self, size: int) -> List[Any]:
+        rows = self._response.all or []
+        batch = rows[self._row_offset : self._row_offset + size]
+        self._row_offset += len(batch)
+        return batch
 
     def close(self) -> None:
         return None
@@ -52,9 +69,14 @@ class _FakeConn:
         self.committed = False
         self.rolled_back = False
         self.closed = False
+        self.cursor_options: List[Tuple[str, bool]] = []
 
-    def cursor(self) -> _FakeCursor:
-        return _FakeCursor(self)
+    def cursor(self, name: str = "", *, binary: bool = False) -> _FakeCursor:
+        self.cursor_options.append((name, binary))
+        return _FakeCursor(self, binary=binary)
+
+    def transaction(self) -> Any:
+        return nullcontext()
 
     def commit(self) -> None:
         self.committed = True
@@ -64,6 +86,28 @@ class _FakeConn:
 
     def close(self) -> None:
         self.closed = True
+
+
+class _PersistentIndexManager:
+    def __init__(self) -> None:
+        self.load_calls: List[Tuple[Any, str | None]] = []
+        self.search_calls: List[Dict[str, Any]] = []
+        self.inspection_state = "current"
+
+    def inspect(self, key: Any, *, source_revision: str | None = None) -> Any:
+        return types.SimpleNamespace(state=self.inspection_state)
+
+    def load(self, key: Any, *, source_revision: str | None = None) -> object:
+        self.load_calls.append((key, source_revision))
+        return object()
+
+    def search(self, index: object, query_vector: Any, **kwargs: Any) -> List[Any]:
+        self.search_calls.append({"index": index, "query_vector": query_vector, **kwargs})
+        return [
+            types.SimpleNamespace(sequence_id=12, score=0.1),
+            types.SimpleNamespace(sequence_id=11, score=0.2),
+            types.SimpleNamespace(sequence_id=12, score=0.3),
+        ]
 
 
 def _client_with_fake_conn(
@@ -231,6 +275,226 @@ def test_get_protein_embeddings_variants() -> None:
     assert len(conn.executed) == 2
 
 
+def test_embedding_index_revision_and_candidate_reranking_use_only_selected_sequences() -> None:
+    responses = [
+        _Response(one={"vector_count": 12, "max_sequence_id": 99}),
+        _Response(all=[{"protein_id": "P2", "layer_index": 0, "distance": 0.1}]),
+    ]
+    client, conn = _client_with_fake_conn(responses)
+
+    revision = client.embedding_index_revision(embedding_type_id=3, layer_index=0)
+    neighbors = client.rerank_embedding_candidates(
+        [0.1, 0.2],
+        [12, 11, 12],
+        embedding_type_id=3,
+        layer_index=0,
+        k=10,
+        metric="cosine",
+        exclude_protein_ids=["P1"],
+    )
+
+    assert revision == "count=12;max_sequence_id=99"
+    assert [neighbor.protein_id for neighbor in neighbors] == ["P2"]
+    sql, params = conn.executed[1]
+    assert "unnest(%s::bigint[])" in sql
+    assert "<=>" in sql
+    assert "p.id <> ALL(%s)" in sql
+    assert params == ([11, 12], [0.1, 0.2], 3, 0, ["P1"], 10)
+
+
+def test_embedding_index_dimension_reads_a_stored_embedding() -> None:
+    client, conn = _client_with_fake_conn(
+        [
+            _Response(
+                one={
+                    "embedding_type_exists": True,
+                    "layer_exists": True,
+                    "available_layers": [0],
+                    "embedding": [0.1, 0.2, 0.3],
+                }
+            )
+        ]
+    )
+
+    dimension = client.embedding_index_dimension(embedding_type_id=3, layer_index=0)
+
+    assert dimension == 3
+    sql, params = conn.executed[0]
+    assert "embedding_type_exists" in sql
+    assert params == (3, 0)
+
+
+def test_embedding_index_dimension_raises_when_embedding_type_is_missing() -> None:
+    client, _ = _client_with_fake_conn(
+        [_Response(one={"embedding_type_exists": False, "layer_exists": False, "available_layers": [], "embedding": None})]
+    )
+
+    with pytest.raises(bd.NotFoundError, match="Embedding type not found: id=3"):
+        client.embedding_index_dimension(embedding_type_id=3, layer_index=0)
+
+
+def test_embedding_index_dimension_raises_when_layer_is_missing() -> None:
+    client, _ = _client_with_fake_conn(
+        [_Response(one={"embedding_type_exists": True, "layer_exists": False, "available_layers": [0, 5], "embedding": None})]
+    )
+
+    with pytest.raises(bd.NotFoundError, match="layer_index=3.*Available layers: 0, 5"):
+        client.embedding_index_dimension(embedding_type_id=3, layer_index=3)
+
+
+def test_index_key_from_biodata_reads_the_stored_dimension() -> None:
+    client, _ = _client_with_fake_conn(
+        [
+            _Response(
+                one={
+                    "embedding_type_exists": True,
+                    "layer_exists": True,
+                    "available_layers": [0],
+                    "embedding": [0.1, 0.2, 0.3],
+                }
+            )
+        ]
+    )
+
+    key = IndexKey.from_biodata(
+        client,
+        database_label="test-database",
+        embedding_type_id=3,
+        layer_index=0,
+        metric="cosine",
+    )
+
+    assert key.dimension == 3
+
+
+def test_rerank_embedding_candidates_for_embeddings_uses_candidate_ids_per_query() -> None:
+    responses = [
+        _Response(
+            all=[
+                {"query_id": "q1", "protein_id": "P2", "layer_index": 0, "distance": 0.1},
+                {"query_id": "q2", "protein_id": None, "layer_index": None, "distance": None},
+            ]
+        )
+    ]
+    client, conn = _client_with_fake_conn(responses)
+
+    grouped = client.rerank_embedding_candidates_for_embeddings(
+        {"q1": [0.1, 0.2], "q2": [0.3, 0.4]},
+        {"q1": [12, 11, 12], "q2": []},
+        embedding_type_id=3,
+        layer_index=0,
+        k=10,
+        metric="cosine",
+        exclude_protein_ids={"q1": ["P1"], "q2": ["P3"]},
+    )
+
+    assert [neighbor.protein_id for neighbor in grouped["q1"]] == ["P2"]
+    assert grouped["q2"] == []
+    sql, params = conn.executed[0]
+    assert "unnest(q.candidate_sequence_ids)" in sql
+    assert "ANY(q.excluded_protein_ids)" in sql
+    assert "<=>" in sql
+    assert params == ("q1", [0.1, 0.2], [11, 12], ["P1"], "q2", [0.3, 0.4], [], ["P3"], 3, 0, 10)
+
+
+def test_faiss_persistent_search_retrieves_local_candidates_and_reranks_once() -> None:
+    responses = [
+        _Response(one={"vector_count": 12, "max_sequence_id": 99}),
+        _Response(all=[{"query_id": "query", "protein_id": "P2", "layer_index": 0, "distance": 0.1}]),
+    ]
+    client, conn = _client_with_fake_conn(responses)
+    manager = _PersistentIndexManager()
+    client.configure_persistent_index(cast(Any, manager), database_label="test-database")
+
+    neighbors = client.find_nearest_neighbors(
+        [0.1, 0.2],
+        embedding_type_id=3,
+        layer_index=0,
+        k=1,
+        metric="cosine",
+        backend="faiss_persistent",
+        ann_candidate_pool=2,
+        exclude_protein_ids=["P1"],
+    )
+
+    assert [neighbor.protein_id for neighbor in neighbors] == ["P2"]
+    assert manager.load_calls[0][1] == "count=12;max_sequence_id=99"
+    assert manager.search_calls[0]["candidate_count"] == 2
+    assert manager.search_calls[0]["key"].dimension == 2
+    assert client.last_search_diagnostics["resolved_backend"] == "faiss_persistent"
+    assert client.last_search_diagnostics["ann_used"]
+    rerank_sql, rerank_params = conn.executed[1]
+    assert "unnest(q.candidate_sequence_ids)" in rerank_sql
+    assert rerank_params == ("query", [0.1, 0.2], [11, 12], ["P1"], 3, 0, 1)
+
+
+def test_faiss_persistent_search_requires_a_configured_manager() -> None:
+    client, _ = _client_with_fake_conn([])
+
+    with pytest.raises(bd.BioDataError, match="configured IndexManager"):
+        client.find_nearest_neighbors([0.1, 0.2], embedding_type_id=3, backend="faiss_persistent")
+
+
+def test_auto_search_prefers_a_current_persistent_index() -> None:
+    responses = [
+        _Response(one={"vector_count": 12, "max_sequence_id": 99}),
+        _Response(all=[{"query_id": "query", "protein_id": "P2", "layer_index": 0, "distance": 0.1}]),
+    ]
+    client, _ = _client_with_fake_conn(responses)
+    manager = _PersistentIndexManager()
+    client.configure_persistent_index(cast(Any, manager), database_label="test-database")
+
+    neighbors = client.find_nearest_neighbors(
+        [0.1, 0.2],
+        embedding_type_id=3,
+        k=1,
+        metric="cosine",
+        backend="auto",
+    )
+
+    assert [neighbor.protein_id for neighbor in neighbors] == ["P2"]
+    assert len(manager.load_calls) == 1
+    assert client.last_search_diagnostics["requested_backend"] == "auto"
+    assert client.last_search_diagnostics["resolved_backend"] == "faiss_persistent"
+    assert client.last_search_diagnostics["reason"] == "auto_persistent_index"
+
+
+def test_auto_search_falls_back_when_persistent_index_is_stale(monkeypatch: pytest.MonkeyPatch) -> None:
+    responses = [
+        _Response(one={"vector_count": 12, "max_sequence_id": 99}),
+        _Response(all=[("P2", 0, 0.1)]),
+    ]
+    client, _ = _client_with_fake_conn(responses)
+    manager = _PersistentIndexManager()
+    manager.inspection_state = "stale"
+    client.configure_persistent_index(cast(Any, manager), database_label="test-database")
+
+    def _detect(*, device: str | None) -> bd.BackendAvailability:
+        return bd.BackendAvailability(
+            faiss_gpu=False,
+            torch_gpu=False,
+            preferred_device=None,
+            torch_device=None,
+            faiss_device=None,
+            hardware_class="cpu",
+            faiss_cpu=False,
+        )
+
+    monkeypatch.setattr(client, "_detect_backend_availability", _detect)
+
+    neighbors = client.find_nearest_neighbors(
+        [0.1, 0.2],
+        embedding_type_id=3,
+        k=1,
+        metric="cosine",
+        backend="auto",
+    )
+
+    assert [neighbor.protein_id for neighbor in neighbors] == ["P2"]
+    assert manager.load_calls == []
+    assert client.last_search_diagnostics["resolved_backend"] == "pgvector"
+
+
 def test_find_nearest_neighbors_for_embeddings_batches_external_queries_through_faiss(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -346,7 +610,128 @@ def test_find_nearest_neighbors_for_proteins_groups_rows_and_respects_include_qu
     assert "<=>" in sql
     assert "halfvec(3)" in sql
     assert "query_sequence_id" in sql
-    assert params == (["Q1", "Q2"], 3, 0, 3, 0, 2, 2)
+    assert "ORDER BY c.distance, p2.id" in sql
+    assert params == (["Q1", "Q2"], 3, 0, 3, 0, 66, 66)
+
+
+def test_stored_query_exclusions_include_all_protein_aliases() -> None:
+    responses = [
+        _Response(
+            all=[
+                {"query_id": "Q1", "query_sequence_id": 11, "alias_protein_id": "Q1"},
+                {"query_id": "Q1", "query_sequence_id": 11, "alias_protein_id": "Q1_ALIAS"},
+            ]
+        )
+    ]
+    client, conn = _client_with_fake_conn(responses)
+
+    protein_ids, sequence_ids = client._stored_query_exclusions(["Q1", "MISSING"])
+
+    assert protein_ids == {"Q1": {"Q1", "Q1_ALIAS"}, "MISSING": {"MISSING"}}
+    assert sequence_ids == {"Q1": {11}, "MISSING": set()}
+    assert "JOIN protein AS alias_protein" in conn.executed[0][0]
+    assert conn.executed[0][1] == (["Q1", "MISSING"],)
+
+
+def test_stored_faiss_search_excludes_query_sequence_aliases(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, _ = _client_with_fake_conn([])
+    seen_exclusions: Dict[str, Set[str]] = {}
+
+    def _detect(*, device: str | None) -> bd.BackendAvailability:
+        return bd.BackendAvailability(
+            faiss_gpu=False,
+            torch_gpu=False,
+            preferred_device=None,
+            torch_device=None,
+            faiss_device=None,
+            hardware_class="cpu",
+            faiss_cpu=True,
+        )
+
+    def _search(
+        query_ids: Sequence[str],
+        query_vectors: Sequence[Any],
+        **kwargs: Any,
+    ) -> Dict[str, List[bd.Neighbor]]:
+        seen_exclusions.update(kwargs["excluded_protein_ids_by_query"])
+        return {str(query_id): [] for query_id in query_ids}
+
+    monkeypatch.setattr(client, "_detect_backend_availability", _detect)
+    monkeypatch.setattr(
+        client,
+        "get_protein_embeddings",
+        lambda *args, **kwargs: {"Q1": [0.1, 0.2]},
+    )
+    monkeypatch.setattr(
+        client,
+        "_stored_query_exclusions",
+        lambda *args, **kwargs: ({"Q1": {"Q1", "Q1_ALIAS"}}, {"Q1": {11}}),
+    )
+    monkeypatch.setattr(client, "_find_nearest_neighbors_for_queries_faiss_cpu", _search)
+
+    assert client.find_nearest_neighbors_for_proteins(
+        ["Q1"],
+        embedding_type_id=3,
+        backend="faiss_cpu",
+    ) == {"Q1": []}
+    assert seen_exclusions == {"Q1": {"Q1", "Q1_ALIAS"}}
+
+
+def test_stored_faiss_search_overfetches_for_canonical_tie_breaking(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, _ = _client_with_fake_conn([])
+    seen_k: List[int] = []
+
+    def _detect(*, device: str | None) -> bd.BackendAvailability:
+        return bd.BackendAvailability(
+            faiss_gpu=False,
+            torch_gpu=False,
+            preferred_device=None,
+            torch_device=None,
+            faiss_device=None,
+            hardware_class="cpu",
+            faiss_cpu=True,
+        )
+
+    def _search(
+        query_ids: Sequence[str],
+        query_vectors: Sequence[Any],
+        **kwargs: Any,
+    ) -> Dict[str, List[bd.Neighbor]]:
+        seen_k.append(int(kwargs["k"]))
+        return {
+            str(query_id): [
+                bd.Neighbor(protein_id="Z", layer_index=0, distance=0.1000003),
+                bd.Neighbor(protein_id="A", layer_index=0, distance=0.1),
+            ]
+            for query_id in query_ids
+        }
+
+    monkeypatch.setattr(client, "_detect_backend_availability", _detect)
+    monkeypatch.setattr(
+        client,
+        "get_protein_embeddings",
+        lambda *args, **kwargs: {"Q1": [0.1, 0.2]},
+    )
+    monkeypatch.setattr(
+        client,
+        "_stored_query_exclusions",
+        lambda *args, **kwargs: ({"Q1": {"Q1"}}, {"Q1": {1}}),
+    )
+    monkeypatch.setattr(client, "_find_nearest_neighbors_for_queries_faiss_cpu", _search)
+
+    grouped = client.find_nearest_neighbors_for_proteins(
+        ["Q1"],
+        embedding_type_id=3,
+        k=1,
+        backend="faiss_cpu",
+    )
+
+    assert seen_k == [65]
+    assert [neighbor.protein_id for neighbor in grouped["Q1"]] == ["A"]
 
 
 def test_find_nearest_neighbors_for_proteins_ann_reranks_candidate_pool() -> None:
@@ -373,7 +758,7 @@ def test_find_nearest_neighbors_for_proteins_ann_reranks_candidate_pool() -> Non
     assert "SET hnsw.ef_search = 300;" in conn.executed[2][0]
     sql, params = conn.executed[3]
     assert "LIMIT %s" in sql
-    assert params == (["Q1"], 3, 0, 3, 0, 500, 10)
+    assert params == (["Q1"], 3, 0, 3, 0, 500, 74)
 
 
 def test_warn_if_missing_ann_index_no_warning_when_index_exists() -> None:
@@ -817,7 +1202,7 @@ def test_find_nearest_neighbors_auto_pgvector_records_diagnostics(monkeypatch: p
 
 def test_find_nearest_neighbors_prefers_resident_torch_state(monkeypatch: pytest.MonkeyPatch) -> None:
     client, _ = _client_with_fake_conn([])
-    client._gpu_search_state = bd.GpuSearchState(
+    client._search_state_cache["mps"] = bd.GpuSearchState(
         backend="torch_gpu",
         embedding_type_id=3,
         layer_index=0,
@@ -859,6 +1244,82 @@ def test_find_nearest_neighbors_prefers_resident_torch_state(monkeypatch: pytest
     assert client.last_search_diagnostics["resolved_backend"] == "torch_gpu"
     assert client.last_search_diagnostics["reason"] == "resident_torch"
     assert client.last_search_diagnostics["resident"] is True
+
+
+def test_search_state_cache_keeps_cpu_and_gpu_states_without_retaining_two_gpu_indexes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, _ = _client_with_fake_conn([])
+    loaded_backends: List[str] = []
+
+    def _load_state(**kwargs: Any) -> bd.GpuSearchState:
+        loaded_backends.append(str(kwargs["backend"]))
+        return bd.GpuSearchState(
+            backend=kwargs["backend"],
+            embedding_type_id=kwargs["embedding_type_id"],
+            layer_index=kwargs["layer_index"],
+            metric=kwargs["metric"],
+            device=kwargs["device"],
+            ann_enabled=kwargs["ann_requested"],
+            protein_ids=[],
+            protein_rows={},
+            vectors=None,
+        )
+
+    monkeypatch.setattr(client, "_load_gpu_search_state", _load_state)
+
+    faiss_cpu = client._get_or_load_gpu_search_state(
+        backend="faiss_cpu",
+        embedding_type_id=3,
+        layer_index=0,
+        metric="cosine",
+        device="cpu",
+        ann_requested=False,
+    )
+    cuvs_gpu = client._get_or_load_gpu_search_state(
+        backend="cuvs_gpu",
+        embedding_type_id=3,
+        layer_index=0,
+        metric="cosine",
+        device="cuda:0",
+        ann_requested=False,
+    )
+
+    assert client._get_or_load_gpu_search_state(
+        backend="faiss_cpu",
+        embedding_type_id=3,
+        layer_index=0,
+        metric="cosine",
+        device="cpu",
+        ann_requested=False,
+    ) is faiss_cpu
+    assert client._get_or_load_gpu_search_state(
+        backend="cuvs_gpu",
+        embedding_type_id=3,
+        layer_index=0,
+        metric="cosine",
+        device="cuda:0",
+        ann_requested=False,
+    ) is cuvs_gpu
+    assert loaded_backends == ["faiss_cpu", "cuvs_gpu"]
+
+    client._get_or_load_gpu_search_state(
+        backend="faiss_gpu",
+        embedding_type_id=3,
+        layer_index=0,
+        metric="cosine",
+        device="cuda:0",
+        ann_requested=False,
+    )
+    assert client._get_or_load_gpu_search_state(
+        backend="cuvs_gpu",
+        embedding_type_id=3,
+        layer_index=0,
+        metric="cosine",
+        device="cuda:0",
+        ann_requested=False,
+    ) is not cuvs_gpu
+    assert loaded_backends == ["faiss_cpu", "cuvs_gpu", "faiss_gpu", "cuvs_gpu"]
 
 
 def test_find_nearest_neighbors_gpu_request_degrades_ann_to_torch(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1303,6 +1764,7 @@ def test_find_nearest_neighbors_for_proteins_auto_falls_back_to_faiss_cpu_when_g
         query_ids,
         embedding_type_id=1,
         k=1,
+        metric="l2",
         backend="auto",
         device="cuda:0",
     )
@@ -1320,7 +1782,7 @@ def test_find_nearest_neighbors_for_proteins_auto_chunks_gpu_queries_by_safe_bat
     client, _ = _client_with_fake_conn([])
     query_ids = [f"Q{i}" for i in range(8)]
     seen_chunks: List[int] = []
-    client._gpu_search_state = bd.GpuSearchState(
+    client._search_state_cache["cuda:0"] = bd.GpuSearchState(
         backend="cuvs_gpu",
         embedding_type_id=1,
         layer_index=0,
@@ -1368,6 +1830,7 @@ def test_find_nearest_neighbors_for_proteins_auto_chunks_gpu_queries_by_safe_bat
         query_ids,
         embedding_type_id=1,
         k=1,
+        metric="l2",
         backend="auto",
         device="cuda:0",
     )
@@ -1412,8 +1875,31 @@ def test_search_torch_state_returns_exact_neighbors_and_respects_exclusions() ->
 def test_search_cuvs_state_preserves_cosine_distances(monkeypatch: pytest.MonkeyPatch) -> None:
     np = pytest.importorskip("numpy")
 
+    class _FakeDevice:
+        def __init__(self, device_indices: List[int], index: int) -> None:
+            self._device_indices = device_indices
+            self._index = index
+
+        def __enter__(self) -> "_FakeDevice":
+            self._device_indices.append(self._index)
+            return self
+
+        def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+            return None
+
+    class _FakeCuda:
+        def __init__(self, device_indices: List[int]) -> None:
+            self._device_indices = device_indices
+
+        def Device(self, index: int) -> _FakeDevice:
+            return _FakeDevice(self._device_indices, index)
+
     class _FakeCupy:
         float32 = np.float32
+
+        def __init__(self) -> None:
+            self.device_indices: List[int] = []
+            self.cuda = _FakeCuda(self.device_indices)
 
         def asarray(self, values: Any, dtype: Any = None) -> Any:
             return np.asarray(values, dtype=dtype)
@@ -1446,7 +1932,7 @@ def test_search_cuvs_state_preserves_cosine_distances(monkeypatch: pytest.Monkey
         embedding_type_id=1,
         layer_index=0,
         metric="cosine",
-        device="cuda:0",
+        device="cuda:3",
         ann_enabled=False,
         protein_ids=["A", "B"],
         protein_rows={"A": [0], "B": [1]},
@@ -1465,6 +1951,114 @@ def test_search_cuvs_state_preserves_cosine_distances(monkeypatch: pytest.Monkey
     assert [neighbor.protein_id for neighbor in grouped["Q1"]] == ["A", "B"]
     assert grouped["Q1"][0].distance == pytest.approx(0.0)
     assert grouped["Q1"][1].distance == pytest.approx(0.25)
+    assert fake_cupy.device_indices == [3]
+
+
+def test_build_cuvs_states_use_the_requested_cuda_device(monkeypatch: pytest.MonkeyPatch) -> None:
+    np = pytest.importorskip("numpy")
+
+    class _FakeDevice:
+        def __init__(self, device_indices: List[int], index: int) -> None:
+            self._device_indices = device_indices
+            self._index = index
+
+        def __enter__(self) -> "_FakeDevice":
+            self._device_indices.append(self._index)
+            return self
+
+        def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+            return None
+
+    class _FakeCuda:
+        def __init__(self, device_indices: List[int]) -> None:
+            self._device_indices = device_indices
+
+        def Device(self, index: int) -> _FakeDevice:
+            return _FakeDevice(self._device_indices, index)
+
+    class _FakeCupy:
+        float32 = np.float32
+
+        def __init__(self) -> None:
+            self.device_indices: List[int] = []
+            self.cuda = _FakeCuda(self.device_indices)
+
+        def asarray(self, values: Any, dtype: Any = None) -> Any:
+            return np.asarray(values, dtype=dtype)
+
+        def empty(self, shape: tuple[int, int], dtype: Any) -> Any:
+            return np.empty(shape, dtype=dtype)
+
+    built_metrics: List[str] = []
+    built_indexes: List[object] = []
+
+    def _build(dataset: Any, *, metric: str) -> object:
+        built_metrics.append(metric)
+        built_index = object()
+        built_indexes.append(built_index)
+        return built_index
+
+    fake_cupy = _FakeCupy()
+    brute_force_module = types.SimpleNamespace(build=_build)
+    cagra_module = types.SimpleNamespace()
+    neighbors_module = types.ModuleType("cuvs.neighbors")
+    setattr(neighbors_module, "brute_force", brute_force_module)
+    setattr(neighbors_module, "cagra", cagra_module)
+    cuvs_module = types.ModuleType("cuvs")
+    setattr(cuvs_module, "neighbors", neighbors_module)
+
+    monkeypatch.setattr(search_engines, "import_cupy", lambda: fake_cupy)
+    monkeypatch.setattr(search_engines, "import_cuvs", lambda: cuvs_module)
+    monkeypatch.setitem(sys.modules, "cuvs", cuvs_module)
+    monkeypatch.setitem(sys.modules, "cuvs.neighbors", neighbors_module)
+
+    search_engines.build_search_state(
+        backend="cuvs_gpu",
+        item_ids=["A"],
+        vectors=np.asarray([[1.0, 0.0]], dtype=np.float32),
+        metric="cosine",
+        device="cuda:2",
+        ann_requested=False,
+    )
+    streamed = search_engines.build_cuvs_streaming_search_state(
+        batches=iter([(["B"], np.asarray([[0.0, 1.0]], dtype=np.float32))]),
+        vector_count=1,
+        dimension=2,
+        metric="cosine",
+        device="cuda:3",
+        ann_requested=False,
+        embedding_type_id=1,
+        layer_index=0,
+    )
+
+    assert fake_cupy.device_indices == [2, 3]
+    assert built_metrics == ["cosine", "cosine"]
+    assert streamed.protein_ids == ["B"]
+    assert streamed.cuvs_index is built_indexes[1]
+
+
+def test_search_faiss_state_normalizes_cosine_queries() -> None:
+    np = pytest.importorskip("numpy")
+    pytest.importorskip("faiss")
+    state = search_engines.build_search_state(
+        backend="faiss_cpu",
+        item_ids=["A", "B"],
+        vectors=np.asarray([[1.0, 0.0], [0.8, 0.6]], dtype=np.float32),
+        metric="cosine",
+        device="cpu",
+        ann_requested=False,
+    )
+
+    grouped = search_engines.search_faiss_state(
+        state,
+        query_ids=["Q1"],
+        query_vectors=np.asarray([[3.0, 0.0]], dtype=np.float32),
+        k=2,
+        per_query_excluded={"Q1": set()},
+    )
+
+    assert [neighbor.protein_id for neighbor in grouped["Q1"]] == ["A", "B"]
+    assert [neighbor.distance for neighbor in grouped["Q1"]] == pytest.approx([0.0, 0.2])
 
 
 def test_normalize_distance_bounds_cosine_and_l2_distances() -> None:
@@ -1512,6 +2106,183 @@ def test_as_numpy_matrix_accepts_vector_like_rows() -> None:
     assert matrix.shape == (2, 2)
     assert matrix.dtype == np.float32
     assert matrix.tolist() == [[1.0, 2.0], [3.0, 4.0]]
+
+
+def test_as_numpy_matrix_prefers_vector_numpy_representation() -> None:
+    np = pytest.importorskip("numpy")
+
+    class _BinaryVectorLike:
+        def __init__(self, values: Sequence[float]) -> None:
+            self._values = np.asarray(values, dtype=">f2")
+
+        def to_numpy(self) -> Any:
+            return self._values
+
+        def to_list(self) -> List[float]:
+            raise AssertionError("to_list() should not be called when to_numpy() is available")
+
+    matrix = search_utils.as_numpy_matrix([
+        _BinaryVectorLike([1.0, 2.0]),
+        _BinaryVectorLike([3.0, 4.0]),
+    ])
+
+    assert matrix.dtype == np.float32
+    assert matrix.tolist() == [[1.0, 2.0], [3.0, 4.0]]
+
+
+def test_iter_embedding_index_batches_requests_binary_vector_decoding() -> None:
+    client, conn = _client_with_fake_conn([
+        _Response(all=[(11, [1.0, 2.0]), (12, [3.0, 4.0])]),
+    ])
+
+    batches = list(client.iter_embedding_index_batches(embedding_type_id=3, layer_index=0, batch_size=1))
+
+    assert [batch.sequence_ids for batch in batches] == [[11], [12]]
+    assert [batch.vectors.tolist() for batch in batches] == [[[1.0, 2.0]], [[3.0, 4.0]]]
+    assert conn.cursor_options[-1][1]
+
+
+def test_exact_cuvs_state_loads_protein_vectors_in_streaming_batches(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _ = _client_with_fake_conn([])
+    expected_state = object()
+    seen: Dict[str, Any] = {}
+
+    monkeypatch.setattr(client, "embedding_index_dimension", lambda embedding_type_id, layer_index: 2)
+    monkeypatch.setattr(
+        client._search,
+        "_protein_search_vector_count",
+        lambda **kwargs: 2,
+    )
+    monkeypatch.setattr(
+        client._search,
+        "_iter_protein_search_vector_batches",
+        lambda **kwargs: iter([(["P1", "P2"], [[1.0, 0.0], [0.0, 1.0]])]),
+    )
+    monkeypatch.setattr(
+        client,
+        "_load_search_vectors",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("full matrix loading should not run")),
+    )
+
+    def _build_streaming_state(**kwargs: Any) -> object:
+        seen.update(kwargs)
+        seen["batches"] = list(kwargs["batches"])
+        return expected_state
+
+    monkeypatch.setattr(search_service, "build_cuvs_streaming_search_state", _build_streaming_state)
+
+    state = client._search.load_gpu_search_state(
+        backend="cuvs_gpu",
+        embedding_type_id=3,
+        layer_index=0,
+        metric="cosine",
+        device="cuda:0",
+        ann_requested=False,
+    )
+
+    assert state is expected_state
+    assert seen["vector_count"] == 2
+    assert seen["dimension"] == 2
+    assert seen["batches"] == [(["P1", "P2"], [[1.0, 0.0], [0.0, 1.0]])]
+
+
+def test_exact_faiss_state_uses_a_configured_portable_exact_store(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = bd.BioDataClient()
+    expected_state = object()
+    seen: Dict[str, Any] = {}
+    inspection = types.SimpleNamespace(
+        state="current",
+        manifest=types.SimpleNamespace(vector_count=2, dimension=2),
+    )
+
+    class _ExactStoreManager:
+        def load_exact_store(self, **kwargs: Any) -> Any:
+            seen["load"] = kwargs
+            return inspection
+
+        def iter_exact_store_batches(self, received_inspection: Any, *, batch_size: int) -> Any:
+            seen["inspection"] = received_inspection
+            seen["batch_size"] = batch_size
+            return iter([(["P1", "P2"], [[1.0, 0.0], [0.0, 1.0]])])
+
+    client._index_manager = _ExactStoreManager()
+    client._index_database_label = "test-database"
+
+    def _build_streaming_state(**kwargs: Any) -> object:
+        seen["build"] = kwargs
+        seen["batches"] = list(kwargs["batches"])
+        return expected_state
+
+    monkeypatch.setattr(search_service, "build_faiss_streaming_search_state", _build_streaming_state)
+
+    state = client._search.load_gpu_search_state(
+        backend="faiss_cpu",
+        embedding_type_id=3,
+        layer_index=0,
+        metric="cosine",
+        device="cpu",
+        ann_requested=False,
+    )
+
+    assert state is expected_state
+    assert seen["load"] == {
+        "database_label": "test-database",
+        "embedding_type_id": 3,
+        "layer_index": 0,
+        "source_revision": None,
+    }
+    assert seen["inspection"] is inspection
+    assert seen["batches"] == [(["P1", "P2"], [[1.0, 0.0], [0.0, 1.0]])]
+
+
+def test_exact_cuvs_state_uses_a_configured_portable_exact_store(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = bd.BioDataClient()
+    expected_state = object()
+    seen: Dict[str, Any] = {}
+    inspection = types.SimpleNamespace(
+        state="current",
+        manifest=types.SimpleNamespace(vector_count=2, dimension=2),
+    )
+
+    class _ExactStoreManager:
+        def load_exact_store(self, **kwargs: Any) -> Any:
+            seen["load"] = kwargs
+            return inspection
+
+        def iter_exact_store_batches(self, received_inspection: Any, *, batch_size: int) -> Any:
+            seen["inspection"] = received_inspection
+            seen["batch_size"] = batch_size
+            return iter([(["P1", "P2"], [[1.0, 0.0], [0.0, 1.0]])])
+
+    client._index_manager = _ExactStoreManager()
+    client._index_database_label = "test-database"
+
+    def _build_streaming_state(**kwargs: Any) -> object:
+        seen["build"] = kwargs
+        seen["batches"] = list(kwargs["batches"])
+        return expected_state
+
+    monkeypatch.setattr(search_service, "build_cuvs_streaming_search_state", _build_streaming_state)
+
+    state = client._search.load_gpu_search_state(
+        backend="cuvs_gpu",
+        embedding_type_id=3,
+        layer_index=0,
+        metric="cosine",
+        device="cuda:0",
+        ann_requested=False,
+    )
+
+    assert state is expected_state
+    assert seen["load"] == {
+        "database_label": "test-database",
+        "embedding_type_id": 3,
+        "layer_index": 0,
+        "source_revision": None,
+    }
+    assert seen["inspection"] is inspection
+    assert seen["build"]["device"] == "cuda:0"
+    assert seen["batches"] == [(["P1", "P2"], [[1.0, 0.0], [0.0, 1.0]])]
 
 
 def test_health_check_reports_missing_tables() -> None:

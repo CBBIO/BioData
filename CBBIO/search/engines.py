@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from typing import Any, Set, cast
 
 from ..BioData import BioDataError
@@ -43,8 +43,8 @@ def build_search_state(
 
     normalized_vectors = prepare_index_vectors(matrix, metric=metric)
     protein_rows: dict[str, list[int]] = {}
-    for index, protein_id in enumerate(protein_ids):
-        protein_rows.setdefault(protein_id, []).append(index)
+    for row_index, protein_id in enumerate(protein_ids):
+        protein_rows.setdefault(protein_id, []).append(row_index)
 
     if backend == "torch_gpu":
         torch = import_torch()
@@ -67,13 +67,14 @@ def build_search_state(
         from cuvs.neighbors import brute_force as cuvs_brute_force  # type: ignore
         from cuvs.neighbors import cagra as cuvs_cagra  # type: ignore
 
-        dataset = cupy.asarray(normalized_vectors, dtype=cupy.float32)
-        metric_name = "sqeuclidean" if metric == "l2" else str(metric)
-        if ann_requested:
-            index_params = cast(Any, cuvs_cagra).IndexParams(metric=metric_name)
-            index = cast(Any, cuvs_cagra).build(index_params, dataset)
-        else:
-            index = cast(Any, cuvs_brute_force).build(dataset, metric=metric_name)
+        with cupy.cuda.Device(cuda_device_index(device)):
+            dataset = cupy.asarray(normalized_vectors, dtype=cupy.float32)
+            metric_name = "sqeuclidean" if metric == "l2" else str(metric)
+            if ann_requested:
+                index_params = cast(Any, cuvs_cagra).IndexParams(metric=metric_name)
+                index = cast(Any, cuvs_cagra).build(index_params, dataset)
+            else:
+                index = cast(Any, cuvs_brute_force).build(dataset, metric=metric_name)
         return GpuSearchState(
             backend=backend,
             embedding_type_id=int(embedding_type_id),
@@ -134,6 +135,131 @@ def build_search_state(
     )
 
 
+def build_cuvs_streaming_search_state(
+    *,
+    batches: Iterable[tuple[Sequence[str], Any]],
+    vector_count: int,
+    dimension: int,
+    metric: DistanceMetric,
+    device: str,
+    ann_requested: bool,
+    embedding_type_id: int,
+    layer_index: int,
+) -> GpuSearchState:
+    """Build a cuVS state without retaining the full source matrix in host RAM."""
+    if vector_count < 1:
+        raise BioDataError("Cannot build a cuVS search state without vectors.")
+    if dimension < 1:
+        raise BioDataError("Cannot build a cuVS search state without a positive dimension.")
+
+    cupy = import_cupy()
+    import_cuvs()
+    from cuvs.neighbors import brute_force as cuvs_brute_force  # type: ignore
+    from cuvs.neighbors import cagra as cuvs_cagra  # type: ignore
+
+    protein_ids: list[str] = []
+    loaded_rows = 0
+    with cupy.cuda.Device(cuda_device_index(device)):
+        dataset = cupy.empty((vector_count, dimension), dtype=cupy.float32)
+        for batch_ids, batch_vectors in batches:
+            batch_matrix = as_numpy_matrix(batch_vectors)
+            batch_size = int(batch_matrix.shape[0])
+            if batch_size != len(batch_ids):
+                raise BioDataError("Search ids and vectors must contain the same number of rows.")
+            if int(batch_matrix.shape[1]) != dimension:
+                raise BioDataError(
+                    f"Search vector dimension changed during streaming load: expected {dimension}, "
+                    f"got {int(batch_matrix.shape[1])}."
+                )
+            next_row = loaded_rows + batch_size
+            if next_row > vector_count:
+                raise BioDataError("Search vector count changed during streaming load. Retry the request.")
+            normalized_batch = prepare_index_vectors(batch_matrix, metric=metric)
+            dataset[loaded_rows:next_row] = cupy.asarray(normalized_batch, dtype=cupy.float32)
+            protein_ids.extend(str(protein_id) for protein_id in batch_ids)
+            loaded_rows = next_row
+
+        if loaded_rows != vector_count:
+            raise BioDataError(
+                f"Search vector count changed during streaming load: expected {vector_count}, got {loaded_rows}. Retry the request."
+            )
+
+        metric_name = "sqeuclidean" if metric == "l2" else str(metric)
+        if ann_requested:
+            index_params = cast(Any, cuvs_cagra).IndexParams(metric=metric_name)
+            index = cast(Any, cuvs_cagra).build(index_params, dataset)
+        else:
+            index = cast(Any, cuvs_brute_force).build(dataset, metric=metric_name)
+
+    protein_rows: dict[str, list[int]] = {}
+    for row_index, protein_id in enumerate(protein_ids):
+        protein_rows.setdefault(protein_id, []).append(row_index)
+    return GpuSearchState(
+        backend="cuvs_gpu",
+        embedding_type_id=int(embedding_type_id),
+        layer_index=int(layer_index),
+        metric=metric,
+        device=device,
+        ann_enabled=ann_requested,
+        protein_ids=protein_ids,
+        protein_rows=protein_rows,
+        vectors=dataset,
+        cuvs_index=index,
+    )
+
+
+def build_faiss_streaming_search_state(
+    *,
+    batches: Iterable[tuple[Sequence[str], Any]],
+    vector_count: int,
+    dimension: int,
+    metric: DistanceMetric,
+    embedding_type_id: int,
+    layer_index: int,
+) -> GpuSearchState:
+    """Build an exact FAISS CPU state without retaining the source matrix in host RAM."""
+    if vector_count < 1:
+        raise BioDataError("Cannot build a FAISS search state without vectors.")
+    faiss = import_faiss()
+    index = faiss.IndexFlatL2(dimension) if metric == "l2" else faiss.IndexFlatIP(dimension)
+    protein_ids: list[str] = []
+    loaded_rows = 0
+    for batch_ids, batch_vectors in batches:
+        matrix = as_numpy_matrix(batch_vectors)
+        batch_size = int(matrix.shape[0])
+        if batch_size != len(batch_ids):
+            raise BioDataError("Search ids and vectors must contain the same number of rows.")
+        if int(matrix.shape[1]) != dimension:
+            raise BioDataError(
+                f"Search vector dimension changed during streaming load: expected {dimension}, "
+                f"got {int(matrix.shape[1])}."
+            )
+        if loaded_rows + batch_size > vector_count:
+            raise BioDataError("Search vector count changed during streaming load. Retry the request.")
+        index.add(prepare_index_vectors(matrix, metric=metric))
+        protein_ids.extend(str(protein_id) for protein_id in batch_ids)
+        loaded_rows += batch_size
+    if loaded_rows != vector_count:
+        raise BioDataError(
+            f"Search vector count changed during streaming load: expected {vector_count}, got {loaded_rows}. Retry the request."
+        )
+    protein_rows: dict[str, list[int]] = {}
+    for row_index, protein_id in enumerate(protein_ids):
+        protein_rows.setdefault(protein_id, []).append(row_index)
+    return GpuSearchState(
+        backend="faiss_cpu",
+        embedding_type_id=int(embedding_type_id),
+        layer_index=int(layer_index),
+        metric=metric,
+        device="cpu",
+        ann_enabled=False,
+        protein_ids=protein_ids,
+        protein_rows=protein_rows,
+        vectors=None,
+        faiss_index=index,
+    )
+
+
 def search_state(
     state: GpuSearchState,
     *,
@@ -184,10 +310,14 @@ def search_faiss_state(
     if state.faiss_index is None:
         raise BioDataError("FAISS backend selected without an initialized FAISS index.")
 
+    query_matrix = prepare_index_vectors(
+        np.asarray(query_vectors, dtype=np.float32),
+        metric=state.metric,
+    )
     requested = _initial_requested_count(state, k=k, per_query_excluded=per_query_excluded)
     grouped: dict[str, list[Neighbor]] = {str(query_id): [] for query_id in query_ids}
     while True:
-        distances, indices = state.faiss_index.search(np.asarray(query_vectors, dtype=np.float32), requested)
+        distances, indices = state.faiss_index.search(query_matrix, requested)
         for row_index, query_id in enumerate(query_ids):
             grouped[str(query_id)] = neighbors_from_candidate_rows(
                 state,
@@ -220,39 +350,40 @@ def search_cuvs_state(
         raise BioDataError("cuVS backend selected without an initialized cuVS index.")
 
     requested = _initial_requested_count(state, k=k, per_query_excluded=per_query_excluded)
-    query_matrix = cupy.asarray(query_vectors, dtype=cupy.float32)
     grouped: dict[str, list[Neighbor]] = {str(query_id): [] for query_id in query_ids}
-    while True:
-        if state.ann_enabled:
-            search_params = cast(Any, cuvs_cagra).SearchParams()
-            distances, indices = cast(Any, cuvs_cagra).search(
-                search_params,
-                state.cuvs_index,
-                query_matrix,
-                requested,
-            )
-        else:
-            distances, indices = cast(Any, cuvs_brute_force).search(
-                state.cuvs_index,
-                query_matrix,
-                requested,
-            )
+    with cupy.cuda.Device(cuda_device_index(state.device)):
+        query_matrix = cupy.asarray(query_vectors, dtype=cupy.float32)
+        while True:
+            if state.ann_enabled:
+                search_params = cast(Any, cuvs_cagra).SearchParams()
+                distances, indices = cast(Any, cuvs_cagra).search(
+                    search_params,
+                    state.cuvs_index,
+                    query_matrix,
+                    requested,
+                )
+            else:
+                distances, indices = cast(Any, cuvs_brute_force).search(
+                    state.cuvs_index,
+                    query_matrix,
+                    requested,
+                )
 
-        host_distances = cupy.asnumpy(distances)
-        host_indices = cupy.asnumpy(indices)
-        for row_index, query_id in enumerate(query_ids):
-            grouped[str(query_id)] = neighbors_from_candidate_rows(
-                state,
-                candidate_indices=host_indices[row_index].tolist(),
-                candidate_distances=host_distances[row_index].tolist(),
-                k=k,
-                excluded_protein_ids=per_query_excluded.get(str(query_id), set()),
-                l2_squared=state.metric == "l2",
-                cosine_value_is_distance=True,
-            )
-        if _has_enough_neighbors(grouped, state, k=k) or requested >= len(state.protein_ids):
-            return grouped
-        requested = min(len(state.protein_ids), max(requested * 2, requested + 8))
+            host_distances = cupy.asnumpy(distances)
+            host_indices = cupy.asnumpy(indices)
+            for row_index, query_id in enumerate(query_ids):
+                grouped[str(query_id)] = neighbors_from_candidate_rows(
+                    state,
+                    candidate_indices=host_indices[row_index].tolist(),
+                    candidate_distances=host_distances[row_index].tolist(),
+                    k=k,
+                    excluded_protein_ids=per_query_excluded.get(str(query_id), set()),
+                    l2_squared=state.metric == "l2",
+                    cosine_value_is_distance=True,
+                )
+            if _has_enough_neighbors(grouped, state, k=k) or requested >= len(state.protein_ids):
+                return grouped
+            requested = min(len(state.protein_ids), max(requested * 2, requested + 8))
 
 
 def search_torch_state(

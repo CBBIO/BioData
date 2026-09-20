@@ -8,7 +8,14 @@ from typing import Any, Dict, List, Literal
 from ..types import DistanceMetric
 
 
-ResolvedSearchBackend = Literal["pgvector"] | Literal["faiss_cpu"] | Literal["faiss_gpu"] | Literal["cuvs_gpu"] | Literal["torch_gpu"]
+ResolvedSearchBackend = (
+    Literal["pgvector"]
+    | Literal["faiss_cpu"]
+    | Literal["faiss_gpu"]
+    | Literal["faiss_persistent"]
+    | Literal["cuvs_gpu"]
+    | Literal["torch_gpu"]
+)
 
 DEFAULT_BACKEND_THRESHOLDS: Dict[str, Dict[str, int]] = {
     "cuda": {
