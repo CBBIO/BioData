@@ -45,10 +45,10 @@ Any config value can be overridden with a `BIODATA_*` environment variable. Thes
 | `BIODATA_DB_PORT` | `database.port` |
 | `BIODATA_DB_USER` | `database.user` |
 | `BIODATA_DB_PASSWORD` | `database.password` |
-| `BIODATA_DB_NAME` | `database.database` |
+| `BIODATA_DB_NAME` | `database.name` |
 | `BIODATA_AUTOCOMMIT` | `client.autocommit` |
-| `BIODATA_SEARCH_METRIC` | `search.default_metric` |
-| `BIODATA_SEARCH_K` | `search.default_k` |
+| `BIODATA_DEFAULT_METRIC` | `search.default_metric` |
+| `BIODATA_DEFAULT_K` | `search.default_k` |
 
 Precedence (highest to lowest): env vars → `config.yaml` → built-in defaults.
 
@@ -215,6 +215,15 @@ results = client.find_nearest_neighbors_for_proteins(
 # → {"P12345": [Neighbor(...), ...], "Q67890": [...]}
 ```
 
+By default, a stored-protein search excludes the query sequence, including any
+other protein identifiers that point to that same sequence. Pass
+`include_query=True` to retain those zero-distance aliases.
+
+Stored-protein searches use the same deterministic ordering for pgvector, FAISS,
+and cuVS. Distances are quantized to five decimal places for ordering and then
+sorted by `protein_id`. Each backend retrieves 64 additional neighbors before
+this final ordering, so ties at the requested cutoff are not dropped.
+
 ### Approximate batch query
 
 ```python
@@ -231,8 +240,106 @@ results = client.find_nearest_neighbors_for_proteins(
 ```
 
 For pgvector, `ann_ef_search` controls HNSW search breadth. `ann_candidate_pool` controls how
-many approximate candidates pgvector reranks exactly. A compatible HNSW or IVFFlat index must
-exist for the selected embedding type, layer, and metric.
+many approximate candidates are reranked exactly. A compatible HNSW or IVFFlat index must exist
+for pgvector. With `faiss_persistent`, it controls local IVF-PQ candidates before PostgreSQL
+reranking.
+
+### Persistent local index
+
+```python
+from CBBIO import IndexBuildSpec, IndexKey, IndexManager, connect
+
+client = connect()
+key = IndexKey.from_biodata(
+    client,
+    database_label="biodata",
+    embedding_type_id=3,
+    layer_index=0,
+    metric="cosine",
+)
+manager = IndexManager(".biodata/indexes", search_nprobe=128)
+revision = client.embedding_index_revision(embedding_type_id=3, layer_index=0)
+
+manager.build_ivf_pq(
+    key,
+    lambda: client.iter_embedding_index_batches(embedding_type_id=3, layer_index=0),
+    source_revision=revision,
+    spec=IndexBuildSpec(nlist=3476),
+)
+```
+
+The manager streams the complete collection twice: once to select a deterministic, hash-priority
+training sample and train IVF-PQ, then once to add codes. The sample is selected over all native
+`sequence_id` values rather than from the first batches; set `training_sample_seed` in
+`IndexBuildSpec` to reproduce or vary it. It stores native `sequence_id` values in FAISS. Configure
+it on the existing client and select
+`"faiss_persistent"` to retrieve locally and rerank only local candidates in pgvector:
+
+```python
+client.configure_persistent_index(manager, database_label="biodata")
+query_embedding = client.get_protein_embedding("AMP1_CAEEL", embedding_type_id=3)
+neighbors = client.find_nearest_neighbors(
+    query_embedding,
+    embedding_type_id=3,
+    k=10,
+    metric="cosine",
+    backend="faiss_persistent",
+    ann_candidate_pool=1000,
+    exclude_protein_ids=["AMP1_CAEEL"],
+)
+```
+
+`faiss_persistent` never builds or updates an index during a query. It checks the database
+watermark and raises if the matching index is absent or stale. It keeps the loaded compact index
+resident in the client, but never loads the full vector matrix. Use `append_ivf_pq()` only for
+new, unique sequence IDs. Rebuild the index after deletions or changed embeddings.
+
+Each completed build is written as an immutable generation. A single atomic `current` pointer
+then selects the new index and its manifest together, so readers continue using the previous
+generation if a replacement build fails. Previous generations are retained for safe readers and
+can be removed later only when no client may still have one open.
+
+Set `search_nprobe` when you create `IndexManager` to search more IVF partitions at runtime. It
+does not rebuild or rewrite the index. Higher values can improve recall at the cost of local
+search time.
+
+### Portable exact vector store
+
+```python
+from CBBIO import IndexKey, IndexManager, connect
+
+client = connect()
+key = IndexKey.from_biodata(
+    client,
+    database_label="biodata",
+    embedding_type_id=3,
+    layer_index=0,
+    metric="cosine",
+)
+manager = IndexManager(".biodata/indexes")
+revision = client.embedding_index_revision(embedding_type_id=3, layer_index=0)
+
+manager.build_exact_store(
+    key,
+    lambda: client.iter_protein_embedding_index_batches(embedding_type_id=3, layer_index=0),
+    source_revision=revision,
+)
+client.configure_persistent_index(manager, database_label="biodata")
+```
+
+An exact store is a portable `float16` matrix plus local protein-ID metadata. It is independent
+of the distance metric and can be copied to a cluster node; `faiss_cpu` and exact `cuvs_gpu`
+automatically use a current configured store instead of reading the full matrix from PostgreSQL.
+The store allows external-embedding searches without a database connection after it has been
+copied locally. FAISS materializes an exact `IndexFlat` in RAM; cuVS streams the store into VRAM.
+Exact searches over-fetch a small boundary margin, then compute their final distances in `float64`
+from the shared `float16` store and sort by `(distance, protein_id)`. This makes FAISS, cuVS, and
+pgvector return the same ranking and reported distances when they have the same candidate set;
+pgvector is not the tie-breaking authority. IVF-PQ remains approximate, so its candidate recall
+still bounds its reranked result.
+Its manifest records the time spent reading batches from the source, writing the `float16` matrix,
+and writing the SQLite metadata. This lets a notebook report the initial transfer separately from
+later local FAISS/cuVS materialization.
 
 ### Batch query for external embeddings
 
@@ -287,17 +394,25 @@ for nb in neighbors:
 
 ## Search Backends
 
-The `backend` parameter controls which search engine is used. The default is `"auto"`.
+The `backend` parameter controls which search engine is used. The default is `"auto"`. When a
+configured persistent index exactly matches the database watermark, `"auto"` uses it before the
+hardware and batch-size routing below. A missing, invalid, or stale persistent index falls back to
+the usual automatic choice; it is never built during a query.
 
 | Backend | Description |
 |---|---|
-| `"auto"` | Chooses based on batch size and hardware availability |
+| `"auto"` | Prefers a current persistent index, otherwise uses batch size and hardware |
 | `"gpu"` | Prefers GPU; falls back gracefully if no GPU |
 | `"pgvector"` | PostgreSQL pgvector extension (always available) |
 | `"faiss_cpu"` | FAISS on CPU |
 | `"faiss_gpu"` | FAISS on GPU (requires faiss-gpu) |
+| `"faiss_persistent"` | Prebuilt local IVF-PQ plus exact pgvector reranking |
 | `"cuvs_gpu"` | cuVS on NVIDIA GPU (requires cuVS) |
 | `"torch_gpu"` | Pure PyTorch GPU search |
+
+Loaded in-memory states are cached separately for the CPU and for each GPU device. Therefore a
+FAISS CPU state and a cuVS state on `cuda:0` remain warm together. States using the same GPU
+device replace each other, which bounds VRAM use to one full embedding collection per device.
 
 ```python
 # Force pgvector (reliable, no extra deps, slower on large sets)
@@ -371,26 +486,6 @@ embeddings_3di = client.get_state_3di_embeddings(states[0]["id"])
 
 ---
 
-## Exceptions
-
-| Exception | When raised |
-|---|---|
-| `BioDataError` | Base exception for all BioData errors |
-| `DriverDependencyError` | Missing runtime dependency (psycopg, pgvector, numpy, pyyaml) |
-| `ConnectionNotOpenError` | Operation requires an open connection |
-| `NotFoundError` | Expected protein or embedding does not exist in the database |
-
-```python
-from CBBIO import BioDataError, NotFoundError
-
-try:
-    emb = client.get_protein_embedding("UNKNOWN", 1, 0)
-except NotFoundError:
-    print("Protein not in database")
-```
-
----
-
 ## Raw SQL Helpers
 
 For queries not covered by the high-level API:
@@ -404,4 +499,27 @@ row = client.query_one("SELECT * FROM protein WHERE id = %s", ["P12345"])
 
 # Returns a scalar value or None
 count = client.scalar("SELECT COUNT(*) FROM sequence_embeddings")
+```
+
+---
+
+## Exceptions
+
+| Exception | When raised |
+|---|---|
+| `BioDataError` | Base exception for all BioData errors |
+| `DriverDependencyError` | Missing runtime dependency (psycopg, pgvector, numpy, pyyaml) |
+| `ConnectionNotOpenError` | Operation requires an open connection |
+| `NotFoundError` | A protein, embedding type, or embedding layer does not exist in the database |
+| `SearchIndexNotFoundError` | `faiss_persistent` is selected but its index files are absent or invalid |
+| `SearchIndexStaleError` | `faiss_persistent` is selected but its database watermark differs from the index manifest |
+| `SearchIndexError` | An index build, manifest, or IVF-PQ configuration is invalid |
+
+```python
+from CBBIO import IndexKey, NotFoundError
+
+try:
+    key = IndexKey.from_biodata(client, database_label="biodata", embedding_type_id=999)
+except NotFoundError as error:
+    print(error)  # "Embedding type not found: id=999."
 ```

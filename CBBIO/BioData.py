@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import os
+import uuid
 from collections.abc import Mapping as MappingABC
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, Dict, Generator, List, Mapping, Sequence, Set, Tuple, cast
+from typing import TYPE_CHECKING, Any, Callable, Dict, Generator, List, Mapping, Sequence, Set, Tuple, cast
 
 from .search.types import DEFAULT_BACKEND_THRESHOLDS as _DEFAULT_BACKEND_THRESHOLDS
 from .search.types import BackendAvailability, GpuSearchState, ResolvedBackend, ResolvedSearchBackend
 from .types import DistanceMetric, EmbeddingModel, EmbeddingType, GOAnnotation, Neighbor, SearchBackend
+
+if TYPE_CHECKING:
+    from .search.index_manager import IndexManager
 
 
 Params = Sequence[Any] | Mapping[str, Any] | None
@@ -199,7 +203,7 @@ def _config_defaults(config: Mapping[str, Any]) -> ConfigDict:
     if metric not in {"l2", "cosine", "inner_product"}:
         raise BioDataError(f"Invalid search.default_metric: {metric!r}")
     backend = str(search_config.get("default_backend", DEFAULT_SEARCH_BACKEND)).strip().lower()
-    if backend not in {"auto", "gpu", "pgvector", "faiss_cpu", "faiss_gpu", "cuvs_gpu", "torch_gpu"}:
+    if backend not in {"auto", "gpu", "pgvector", "faiss_cpu", "faiss_gpu", "faiss_persistent", "cuvs_gpu", "torch_gpu"}:
         raise BioDataError(f"Invalid search.default_backend: {backend!r}")
 
     return {
@@ -244,6 +248,8 @@ class BioDataClient:
         autocommit: bool | None = None,
         register_halfvec: bool | None = None,
         config_path: str | Path | None = None,
+        index_manager: IndexManager | None = None,
+        index_database_label: str | None = None,
     ) -> None:
         config = load_config(config_path)
         defaults = _config_defaults(config)
@@ -259,12 +265,19 @@ class BioDataClient:
         self._ann_index_presence_cache: Dict[Tuple[int, int, str], bool] = {}
         self._ann_index_warned: Set[Tuple[int, int, str]] = set()
         self._search_backend_warned: Set[Tuple[str, str, str, str, bool]] = set()
-        self._gpu_search_state: GpuSearchState | None = None
+        self._search_state_cache: Dict[str, GpuSearchState] = {}
         self._last_search_diagnostics: Dict[str, Any] = {}
         self._search_workload_cache: Dict[Tuple[int, int], Dict[str, int]] = {}
+        self._index_manager: Any = None
+        self._index_database_label: str | None = None
+        self._persistent_index_cache: Dict[Tuple[Any, str], Any] = {}
         from .search.service import SearchService
 
         self._search = SearchService(self)
+        if index_manager is not None:
+            if index_database_label is None:
+                raise ValueError("index_database_label is required when index_manager is provided.")
+            self.configure_persistent_index(index_manager, database_label=index_database_label)
 
     def __enter__(self) -> "BioDataClient":
         self.connect()
@@ -282,6 +295,19 @@ class BioDataClient:
     def last_search_diagnostics(self) -> Dict[str, Any]:
         """Return diagnostics recorded by the most recent neighbor search."""
         return dict(self._last_search_diagnostics)
+
+    def configure_persistent_index(self, manager: IndexManager, *, database_label: str) -> None:
+        """Configure prebuilt local IVF-PQ indexes for ``faiss_persistent`` searches.
+
+        Args:
+            manager: Manager that owns the prebuilt persistent indexes.
+            database_label: Stable label used when those indexes were built.
+        """
+        if not database_label.strip():
+            raise ValueError("database_label must be non-empty.")
+        self._index_manager = manager
+        self._index_database_label = database_label
+        self._persistent_index_cache.clear()
 
     def connect(self) -> None:
         """Open a psycopg connection and register pgvector halfvec support."""
@@ -317,7 +343,7 @@ class BioDataClient:
             return
         self._conn.close()
         self._conn = None
-        self._gpu_search_state = None
+        self._search_state_cache.clear()
 
     @contextmanager
     def transaction(self) -> Generator[None, None, None]:
@@ -336,6 +362,14 @@ class BioDataClient:
         """Execute a query and return rows as dictionaries."""
         conn = self._require_connection()
         with _cursor(conn) as cur:
+            cur.execute(sql, params or ())
+            rows = cur.fetchall()
+            return [_row_to_dict(row, cur) for row in rows]
+
+    def _query_all_binary(self, sql: str, params: Params = None) -> List[Dict[str, Any]]:
+        """Execute a binary result query and return rows as dictionaries."""
+        conn = self._require_connection()
+        with _cursor(conn, binary=True) as cur:
             cur.execute(sql, params or ())
             rows = cur.fetchall()
             return [_row_to_dict(row, cur) for row in rows]
@@ -910,6 +944,343 @@ class BioDataClient:
             for protein_id, embedding in rows
         }
 
+    def _stored_query_exclusions(
+        self,
+        protein_ids: Sequence[str],
+    ) -> tuple[Dict[str, Set[str]], Dict[str, Set[int]]]:
+        """Return protein aliases and sequence IDs excluded for stored queries."""
+        ids = [str(protein_id) for protein_id in protein_ids]
+        aliases_by_query = {protein_id: {protein_id} for protein_id in ids}
+        sequence_ids_by_query: Dict[str, Set[int]] = {protein_id: set() for protein_id in ids}
+        if not ids:
+            return aliases_by_query, sequence_ids_by_query
+
+        rows = self.query_all(
+            """
+            SELECT query_protein.id AS query_id,
+                   query_protein.sequence_id AS query_sequence_id,
+                   alias_protein.id AS alias_protein_id
+            FROM protein AS query_protein
+            JOIN protein AS alias_protein ON alias_protein.sequence_id = query_protein.sequence_id
+            WHERE query_protein.id = ANY(%s);
+            """,
+            (ids,),
+        )
+        for row in rows:
+            query_id = str(row["query_id"])
+            aliases_by_query.setdefault(query_id, set()).add(str(row["alias_protein_id"]))
+            sequence_ids_by_query.setdefault(query_id, set()).add(int(row["query_sequence_id"]))
+        return aliases_by_query, sequence_ids_by_query
+
+    def embedding_index_revision(self, embedding_type_id: int, layer_index: int = 0) -> str:
+        """Return a lightweight watermark for one stored embedding collection."""
+        row = self.query_one(
+            """
+            SELECT count(*) AS vector_count,
+                   max(sequence_id) AS max_sequence_id
+            FROM sequence_embeddings
+            WHERE embedding_type_id = %s
+              AND layer_index = %s;
+            """,
+            (embedding_type_id, layer_index),
+        )
+        if row is None:
+            raise NotFoundError(
+                f"No embeddings found for embedding_type_id={embedding_type_id}, layer_index={layer_index}."
+            )
+        return f"count={int(row['vector_count'])};max_sequence_id={row['max_sequence_id']}"
+
+    def embedding_index_dimension(self, embedding_type_id: int, layer_index: int = 0) -> int:
+        """Return the stored vector dimension for one embedding collection.
+
+        Raises:
+            NotFoundError: If the embedding type does not exist or has no vectors at the layer.
+        """
+        row = self.query_one(
+            """
+            WITH requested AS (
+                SELECT %s::integer AS embedding_type_id,
+                       %s::integer AS layer_index
+            )
+            SELECT EXISTS (
+                       SELECT 1
+                       FROM sequence_embedding_type embedding_type
+                       WHERE embedding_type.id = requested.embedding_type_id
+                   ) AS embedding_type_exists,
+                   EXISTS (
+                       SELECT 1
+                       FROM sequence_embeddings embedding_row
+                       WHERE embedding_row.embedding_type_id = requested.embedding_type_id
+                         AND embedding_row.layer_index = requested.layer_index
+                   ) AS layer_exists,
+                   COALESCE(
+                       (
+                           SELECT array_agg(DISTINCT embedding_row.layer_index ORDER BY embedding_row.layer_index)
+                           FROM sequence_embeddings embedding_row
+                           WHERE embedding_row.embedding_type_id = requested.embedding_type_id
+                       ),
+                       ARRAY[]::integer[]
+                   ) AS available_layers,
+                   (
+                       SELECT embedding_row.embedding
+                       FROM sequence_embeddings embedding_row
+                       WHERE embedding_row.embedding_type_id = requested.embedding_type_id
+                         AND embedding_row.layer_index = requested.layer_index
+                       LIMIT 1
+                   ) AS embedding
+            FROM requested;
+            """,
+            (embedding_type_id, layer_index),
+        )
+        if row is None or not bool(row.get("embedding_type_exists")):
+            raise NotFoundError(f"Embedding type not found: id={embedding_type_id}.")
+        if not bool(row.get("layer_exists")):
+            available_layers = ", ".join(str(value) for value in row.get("available_layers", [])) or "none"
+            raise NotFoundError(
+                f"Embedding layer not found: embedding_type_id={embedding_type_id}, layer_index={layer_index}. "
+                f"Available layers: {available_layers}."
+            )
+        if row.get("embedding") is None:
+            raise NotFoundError(
+                f"Embedding collection has no readable vectors: embedding_type_id={embedding_type_id}, "
+                f"layer_index={layer_index}."
+            )
+        return _embedding_dimension(row["embedding"])
+
+    def iter_embedding_index_batches(
+        self,
+        embedding_type_id: int,
+        layer_index: int = 0,
+        *,
+        batch_size: int = 10_000,
+    ) -> Generator[Any, None, None]:
+        """Yield bounded NumPy batches of sequence IDs and stored embedding vectors.
+
+        The iterator holds a server-side cursor for its lifetime. Consume it completely before
+        issuing another query through this client.
+        """
+        if batch_size <= 0:
+            raise ValueError("batch_size must be positive.")
+        conn = self._require_connection()
+        from .search.index_manager import IndexVectorBatch
+        from .search.utils import as_numpy_matrix
+
+        cursor_name = f"biodata_index_{uuid.uuid4().hex}"
+        yielded_rows = 0
+        with conn.transaction():
+            # Binary halfvec decoding avoids materializing every vector as a
+            # comma-delimited string before NumPy converts the batch.
+            with conn.cursor(name=cursor_name, binary=True) as cur:
+                cur.execute(
+                    """
+                    SELECT sequence_id, embedding
+                    FROM sequence_embeddings
+                    WHERE embedding_type_id = %s
+                      AND layer_index = %s
+                    ORDER BY sequence_id;
+                    """,
+                    (embedding_type_id, layer_index),
+                )
+                while rows := cur.fetchmany(batch_size):
+                    yielded_rows += len(rows)
+                    yield IndexVectorBatch(
+                        sequence_ids=[int(row[0]) for row in rows],
+                        vectors=as_numpy_matrix([row[1] for row in rows]),
+                    )
+        if yielded_rows == 0:
+            raise NotFoundError(
+                f"No embeddings found for embedding_type_id={embedding_type_id}, layer_index={layer_index}."
+            )
+
+    def iter_protein_embedding_index_batches(
+        self,
+        embedding_type_id: int,
+        layer_index: int = 0,
+        *,
+        batch_size: int = 10_000,
+    ) -> Generator[Any, None, None]:
+        """Yield bounded batches of protein IDs, sequence IDs, and stored embedding vectors.
+
+        This iterator is intended for portable exact stores. It includes the protein identifier
+        required to run an exact local search without a PostgreSQL connection after the build.
+        """
+        if batch_size <= 0:
+            raise ValueError("batch_size must be positive.")
+        conn = self._require_connection()
+        from .search.index_manager import ExactVectorBatch
+        from .search.utils import as_numpy_matrix
+
+        cursor_name = f"biodata_exact_index_{uuid.uuid4().hex}"
+        yielded_rows = 0
+        with conn.transaction():
+            with conn.cursor(name=cursor_name, binary=True) as cur:
+                cur.execute(
+                    """
+                    SELECT p.id, se.sequence_id, se.embedding
+                    FROM sequence_embeddings se
+                    JOIN protein p ON p.sequence_id = se.sequence_id
+                    WHERE se.embedding_type_id = %s
+                      AND se.layer_index = %s
+                    ORDER BY p.id;
+                    """,
+                    (embedding_type_id, layer_index),
+                )
+                while rows := cur.fetchmany(batch_size):
+                    yielded_rows += len(rows)
+                    yield ExactVectorBatch(
+                        protein_ids=[str(row[0]) for row in rows],
+                        sequence_ids=[int(row[1]) for row in rows],
+                        vectors=as_numpy_matrix([row[2] for row in rows]),
+                    )
+        if yielded_rows == 0:
+            raise NotFoundError(
+                f"No protein embeddings found for embedding_type_id={embedding_type_id}, layer_index={layer_index}."
+            )
+
+    def rerank_embedding_candidates(
+        self,
+        query_embedding: Any,
+        candidate_sequence_ids: Sequence[int],
+        *,
+        embedding_type_id: int,
+        layer_index: int = 0,
+        k: int | None = None,
+        metric: DistanceMetric | None = None,
+        exclude_protein_ids: Sequence[str] | None = None,
+    ) -> List[Neighbor]:
+        """Rerank locally proposed sequence IDs with exact pgvector distances."""
+        candidate_ids = sorted({int(sequence_id) for sequence_id in candidate_sequence_ids})
+        if not candidate_ids:
+            return []
+        effective_k = self.default_k if k is None else int(k)
+        if effective_k < 1:
+            raise BioDataError("k must be >= 1")
+        operator = _metric_operator(metric or self.default_metric)
+        excluded_ids = [str(protein_id) for protein_id in (exclude_protein_ids or [])]
+        exclusion_clause = " AND p.id <> ALL(%s)" if excluded_ids else ""
+        params: List[Any] = [candidate_ids, query_embedding, embedding_type_id, layer_index]
+        if excluded_ids:
+            params.append(excluded_ids)
+        params.append(effective_k)
+        rows = self.query_all(
+            f"""
+            WITH candidates(sequence_id) AS (
+                SELECT unnest(%s::bigint[])
+            )
+            SELECT p.id AS protein_id,
+                   se.layer_index,
+                   se.embedding {operator} %s::halfvec AS distance
+            FROM candidates c
+            JOIN sequence_embeddings se ON se.sequence_id = c.sequence_id
+            JOIN sequence s ON s.id = se.sequence_id
+            JOIN protein p ON p.sequence_id = s.id
+            WHERE se.embedding_type_id = %s
+              AND se.layer_index = %s{exclusion_clause}
+            ORDER BY distance
+            LIMIT %s;
+            """,
+            tuple(params),
+        )
+        return [
+            Neighbor(
+                protein_id=str(row["protein_id"]),
+                layer_index=int(row["layer_index"]),
+                distance=float(row["distance"]),
+            )
+            for row in rows
+        ]
+
+    def rerank_embedding_candidates_for_embeddings(
+        self,
+        query_embeddings: Mapping[str, Any],
+        candidate_sequence_ids: Mapping[str, Sequence[int]],
+        *,
+        embedding_type_id: int,
+        layer_index: int = 0,
+        k: int | None = None,
+        metric: DistanceMetric | None = None,
+        exclude_protein_ids: Sequence[str] | Mapping[str, Sequence[str]] | None = None,
+    ) -> Dict[str, List[Neighbor]]:
+        """Rerank local ANN candidates for multiple embeddings with exact pgvector distances.
+
+        Args:
+            query_embeddings: Mapping from caller query IDs to query vectors.
+            candidate_sequence_ids: Candidate sequence IDs for each query ID.
+            embedding_type_id: Stored embedding type to rerank.
+            layer_index: Stored embedding layer to rerank.
+            k: Maximum exact neighbors returned for each query.
+            metric: Exact pgvector distance metric.
+            exclude_protein_ids: Global protein IDs to exclude, or IDs to exclude per query.
+        """
+        query_items = [(str(query_id), embedding) for query_id, embedding in query_embeddings.items()]
+        grouped: Dict[str, List[Neighbor]] = {query_id: [] for query_id, _ in query_items}
+        if not query_items:
+            return grouped
+
+        effective_k = self.default_k if k is None else int(k)
+        if effective_k < 1:
+            raise BioDataError("k must be >= 1")
+        operator = _metric_operator(metric or self.default_metric)
+        if isinstance(exclude_protein_ids, MappingABC):
+            excluded_by_query = {
+                query_id: sorted({str(value) for value in exclude_protein_ids.get(query_id, [])})
+                for query_id, _ in query_items
+            }
+        else:
+            excluded = sorted({str(value) for value in (exclude_protein_ids or [])})
+            excluded_by_query = {query_id: excluded for query_id, _ in query_items}
+
+        values_sql = ", ".join("(%s, %s::halfvec, %s::bigint[], %s::text[])" for _ in query_items)
+        params: List[Any] = []
+        for query_id, embedding in query_items:
+            candidates = sorted({int(sequence_id) for sequence_id in candidate_sequence_ids.get(query_id, [])})
+            params.extend([query_id, embedding, candidates, excluded_by_query[query_id]])
+        params.extend([embedding_type_id, layer_index, effective_k])
+
+        rows = self.query_all(
+            f"""
+            WITH query_embeddings(
+                query_id,
+                query_embedding,
+                candidate_sequence_ids,
+                excluded_protein_ids
+            ) AS (VALUES {values_sql})
+            SELECT q.query_id,
+                   n.protein_id,
+                   n.layer_index,
+                   n.distance
+            FROM query_embeddings q
+            LEFT JOIN LATERAL (
+                SELECT p.id AS protein_id,
+                       se.layer_index,
+                       se.embedding {operator} q.query_embedding AS distance
+                FROM unnest(q.candidate_sequence_ids) AS candidate(sequence_id)
+                JOIN sequence_embeddings se ON se.sequence_id = candidate.sequence_id
+                JOIN sequence s ON s.id = se.sequence_id
+                JOIN protein p ON p.sequence_id = s.id
+                WHERE se.embedding_type_id = %s
+                  AND se.layer_index = %s
+                  AND NOT (p.id = ANY(q.excluded_protein_ids))
+                ORDER BY distance, p.id
+                LIMIT %s
+            ) n ON TRUE
+            ORDER BY q.query_id, n.distance, n.protein_id;
+            """,
+            tuple(params),
+        )
+        for row in rows:
+            query_id = str(row["query_id"])
+            if row["protein_id"] is None:
+                continue
+            grouped[query_id].append(
+                Neighbor(
+                    protein_id=str(row["protein_id"]),
+                    layer_index=int(row["layer_index"]),
+                    distance=float(row["distance"]),
+                )
+            )
+        return grouped
+
     def find_nearest_neighbors(
         self,
         query_embedding: Any,
@@ -966,7 +1337,7 @@ class BioDataClient:
             exclude_protein_ids: Stored protein ids excluded from every query result.
             use_ann: Whether to enable approximate nearest-neighbor search where supported.
             ann_ef_search: pgvector HNSW search breadth when ANN is enabled.
-            ann_candidate_pool: pgvector ANN candidate count before exact reranking.
+            ann_candidate_pool: Candidate count before exact reranking for pgvector ANN or ``faiss_persistent``.
             backend: Search backend to use.
             device: Optional accelerator device for GPU backends.
 
@@ -1010,10 +1381,10 @@ class BioDataClient:
             layer_index: Embedding layer to search.
             k: Maximum neighbors returned for each query.
             metric: Distance metric used to rank neighbors.
-            include_query: Whether a query protein may appear in its own result.
+            include_query: Whether the query sequence, including aliases, may appear in its result.
             use_ann: Whether to enable approximate nearest-neighbor search where supported.
             ann_ef_search: pgvector HNSW search breadth when ANN is enabled.
-            ann_candidate_pool: pgvector ANN candidate count before exact reranking.
+            ann_candidate_pool: Candidate count before exact reranking for pgvector ANN or ``faiss_persistent``.
             backend: Search backend to use.
             device: Optional accelerator device for GPU backends.
 
@@ -1184,6 +1555,7 @@ class BioDataClient:
         include_query: bool,
         device: str | None,
         use_ann: bool = False,
+        excluded_protein_ids_by_query: Mapping[str, Set[str]] | None = None,
     ) -> Dict[str, List[Neighbor]]:
         return self._search.find_nearest_neighbors_for_queries_faiss(
             query_ids,
@@ -1195,6 +1567,7 @@ class BioDataClient:
             include_query=include_query,
             device=device,
             use_ann=use_ann,
+            excluded_protein_ids_by_query=excluded_protein_ids_by_query,
         )
 
     def _find_nearest_neighbors_for_queries_faiss_cpu(
@@ -1208,6 +1581,7 @@ class BioDataClient:
         metric: DistanceMetric,
         include_query: bool,
         use_ann: bool = False,
+        excluded_protein_ids_by_query: Mapping[str, Set[str]] | None = None,
     ) -> Dict[str, List[Neighbor]]:
         return self._search.find_nearest_neighbors_for_queries_faiss_cpu(
             query_ids,
@@ -1218,6 +1592,7 @@ class BioDataClient:
             metric=metric,
             include_query=include_query,
             use_ann=use_ann,
+            excluded_protein_ids_by_query=excluded_protein_ids_by_query,
         )
 
     def _find_nearest_neighbors_for_queries_cuvs(
@@ -1232,6 +1607,7 @@ class BioDataClient:
         include_query: bool,
         device: str | None,
         use_ann: bool = False,
+        excluded_protein_ids_by_query: Mapping[str, Set[str]] | None = None,
     ) -> Dict[str, List[Neighbor]]:
         return self._search.find_nearest_neighbors_for_queries_cuvs(
             query_ids,
@@ -1243,6 +1619,7 @@ class BioDataClient:
             include_query=include_query,
             device=device,
             use_ann=use_ann,
+            excluded_protein_ids_by_query=excluded_protein_ids_by_query,
         )
 
     def _find_nearest_neighbors_for_queries_torch(
@@ -1256,6 +1633,7 @@ class BioDataClient:
         metric: DistanceMetric,
         include_query: bool,
         device: str | None,
+        excluded_protein_ids_by_query: Mapping[str, Set[str]] | None = None,
     ) -> Dict[str, List[Neighbor]]:
         return self._search.find_nearest_neighbors_for_queries_torch(
             query_ids,
@@ -1266,6 +1644,7 @@ class BioDataClient:
             metric=metric,
             include_query=include_query,
             device=device,
+            excluded_protein_ids_by_query=excluded_protein_ids_by_query,
         )
 
     def _search_faiss_state(
@@ -1616,6 +1995,8 @@ def connect(
     autocommit: bool | None = None,
     register_halfvec: bool | None = None,
     config_path: str | Path | None = None,
+    index_manager: IndexManager | None = None,
+    index_database_label: str | None = None,
 ) -> BioDataClient:
     """Create and connect a ``BioDataClient``."""
     client = BioDataClient(
@@ -1623,6 +2004,8 @@ def connect(
         autocommit=autocommit,
         register_halfvec=register_halfvec,
         config_path=config_path,
+        index_manager=index_manager,
+        index_database_label=index_database_label,
     )
     client.connect()
     return client
@@ -1708,8 +2091,8 @@ def _row_to_dict(row: Any, cursor: Any) -> Dict[str, Any]:
 
 
 @contextmanager
-def _cursor(conn: Any) -> Generator[Any, None, None]:
-    cur = conn.cursor()
+def _cursor(conn: Any, *, binary: bool = False) -> Generator[Any, None, None]:
+    cur = conn.cursor(binary=binary)
     try:
         yield cur
     finally:

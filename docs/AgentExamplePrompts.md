@@ -68,6 +68,12 @@ Add a new embedding model family named "mymodel" under CBBIO/embeddings/models. 
 Build a script that takes a query FASTA and a BioData database connection, aligns query sequences to database sequences with CBBIO.align_sequences, generates query embeddings with ESM-2 and ProteinGLM, retrieves database nearest neighbors for matching embedding types, and combines sequence identity, embedding distance, GO similarity, and taxonomy Lin similarity into a ranked candidate table. The output should include one TSV for machine use and one markdown report explaining the top candidates and any missing annotations.
 ```
 
+### 11. Persistent Local Retrieval Benchmark
+
+```text
+Create a reproducible notebook that builds an explicit CBBIO.IndexManager IVF-PQ artifact and portable exact store for one BioData embedding type and layer. Sample query proteins with a fixed seed. Compare pgvector exhaustive search, faiss_persistent plus pgvector reranking, exact faiss_cpu, and exact cuvs_gpu when available. Report recall@10/@50/@100, distance RMSD, cold and warm timing separately, and the exact-store PostgreSQL transfer, float16 matrix-write, and SQLite metadata-write timings. Keep local artifacts and executed notebook outputs out of git.
+```
+
 ## Coverage Map
 
 | Prompt | Main CBBIO coverage |
@@ -82,6 +88,7 @@ Build a script that takes a query FASTA and a BioData database connection, align
 | 8 | Dataset catalog extension, residue dataset loading, tests, docs |
 | 9 | New model adapter, factory registration, lazy dependencies |
 | 10 | Sequence alignment, embeddings, database search, GO, taxonomy |
+| 11 | Persistent IVF-PQ, exact local search, reproducible retrieval benchmarking |
 
 ## Exceptions
 

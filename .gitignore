@@ -3,6 +3,7 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .venv/
+.biodata/
 config_test.yaml
 config.yaml
 benchmark_neighbor_search*.json

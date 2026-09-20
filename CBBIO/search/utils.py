@@ -9,6 +9,13 @@ from ..types import DistanceMetric
 
 
 def _coerce_vector_row(value: Any) -> Any:
+    to_numpy_attr = getattr(value, "to_numpy", None)
+    if callable(to_numpy_attr):
+        try:
+            return to_numpy_attr()
+        except Exception:
+            pass
+
     to_list_attr = getattr(value, "to_list", None)
     if callable(to_list_attr):
         try:
