@@ -73,7 +73,7 @@ from CBBIO import (
 ## BioData Database
 
 ```python
-from CBBIO import BioDataClient, build_dsn, connect, load_config
+from CBBIO import BioDataClient, IndexBuildSpec, IndexKey, IndexManager, build_dsn, connect, load_config
 ```
 
 | API | Use |
@@ -82,6 +82,9 @@ from CBBIO import BioDataClient, build_dsn, connect, load_config
 | `BioDataClient` | Database client for proteins, embeddings, annotations, and search |
 | `build_dsn()` | Builds a PostgreSQL DSN from config values |
 | `load_config()` | Loads `config.yaml` plus environment overrides |
+| `IndexKey` | Identifies a persistent search collection and metric |
+| `IndexBuildSpec` | Configures an IVF-PQ build |
+| `IndexManager` | Builds, validates, and loads local search artifacts |
 
 Common client methods:
 
@@ -94,6 +97,28 @@ Common client methods:
 | `find_nearest_neighbors()` | Runs vector nearest-neighbor search |
 | `find_nearest_neighbors_for_embeddings()` | Runs batch nearest-neighbor search for external embeddings |
 | `neighbors_with_go()` | Retrieves neighbors and GO annotations together |
+
+## Persistent search
+
+```python
+from CBBIO import IndexKey, IndexManager, connect
+
+client = connect()
+key = IndexKey.from_biodata(
+    client,
+    database_label="biodata",
+    embedding_type_id=3,
+    layer_index=0,
+    metric="cosine",
+)
+manager = IndexManager(".biodata/indexes")
+```
+
+Build persistent artifacts explicitly with the current value from
+`embedding_index_revision()`. `faiss_persistent` uses compact IVF-PQ retrieval and pgvector
+reranking. `build_exact_store()` writes a portable float16 matrix plus SQLite protein-ID metadata
+for exact `faiss_cpu` or `cuvs_gpu` search without a bulk PostgreSQL vector read. Do not commit
+the artifacts below `.biodata/indexes/`.
 
 ## Probing
 

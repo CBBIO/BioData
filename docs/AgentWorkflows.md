@@ -69,6 +69,36 @@ for neighbor in neighbors:
 
 Read configuration from `config.yaml` or environment variables. Use `neighbors_with_go()` when the caller needs nearest neighbors and GO annotations together.
 
+## Use Persistent Local Search
+
+```python
+from CBBIO import IndexBuildSpec, IndexKey, IndexManager, connect
+
+client = connect()
+key = IndexKey.from_biodata(
+    client,
+    database_label="biodata",
+    embedding_type_id=3,
+    layer_index=0,
+    metric="cosine",
+)
+manager = IndexManager(".biodata/indexes", search_nprobe=128)
+revision = client.embedding_index_revision(embedding_type_id=3, layer_index=0)
+
+manager.build_ivf_pq(
+    key,
+    lambda: client.iter_embedding_index_batches(embedding_type_id=3, layer_index=0),
+    source_revision=revision,
+    spec=IndexBuildSpec(nlist=3476),
+)
+client.configure_persistent_index(manager, database_label="biodata")
+```
+
+Builds are deliberate maintenance operations, never an implicit side effect of a search. Build
+the portable exact store with `build_exact_store()` when exact FAISS CPU or cuVS GPU searches need
+to run from local disk. Keep artifacts below `.biodata/indexes/` and commit neither them nor
+notebook outputs. See [BioData.md](BioData.md) for the full workflow and error behavior.
+
 ## Run a Protein Probe
 
 ```python

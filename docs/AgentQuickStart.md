@@ -39,7 +39,7 @@ Use these documents by task:
 |---|---|
 | Generate embeddings | [AgentWorkflows.md](AgentWorkflows.md), [Embeddings.md](Embeddings.md) |
 | Train probing tasks | [AgentWorkflows.md](AgentWorkflows.md), [Probing.md](Probing.md) |
-| Query PostgreSQL and pgvector | [BioData.md](BioData.md) |
+| Query PostgreSQL, pgvector, or local persistent indexes | [BioData.md](BioData.md), [AgentWorkflows.md](AgentWorkflows.md) |
 | Use GO or taxonomy utilities | [GO.md](GO.md), [Taxonomy.md](Taxonomy.md) |
 | Add an embedding model | [AgentWorkflows.md](AgentWorkflows.md), [ModelSpecificEmbeddingModules.md](ModelSpecificEmbeddingModules.md) |
 | Locate public APIs | [AgentApiMap.md](AgentApiMap.md) |
@@ -64,6 +64,8 @@ from CBBIO import (
     BioDataClient,
     EmbeddingRecord,
     GenerationInput,
+    IndexKey,
+    IndexManager,
     ProteinDataset,
     ResidueDataset,
     Task,
@@ -81,6 +83,8 @@ from CBBIO import (
 | `ResidueDataset` | Holds residue-level probing examples |
 | `Task` | Bundles dataset, prediction spec, and probe |
 | `BioDataClient` | Reads proteins, embeddings, annotations, and neighbors from PostgreSQL |
+| `IndexKey` | Identifies one embedding collection and search metric |
+| `IndexManager` | Builds and validates persistent IVF-PQ and exact-vector artifacts |
 
 ## Model Families
 
