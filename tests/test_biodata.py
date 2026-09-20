@@ -565,7 +565,37 @@ def test_find_nearest_neighbors_for_embeddings_batches_external_queries_through_
     assert "LEFT JOIN LATERAL" in sql
     assert "p.id <> ALL(%s)" in sql
     assert "<=>" in sql
-    assert params == ("new_1", [0.1, 0.2], "new_2", [0.3, 0.4], 1, 33, ["P0"], 2)
+    assert params == ("new_1", [0.1, 0.2], "new_2", [0.3, 0.4], 1, 33, ["P0"], 66)
+
+
+def test_external_exact_search_uses_exact_store_distances_for_canonical_ranking() -> None:
+    responses = [
+        _Response(all=[("external", "Z", 0, 0.1), ("external", "A", 0, 0.1)]),
+        _Response(one={"vector_count": 2, "max_sequence_id": 2}),
+    ]
+    client, _ = _client_with_fake_conn(responses)
+    inspection = types.SimpleNamespace(state="current", manifest=types.SimpleNamespace(vector_count=2, dimension=2))
+
+    class _ExactStoreManager:
+        def load_exact_store(self, **kwargs: Any) -> Any:
+            return inspection
+
+        def _exact_store_candidate_distances(self, *args: Any, **kwargs: Any) -> Dict[str, float]:
+            return {"Z": 0.1, "A": 0.1}
+
+    client.configure_persistent_index(cast(Any, _ExactStoreManager()), database_label="test-database")
+
+    grouped = client.find_nearest_neighbors_for_embeddings(
+        {"external": [0.1, 0.2]},
+        embedding_type_id=3,
+        layer_index=0,
+        k=1,
+        metric="cosine",
+        backend="pgvector",
+    )
+
+    assert [neighbor.protein_id for neighbor in grouped["external"]] == ["A"]
+    assert grouped["external"][0].distance == pytest.approx(0.1)
 
 
 def test_find_nearest_neighbors_for_embeddings_rejects_invalid_k() -> None:
@@ -814,7 +844,7 @@ def test_find_nearest_neighbors_uses_metric_and_params() -> None:
     assert "<=>" in sql
     assert "LIMIT %s" in sql
     assert params[0] == [0.1, 0.2]
-    assert params[-1] == 2
+    assert params[-1] == 66
 
 
 def test_find_nearest_neighbors_adds_exclusion_clause() -> None:

@@ -490,6 +490,7 @@ class IndexManager:
                 vector_file.flush()
                 vector_write_seconds += time.perf_counter() - vector_write_started_at
                 metadata_write_started_at = time.perf_counter()
+                connection.execute("CREATE INDEX vector_rows_protein_id ON vector_rows (protein_id)")
                 connection.commit()
                 metadata_write_seconds += time.perf_counter() - metadata_write_started_at
             if vector_count < 1:
@@ -566,6 +567,69 @@ class IndexManager:
                 offset = next_offset
         if offset != manifest.vector_count:
             raise SearchIndexError("Exact-store metadata row count does not match its manifest.")
+
+    def _exact_store_candidate_distances(
+        self,
+        inspection: ExactStoreInspection,
+        query_vector: Any,
+        protein_ids: Iterable[str],
+        *,
+        metric: DistanceMetric,
+    ) -> dict[str, float]:
+        """Compute deterministic float64 distances for exact-store candidate protein IDs."""
+        if inspection.state != "current" or inspection.manifest is None:
+            raise SearchIndexError("A current exact-store inspection is required to score candidates.")
+        candidate_ids = list(dict.fromkeys(str(protein_id) for protein_id in protein_ids))
+        if not candidate_ids:
+            return {}
+        np = _import_numpy()
+        manifest = inspection.manifest
+        query = as_numpy_matrix([query_vector]).reshape(-1).astype(np.float16).astype(np.float64)
+        if int(query.shape[0]) != manifest.dimension:
+            raise SearchIndexError(
+                f"Exact-store query dimension must be {manifest.dimension}, got {int(query.shape[0])}."
+            )
+        rows_by_protein_id: dict[str, int] = {}
+        with sqlite3.connect(inspection.artifact.metadata_path) as connection:
+            for start in range(0, len(candidate_ids), 900):
+                identifiers = candidate_ids[start : start + 900]
+                placeholders = ", ".join("?" for _ in identifiers)
+                rows = connection.execute(
+                    "SELECT protein_id, row_index FROM vector_rows "
+                    f"WHERE protein_id IN ({placeholders})",
+                    identifiers,
+                )
+                rows_by_protein_id.update({str(protein_id): int(row_index) for protein_id, row_index in rows})
+        ordered_ids = [protein_id for protein_id in candidate_ids if protein_id in rows_by_protein_id]
+        if not ordered_ids:
+            return {}
+        matrix = np.memmap(
+            inspection.artifact.vectors_path,
+            dtype=np.float16,
+            mode="r",
+            shape=(manifest.vector_count, manifest.dimension),
+        )
+        row_indices = np.asarray([rows_by_protein_id[protein_id] for protein_id in ordered_ids], dtype=np.int64)
+        vectors = np.asarray(matrix[row_indices], dtype=np.float64)
+        if metric == "cosine":
+            query_norm = float(np.linalg.norm(query))
+            vector_norms = np.linalg.norm(vectors, axis=1)
+            denominators = vector_norms * query_norm
+            similarities = np.divide(
+                vectors @ query,
+                denominators,
+                out=np.zeros(len(ordered_ids), dtype=np.float64),
+                where=denominators != 0.0,
+            )
+            distances = np.clip(1.0 - similarities, 0.0, 2.0)
+        elif metric == "l2":
+            distances = np.linalg.norm(vectors - query, axis=1)
+        else:
+            distances = -(vectors @ query)
+        return {
+            protein_id: float(distance)
+            for protein_id, distance in zip(ordered_ids, distances, strict=True)
+        }
 
     def inspect(self, key: IndexKey, *, source_revision: str | None = None) -> IndexInspection:
         """Report whether the requested index exists and matches its source revision."""

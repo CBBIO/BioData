@@ -97,7 +97,9 @@ client.configure_persistent_index(manager, database_label="biodata")
 Builds are deliberate maintenance operations, never an implicit side effect of a search. Build
 the portable exact store with `build_exact_store()` when exact FAISS CPU or cuVS GPU searches need
 to run from local disk. Keep artifacts below `.biodata/indexes/` and commit neither them nor
-notebook outputs. See [BioData.md](BioData.md) for the full workflow and error behavior.
+notebook outputs. Exact methods use the store to apply one shared `float64` distance and
+`(distance, protein_id)` ordering after candidate retrieval. See [BioData.md](BioData.md) for the
+full workflow and error behavior.
 
 ## Run a Protein Probe
 

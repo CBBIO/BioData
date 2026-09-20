@@ -191,6 +191,12 @@ def test_index_manager_builds_and_streams_a_portable_exact_store(tmp_path: Path)
         source_revision="3",
     )
     batches = list(manager.iter_exact_store_batches(inspection, batch_size=2))
+    distances = manager._exact_store_candidate_distances(
+        inspection,
+        vectors[0],
+        ["P2", "P1"],
+        metric="cosine",
+    )
 
     assert manifest.vector_count == 3
     assert manifest.source_read_seconds is not None
@@ -201,6 +207,8 @@ def test_index_manager_builds_and_streams_a_portable_exact_store(tmp_path: Path)
     assert manifest.metadata_write_seconds >= 0.0
     assert inspection.manifest is not None
     assert inspection.manifest.vector_write_seconds == pytest.approx(manifest.vector_write_seconds)
+    assert distances["P1"] == pytest.approx(0.0)
+    assert distances["P2"] > distances["P1"]
     assert inspection.artifact.vectors_path.stat().st_size == 3 * 2 * 2
     assert [protein_ids for protein_ids, _ in batches] == [["P1", "P2"], ["P3"]]
     assert numpy.vstack([batch_vectors for _, batch_vectors in batches]) == pytest.approx(vectors, abs=0.001)

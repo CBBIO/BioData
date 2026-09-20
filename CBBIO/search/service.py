@@ -151,6 +151,55 @@ class SearchService:
             exclude_protein_ids=exclude_protein_ids,
         )
 
+    def _canonicalize_exact_neighbor_groups(
+        self,
+        grouped: Mapping[str, Sequence[Neighbor]],
+        query_embeddings: Mapping[str, Any],
+        *,
+        embedding_type_id: int,
+        layer_index: int,
+        metric: DistanceMetric,
+        k: int,
+    ) -> Dict[str, List[Neighbor]]:
+        """Rank candidates with the shared float16 exact-store distance definition."""
+        exact_store = self._load_persistent_exact_store(
+            embedding_type_id=embedding_type_id,
+            layer_index=layer_index,
+        )
+        manager = self._client._index_manager
+        scorer = getattr(manager, "_exact_store_candidate_distances", None)
+        if exact_store is None or not callable(scorer):
+            return _canonicalize_neighbor_groups(grouped, k=k)
+        canonical_groups: Dict[str, List[Neighbor]] = {}
+        for query_id, neighbors in grouped.items():
+            query_id_str = str(query_id)
+            query_vector = query_embeddings.get(query_id_str)
+            if query_vector is None:
+                canonical_groups[query_id_str] = _canonicalize_neighbor_groups({query_id_str: neighbors}, k=k)[query_id_str]
+                continue
+            distances = cast(
+                Mapping[str, float],
+                scorer(
+                    exact_store,
+                    query_vector,
+                    [neighbor.protein_id for neighbor in neighbors],
+                    metric=metric,
+                ),
+            )
+            canonical_groups[query_id_str] = sorted(
+                (
+                    Neighbor(
+                        protein_id=neighbor.protein_id,
+                        layer_index=neighbor.layer_index,
+                        distance=distances[neighbor.protein_id],
+                    )
+                    for neighbor in neighbors
+                    if neighbor.protein_id in distances
+                ),
+                key=lambda neighbor: (neighbor.distance, neighbor.protein_id),
+            )[:k]
+        return canonical_groups
+
     def _persistent_index_revision_if_current(
         self,
         query_embedding: Any,
@@ -464,6 +513,7 @@ class SearchService:
             batch_size=1,
             device=device,
         )
+        retrieval_k = effective_k + _CANONICAL_TIE_OVERFETCH if not resolved.ann_used else effective_k
         excluded_ids = [str(value) for value in (exclude_protein_ids or [])]
 
         if resolved.backend == "faiss_persistent":
@@ -471,7 +521,7 @@ class SearchService:
                 {"query": query_embedding},
                 embedding_type_id=embedding_type_id,
                 layer_index=layer_index,
-                k=effective_k,
+                k=retrieval_k,
                 metric=effective_metric,
                 candidate_count=ann_candidate_pool,
                 exclude_protein_ids=sorted(excluded_ids),
@@ -482,7 +532,7 @@ class SearchService:
                 query_embedding,
                 embedding_type_id=embedding_type_id,
                 layer_index=layer_index,
-                k=effective_k,
+                k=retrieval_k,
                 metric=effective_metric,
                 exclude_protein_ids=excluded_ids,
                 use_ann=resolved.ann_used,
@@ -494,7 +544,7 @@ class SearchService:
                 query_embedding,
                 embedding_type_id=embedding_type_id,
                 layer_index=layer_index,
-                k=effective_k,
+                k=retrieval_k,
                 metric=effective_metric,
                 exclude_protein_ids=excluded_ids,
                 device=resolved.device,
@@ -505,7 +555,7 @@ class SearchService:
                 query_embedding,
                 embedding_type_id=embedding_type_id,
                 layer_index=layer_index,
-                k=effective_k,
+                k=retrieval_k,
                 metric=effective_metric,
                 exclude_protein_ids=excluded_ids,
                 use_ann=resolved.ann_used,
@@ -515,7 +565,7 @@ class SearchService:
                 query_embedding,
                 embedding_type_id=embedding_type_id,
                 layer_index=layer_index,
-                k=effective_k,
+                k=retrieval_k,
                 metric=effective_metric,
                 exclude_protein_ids=excluded_ids,
                 device=resolved.device,
@@ -526,12 +576,20 @@ class SearchService:
                 query_embedding,
                 embedding_type_id=embedding_type_id,
                 layer_index=layer_index,
-                k=effective_k,
+                k=retrieval_k,
                 metric=effective_metric,
                 exclude_protein_ids=excluded_ids,
                 device=resolved.device,
             )
 
+        neighbors = self._canonicalize_exact_neighbor_groups(
+            {"query": neighbors},
+            {"query": query_embedding},
+            embedding_type_id=embedding_type_id,
+            layer_index=layer_index,
+            metric=effective_metric,
+            k=effective_k,
+        )["query"]
         self._client._record_search_diagnostics(
             resolved,
             requested_backend=requested_backend,
@@ -567,7 +625,6 @@ class SearchService:
         effective_k = self._client.default_k if k is None else int(k)
         if effective_k < 1:
             raise BioDataError("k must be >= 1")
-
         requested_backend = cast(SearchBackend, backend or self._client.default_backend)
         persistent_revision = (
             self._persistent_index_revision_if_current(
@@ -600,6 +657,7 @@ class SearchService:
             batch_size=len(query_items),
             device=device,
         )
+        retrieval_k = effective_k + _CANONICAL_TIE_OVERFETCH if not resolved.ann_used else effective_k
 
         query_ids = [query_id for query_id, _ in query_items]
         query_vectors = [embedding for _, embedding in query_items]
@@ -611,7 +669,7 @@ class SearchService:
                 dict(query_items),
                 embedding_type_id=embedding_type_id,
                 layer_index=layer_index,
-                k=effective_k,
+                k=retrieval_k,
                 metric=effective_metric,
                 candidate_count=ann_candidate_pool,
                 exclude_protein_ids=sorted(excluded_ids),
@@ -622,7 +680,7 @@ class SearchService:
                 query_items,
                 embedding_type_id=embedding_type_id,
                 layer_index=layer_index,
-                k=effective_k,
+                k=retrieval_k,
                 metric=effective_metric,
                 exclude_protein_ids=excluded_ids,
                 use_ann=resolved.ann_used,
@@ -647,11 +705,19 @@ class SearchService:
                     state,
                     query_ids=chunk_ids,
                     query_vectors=query_matrix[chunk_start:chunk_start + chunk_size],
-                    k=effective_k,
+                    k=retrieval_k,
                     per_query_excluded={query_id: per_query_excluded[query_id] for query_id in chunk_ids},
                 )
                 grouped.update(partial)
 
+        grouped = self._canonicalize_exact_neighbor_groups(
+            grouped,
+            dict(query_items),
+            embedding_type_id=embedding_type_id,
+            layer_index=layer_index,
+            metric=effective_metric,
+            k=effective_k,
+        )
         self._client._record_search_diagnostics(
             resolved,
             requested_backend=requested_backend,
@@ -836,7 +902,18 @@ class SearchService:
                     )
                 grouped.update(partial)
 
-        grouped = _canonicalize_neighbor_groups(grouped, k=effective_k)
+        grouped = self._canonicalize_exact_neighbor_groups(
+            grouped,
+            persistent_query_map or self._client.get_protein_embeddings(
+                ids,
+                embedding_type_id=embedding_type_id,
+                layer_index=layer_index,
+            ),
+            embedding_type_id=embedding_type_id,
+            layer_index=layer_index,
+            metric=effective_metric,
+            k=effective_k,
+        )
         self._client._record_search_diagnostics(
             resolved,
             requested_backend=requested_backend,

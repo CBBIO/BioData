@@ -332,6 +332,11 @@ of the distance metric and can be copied to a cluster node; `faiss_cpu` and exac
 automatically use a current configured store instead of reading the full matrix from PostgreSQL.
 The store allows external-embedding searches without a database connection after it has been
 copied locally. FAISS materializes an exact `IndexFlat` in RAM; cuVS streams the store into VRAM.
+Exact searches over-fetch a small boundary margin, then compute their final distances in `float64`
+from the shared `float16` store and sort by `(distance, protein_id)`. This makes FAISS, cuVS, and
+pgvector return the same ranking and reported distances when they have the same candidate set;
+pgvector is not the tie-breaking authority. IVF-PQ remains approximate, so its candidate recall
+still bounds its reranked result.
 Its manifest records the time spent reading batches from the source, writing the `float16` matrix,
 and writing the SQLite metadata. This lets a notebook report the initial transfer separately from
 later local FAISS/cuVS materialization.
