@@ -6,6 +6,8 @@ python docs/examples/01_esm2_peer_sweep.py --help
 
 These scripts correspond to [AgentExamplePrompts.md](../AgentExamplePrompts.md). Each file starts with the original prompt as a comment and uses public `CBBIO` imports where possible.
 
+Browse the corresponding public interfaces in the [BioData API reference](https://biodata.readthedocs.io/en/latest/api/complete/).
+
 ## Files
 
 | File | Covers |

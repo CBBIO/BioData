@@ -1,0 +1,65 @@
+site_name: BioData
+site_description: Protein embedding, probing, ontology, and nearest-neighbor APIs
+repo_name: CBBIO/BioData
+repo_url: https://github.com/CBBIO/BioData
+
+exclude_docs: |
+  AddingProbingDataSource.md
+  Agent*.md
+  Benchmarks.md
+  BioData.md
+  CustomProbes.md
+  Embeddings.md
+  GO.md
+  GettingStarted.md
+  ModelSpecificEmbeddingModules.md
+  Probing.md
+  STYLE*.md
+  Similarity.md
+  Taxonomy.md
+  examples/**
+
+theme:
+  name: material
+  language: en
+  features:
+    - content.code.copy
+    - navigation.instant
+    - navigation.tabs
+    - search.highlight
+    - search.suggest
+
+plugins:
+  - search
+  - mkdocstrings:
+      default_handler: python
+      handlers:
+        python:
+          paths:
+            - .
+          options:
+            allow_inspection: false
+            annotations_path: brief
+            docstring_style: google
+            filters:
+              - "!^_"
+            members_order: source
+            separate_signature: true
+            show_root_full_path: false
+            show_root_heading: true
+            show_source: false
+
+nav:
+  - Home: index.md
+  - API reference:
+      - Overview: api/index.md
+      - BioData client: api/biodata.md
+      - Persistent search: api/search.md
+      - Embeddings: api/embeddings.md
+      - Probing: api/probing.md
+      - Ontologies: api/ontologies.md
+      - Sequence similarity: api/similarity.md
+      - Complete public API: api/complete.md
+  - Repository guides:
+      - Project README: https://github.com/CBBIO/BioData#readme
+      - Examples README: https://github.com/CBBIO/BioData/blob/main/docs/examples/README.md

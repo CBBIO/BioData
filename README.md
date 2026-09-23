@@ -136,6 +136,8 @@ Environment variable overrides (highest precedence):
 
 ## Documentation
 
+Browse the published [API reference on Read the Docs](https://biodata.readthedocs.io/en/latest/).
+
 | Topic | Document |
 |---|---|
 | Agent quick start | [docs/AgentQuickStart.md](docs/AgentQuickStart.md) |
