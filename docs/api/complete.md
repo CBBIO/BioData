@@ -12,7 +12,7 @@ This page renders every symbol exported from the public `CBBIO` namespace. Prefe
 
 ::: CBBIO
     options:
-      members: true
+      members: null
       show_root_members_full_path: false
 
 ## Exceptions

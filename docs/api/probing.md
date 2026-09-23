@@ -15,15 +15,15 @@ probe = LinearProbe(epochs=spec.epochs, learning_rate=spec.learning_rate)
 
 ::: CBBIO.LinearProbe
     options:
-      members: true
+      members: null
 
 ::: CBBIO.MlpProbe
     options:
-      members: true
+      members: null
 
 ::: CBBIO.TransferProbe
     options:
-      members: true
+      members: null
 
 ## Workflows
 

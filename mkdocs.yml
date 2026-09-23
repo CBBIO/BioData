@@ -1,7 +1,7 @@
 site_name: BioData
 site_description: Protein embedding, probing, ontology, and nearest-neighbor APIs
-repo_name: icases/BioData
-repo_url: https://github.com/icases/BioData
+repo_name: CBBIO/BioData
+repo_url: https://github.com/CBBIO/BioData
 
 exclude_docs: |
   AddingProbingDataSource.md
@@ -41,6 +41,8 @@ plugins:
             allow_inspection: false
             annotations_path: brief
             docstring_style: google
+            filters:
+              - "!^_"
             members_order: source
             separate_signature: true
             show_root_full_path: false

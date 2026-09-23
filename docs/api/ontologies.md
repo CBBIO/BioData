@@ -11,7 +11,7 @@ taxonomy = load_taxonomy("taxdump")
 
 ::: CBBIO.GOOntology
     options:
-      members: true
+      members: null
 
 ::: CBBIO.load_go
 
@@ -21,7 +21,7 @@ taxonomy = load_taxonomy("taxdump")
 
 ::: CBBIO.TaxonomyOntology
     options:
-      members: true
+      members: null
 
 ::: CBBIO.load_taxonomy
 

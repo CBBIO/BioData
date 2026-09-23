@@ -12,7 +12,7 @@ embedding = generator.generate(query)
 
 ::: CBBIO.EmbeddingGenerator
     options:
-      members: true
+      members: null
 
 ::: CBBIO.Generator
 
@@ -32,11 +32,11 @@ embedding = generator.generate(query)
 
 ::: CBBIO.EmbeddingWriter
     options:
-      members: true
+      members: null
 
 ::: CBBIO.H5EmbeddingReader
     options:
-      members: true
+      members: null
 
 ## Exceptions
 

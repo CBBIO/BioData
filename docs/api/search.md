@@ -17,7 +17,7 @@ key = IndexKey(
 
 ::: CBBIO.IndexManager
     options:
-      members: true
+      members: null
 
 ## Index types
 

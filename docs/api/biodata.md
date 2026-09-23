@@ -17,7 +17,7 @@ neighbors = client.find_nearest_neighbors_for_proteins(
 
 ::: CBBIO.BioDataClient
     options:
-      members: true
+      members: null
 
 ## Configuration
 
