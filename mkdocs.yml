@@ -60,3 +60,6 @@ nav:
       - Ontologies: api/ontologies.md
       - Sequence similarity: api/similarity.md
       - Complete public API: api/complete.md
+  - Repository guides:
+      - Project README: https://github.com/CBBIO/BioData#readme
+      - Examples README: https://github.com/CBBIO/BioData/blob/main/docs/examples/README.md

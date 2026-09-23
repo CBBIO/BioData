@@ -10,6 +10,11 @@ BioData provides typed APIs for protein embeddings, probing, ontology analysis, 
 
 Use the API reference to inspect signatures, return types, documented errors, and public methods. Read the repository guides when you need a complete workflow or worked example.
 
+## Repository guides
+
+- [Project README](https://github.com/CBBIO/BioData#readme)
+- [Examples README](https://github.com/CBBIO/BioData/blob/main/docs/examples/README.md)
+
 ## Exceptions
 
 | Exception | When raised |
