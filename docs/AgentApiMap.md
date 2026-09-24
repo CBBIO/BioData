@@ -115,10 +115,10 @@ manager = IndexManager(".biodata/indexes")
 ```
 
 Build persistent artifacts explicitly with the current value from
-`embedding_index_revision()`. `faiss_persistent` uses compact IVF-PQ retrieval and pgvector
-reranking. `build_exact_store()` writes a portable float16 matrix plus SQLite protein-ID metadata
-for exact `faiss_cpu` or `cuvs_gpu` search without a bulk PostgreSQL vector read. Do not commit
-the artifacts below `.biodata/indexes/`.
+`embedding_index_revision()`. `build_ivf_pq()` reuses a current portable float16 matrix plus
+SQLite metadata, or materializes it once through its source callback. Exact `faiss_cpu`,
+`cuvs_gpu`, and `torch_gpu` consume the same store, while `faiss_persistent` derives compact IVF-PQ retrieval
+from it. Do not commit the artifacts below `.biodata/indexes/`.
 
 ## Probing
 
