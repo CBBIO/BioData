@@ -331,6 +331,38 @@ def test_index_manager_raises_stale_error_when_exact_store_revision_differs(tmp_
         )
 
 
+def test_index_manager_removes_staging_generation_when_exact_store_build_fails(tmp_path: Path) -> None:
+    numpy = pytest.importorskip("numpy")
+    key = IndexKey(
+        database_label="test-database",
+        embedding_type_id=3,
+        layer_index=0,
+        metric="cosine",
+        dimension=2,
+    )
+    manager = IndexManager(tmp_path)
+
+    def _source() -> Iterable[ExactVectorBatch]:
+        yield ExactVectorBatch(
+            sequence_ids=numpy.asarray([1], dtype=numpy.int64),
+            protein_ids=["P1"],
+            vectors=numpy.asarray([[1.0, 0.5]], dtype=numpy.float32),
+        )
+        raise RuntimeError("source failed")
+
+    with pytest.raises(RuntimeError, match="source failed"):
+        manager.build_exact_store(key, _source, source_revision="1")
+
+    generations = manager.exact_store_artifact_for(
+        database_label="test-database",
+        embedding_type_id=3,
+        layer_index=0,
+    ).directory / "generations"
+    assert list(generations.glob(".*.tmp")) == []
+
+
+
+
 def test_index_manager_raises_value_error_when_search_nprobe_is_not_positive(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="search_nprobe"):
         IndexManager(tmp_path, search_nprobe=0)

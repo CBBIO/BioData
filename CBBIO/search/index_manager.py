@@ -6,6 +6,7 @@ import json
 import math
 import os
 import re
+import shutil
 import sqlite3
 import time
 import uuid
@@ -534,7 +535,8 @@ class IndexManager:
             self._write_exact_store_manifest(staging_directory / "manifest.json", manifest)
             _publish_generation(artifact.directory, staging_directory, generation_name)
             return manifest
-        except Exception:
+        except BaseException:
+            shutil.rmtree(staging_directory, ignore_errors=True)
             raise
 
     def load_exact_store(
