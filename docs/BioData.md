@@ -330,11 +330,12 @@ client.configure_persistent_index(manager, database_label="biodata")
 
 An exact store is a portable `float16` matrix plus local protein-ID metadata. It is independent
 of the distance metric and is the common local source for exact `faiss_cpu`, exact `cuvs_gpu`,
-exact `torch_gpu`, and `build_ivf_pq()`. The latter reuses a current store or materializes it from its callback only
-when absent. It can be copied to a cluster node; exact backends automatically use a current configured
-store instead of reading the full matrix from PostgreSQL.
+exact `torch_gpu`, and `build_ivf_pq()`. `build_ivf_pq()` reuses a current store or
+materializes it from its callback only when absent. Exact backends automatically use a current
+configured store instead of reading the full matrix from PostgreSQL.
 The store allows external-embedding searches without a database connection after it has been
-copied locally. `build_exact_store()` is idempotent for the requested revision: it returns a current manifest without invoking its callback.
+copied locally. `build_exact_store()` is idempotent for the requested revision: it returns a
+current manifest without invoking its callback.
 
 | Exact-store state | Default behavior | With `overwrite=True` |
 |---|---|---|
@@ -342,10 +343,44 @@ copied locally. `build_exact_store()` is idempotent for the requested revision: 
 | Missing | Materialize from the callback | Materialize from the callback |
 | Stale or invalid | Raise a specific artifact error | Materialize a replacement from the callback |
 
+### Search on a cluster
+
+```bash
+rsync -a --exclude='.*.tmp' \
+  .biodata/indexes/biodata-nas/embedding-type-3/layer-0/exact/ \
+  cluster:/scratch/biodata/.biodata/indexes/biodata-nas/embedding-type-3/layer-0/exact/
+```
+
+Copy the completed `exact/` directory. Its relative `current` link selects the immutable
+generation containing `vectors.f16`, `metadata.sqlite`, and `manifest.json`.
+
+```python
+import numpy as np
+
+from CBBIO import BioDataClient, IndexManager
+
+manager = IndexManager("/scratch/biodata/.biodata/indexes")
+client = BioDataClient(index_manager=manager, index_database_label="biodata-nas")
+
+neighbors = client.find_nearest_neighbors_for_embeddings(
+    {"cluster-query": np.zeros(1024, dtype=np.float32)},
+    embedding_type_id=3,
+    layer_index=0,
+    k=100,
+    metric="cosine",
+    backend="torch_gpu",
+    device="cuda:0",
+)
+```
+
+Do not call `client.connect()`. The first search fills the selected backend state from local
+files. Later searches reuse the resident state.
+
 FAISS materializes an exact `IndexFlat` in RAM. cuVS and PyTorch stream the store into VRAM.
 Exact searches over-fetch a small boundary margin, then compute their final distances in `float64`
-from the shared `float16` store and sort by `(distance, protein_id)`. This makes FAISS, cuVS, and
-pgvector return the same ranking and reported distances when they have the same candidate set;
+from the shared `float16` store and sort by `(distance, protein_id)`. This makes FAISS, cuVS,
+Torch, and pgvector return the same ranking and reported distances when they have the same
+candidate set;
 pgvector is not the tie-breaking authority. IVF-PQ remains approximate, so its candidate recall
 still bounds its reranked result.
 Its manifest records the time spent reading batches from the source, writing the `float16` matrix,
