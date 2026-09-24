@@ -462,6 +462,7 @@ def test_auto_search_prefers_a_current_persistent_index() -> None:
 def test_auto_search_falls_back_when_persistent_index_is_stale(monkeypatch: pytest.MonkeyPatch) -> None:
     responses = [
         _Response(one={"vector_count": 12, "max_sequence_id": 99}),
+        _Response(),
         _Response(all=[("P2", 0, 0.1)]),
     ]
     client, _ = _client_with_fake_conn(responses)
@@ -529,7 +530,7 @@ def test_find_nearest_neighbors_for_embeddings_batches_external_queries_through_
         {"new_1": [0.1, 0.2], "new_2": [0.3, 0.4]},
         embedding_type_id=1,
         layer_index=33,
-        k=2,
+        k=1,
         exclude_protein_ids=["P0"],
         backend="faiss_cpu",
     )
@@ -545,31 +546,35 @@ def test_find_nearest_neighbors_for_embeddings_batches_external_queries_through_
 
 
 def test_find_nearest_neighbors_for_embeddings_batches_external_queries_through_pgvector() -> None:
-    responses = [_Response(all=[("new_1", "P1", 33, 0.1), ("new_2", None, None, None)])]
+    responses = [
+        _Response(),
+        _Response(all=[("new_1", "P1", 33, 0.1), ("new_2", "P2", 33, 0.2)]),
+    ]
     client, conn = _client_with_fake_conn(responses)
 
     grouped = client.find_nearest_neighbors_for_embeddings(
         {"new_1": [0.1, 0.2], "new_2": [0.3, 0.4]},
         embedding_type_id=1,
         layer_index=33,
-        k=2,
+        k=1,
         metric="cosine",
         exclude_protein_ids=["P0"],
         backend="pgvector",
     )
 
     assert [neighbor.protein_id for neighbor in grouped["new_1"]] == ["P1"]
-    assert grouped["new_2"] == []
-    sql, params = conn.executed[0]
+    assert [neighbor.protein_id for neighbor in grouped["new_2"]] == ["P2"]
+    sql, params = conn.executed[1]
     assert "VALUES (%s, %s::halfvec), (%s, %s::halfvec)" in sql
     assert "LEFT JOIN LATERAL" in sql
     assert "p.id <> ALL(%s)" in sql
     assert "<=>" in sql
-    assert params == ("new_1", [0.1, 0.2], "new_2", [0.3, 0.4], 1, 33, ["P0"], 66)
+    assert params == ("new_1", [0.1, 0.2], "new_2", [0.3, 0.4], 1, 33, ["P0"], 65)
 
 
 def test_external_exact_search_uses_exact_store_distances_for_canonical_ranking() -> None:
     responses = [
+        _Response(),
         _Response(all=[("external", "Z", 0, 0.1), ("external", "A", 0, 0.1)]),
         _Response(one={"vector_count": 2, "max_sequence_id": 2}),
     ]
@@ -581,7 +586,7 @@ def test_external_exact_search_uses_exact_store_distances_for_canonical_ranking(
             return inspection
 
         def _exact_store_candidate_distances(self, *args: Any, **kwargs: Any) -> Dict[str, float]:
-            return {"Z": 0.1, "A": 0.1}
+            return {"Z": 0.100004, "A": 0.100003}
 
     client.configure_persistent_index(cast(Any, _ExactStoreManager()), database_label="test-database")
 
@@ -595,7 +600,7 @@ def test_external_exact_search_uses_exact_store_distances_for_canonical_ranking(
     )
 
     assert [neighbor.protein_id for neighbor in grouped["external"]] == ["A"]
-    assert grouped["external"][0].distance == pytest.approx(0.1)
+    assert grouped["external"][0].distance == pytest.approx(0.100003)
 
 
 def test_find_nearest_neighbors_for_embeddings_rejects_invalid_k() -> None:
@@ -615,11 +620,13 @@ def test_find_nearest_neighbors_for_embeddings_empty_input_short_circuits() -> N
 def test_find_nearest_neighbors_for_proteins_groups_rows_and_respects_include_query_flag() -> None:
     responses = [
         _Response(one={"embedding": [0.1, 0.2, 0.3]}),
+        _Response(),
         _Response(
             all=[
                 ("Q1", "N1", 0, 0.1),
                 ("Q1", "N2", 0, 0.2),
-                ("Q2", None, None, None),
+                ("Q2", "N3", 0, 0.3),
+                ("Q2", "N4", 0, 0.4),
             ]
         )
     ]
@@ -635,8 +642,9 @@ def test_find_nearest_neighbors_for_proteins_groups_rows_and_respects_include_qu
     )
 
     assert [n.protein_id for n in grouped["Q1"]] == ["N1", "N2"]
-    assert grouped["Q2"] == []
-    sql, params = conn.executed[1]
+    assert [n.protein_id for n in grouped["Q2"]] == ["N3", "N4"]
+    assert conn.executed[1] == ("SET LOCAL enable_indexscan = off;", ())
+    sql, params = conn.executed[2]
     assert "<=>" in sql
     assert "halfvec(3)" in sql
     assert "query_sequence_id" in sql
@@ -644,6 +652,22 @@ def test_find_nearest_neighbors_for_proteins_groups_rows_and_respects_include_qu
     assert "ORDER BY c.distance, p2.id" in sql
     assert "DISTINCT ON (p2.id)" not in sql
     assert params == (["Q1", "Q2"], 3, 0, 3, 0, 66, 66)
+
+
+def test_find_nearest_neighbors_for_proteins_rejects_incomplete_results() -> None:
+    responses = [
+        _Response(one={"embedding": [0.1, 0.2, 0.3]}),
+        _Response(),
+        _Response(all=[("Q1", "N1", 0, 0.1)]),
+    ]
+    client, _ = _client_with_fake_conn(responses)
+
+    with pytest.raises(bd.BioDataError, match="fewer than k=2 distinct neighbors"):
+        client.find_nearest_neighbors_for_proteins(
+            ["Q1"],
+            embedding_type_id=3,
+            k=2,
+        )
 
 
 def test_stored_query_exclusions_include_all_protein_aliases() -> None:
@@ -688,7 +712,7 @@ def test_stored_faiss_search_excludes_query_sequence_aliases(
         **kwargs: Any,
     ) -> Dict[str, List[bd.Neighbor]]:
         seen_exclusions.update(kwargs["excluded_protein_ids_by_query"])
-        return {str(query_id): [] for query_id in query_ids}
+        return {str(query_id): [bd.Neighbor(protein_id="P2", layer_index=0, distance=0.2)] for query_id in query_ids}
 
     monkeypatch.setattr(client, "_detect_backend_availability", _detect)
     monkeypatch.setattr(
@@ -706,8 +730,9 @@ def test_stored_faiss_search_excludes_query_sequence_aliases(
     assert client.find_nearest_neighbors_for_proteins(
         ["Q1"],
         embedding_type_id=3,
+        k=1,
         backend="faiss_cpu",
-    ) == {"Q1": []}
+    ) == {"Q1": [bd.Neighbor(protein_id="P2", layer_index=0, distance=0.2)]}
     assert seen_exclusions == {"Q1": {"Q1", "Q1_ALIAS"}}
 
 
@@ -771,7 +796,20 @@ def test_find_nearest_neighbors_for_proteins_ann_reranks_candidate_pool() -> Non
         _Response(one={"embedding": [0.1, 0.2, 0.3]}),
         _Response(one={"exists": True}),
         _Response(),
-        _Response(all=[("Q1", "N1", 0, 0.1)]),
+        _Response(
+            all=[
+                ("Q1", "N1", 0, 0.1),
+                ("Q1", "N2", 0, 0.2),
+                ("Q1", "N3", 0, 0.3),
+                ("Q1", "N4", 0, 0.4),
+                ("Q1", "N5", 0, 0.5),
+                ("Q1", "N6", 0, 0.6),
+                ("Q1", "N7", 0, 0.7),
+                ("Q1", "N8", 0, 0.8),
+                ("Q1", "N9", 0, 0.9),
+                ("Q1", "N10", 0, 1.0),
+            ]
+        ),
     ]
     client, conn = _client_with_fake_conn(responses)
 
@@ -786,8 +824,8 @@ def test_find_nearest_neighbors_for_proteins_ann_reranks_candidate_pool() -> Non
         ann_candidate_pool=500,
     )
 
-    assert [neighbor.protein_id for neighbor in grouped["Q1"]] == ["N1"]
-    assert "SET hnsw.ef_search = 300;" in conn.executed[2][0]
+    assert len(grouped["Q1"]) == 10
+    assert "SET LOCAL hnsw.ef_search = 501;" in conn.executed[2][0]
     sql, params = conn.executed[3]
     assert "LIMIT %s" in sql
     assert params == (["Q1"], 3, 0, 3, 0, 500, 10)
@@ -830,7 +868,7 @@ def test_find_nearest_neighbors_for_proteins_empty_input_short_circuit() -> None
 
 
 def test_find_nearest_neighbors_uses_metric_and_params() -> None:
-    responses = [_Response(all=[("P1", 0, 0.1), ("P2", 0, 0.2)])]
+    responses = [_Response(), _Response(all=[("P1", 0, 0.1), ("P2", 0, 0.2)])]
     client, conn = _client_with_fake_conn(responses)
 
     neighbors = client.find_nearest_neighbors(
@@ -842,7 +880,7 @@ def test_find_nearest_neighbors_uses_metric_and_params() -> None:
     )
 
     assert [n.protein_id for n in neighbors] == ["P1", "P2"]
-    sql, params = conn.executed[0]
+    sql, params = conn.executed[1]
     assert "<=>" in sql
     assert "LIMIT %s" in sql
     assert params[0] == [0.1, 0.2]
@@ -850,18 +888,18 @@ def test_find_nearest_neighbors_uses_metric_and_params() -> None:
 
 
 def test_find_nearest_neighbors_adds_exclusion_clause() -> None:
-    responses = [_Response(all=[("P2", 0, 0.2)])]
+    responses = [_Response(), _Response(all=[("P2", 0, 0.2)])]
     client, conn = _client_with_fake_conn(responses)
 
     client.find_nearest_neighbors(
         [0.1, 0.2],
         embedding_type_id=1,
         layer_index=0,
-        k=5,
+        k=1,
         exclude_protein_ids=["P1", "P3"],
     )
 
-    sql, params = conn.executed[0]
+    sql, params = conn.executed[1]
     assert "p.id <> ALL(%s)" in sql
     assert ["P1", "P3"] in params
 
@@ -886,7 +924,7 @@ def test_find_nearest_neighbors_use_ann_query_shape() -> None:
         use_ann=True,
     )
 
-    assert "SET hnsw.ef_search = 200;" in conn.executed[0][0]
+    assert "SET LOCAL hnsw.ef_search = 200;" in conn.executed[0][0]
 
     sql, params = conn.executed[1]
     assert "WITH ann_candidates AS" in sql
@@ -1204,7 +1242,7 @@ def test_neighbors_with_go_raises_when_query_embedding_missing() -> None:
 
 
 def test_find_nearest_neighbors_auto_pgvector_records_diagnostics(monkeypatch: pytest.MonkeyPatch) -> None:
-    responses = [_Response(all=[("P1", 0, 0.1)])]
+    responses = [_Response(), _Response(all=[("P1", 0, 0.1)])]
     client, _ = _client_with_fake_conn(responses)
 
     def _detect(*, device: str | None) -> bd.BackendAvailability:
@@ -1421,7 +1459,7 @@ def test_find_nearest_neighbors_gpu_request_warns_when_faiss_unavailable(monkeyp
 def test_find_nearest_neighbors_gpu_request_warns_when_no_accelerator_available(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    responses = [_Response(all=[("P1", 0, 0.1)])]
+    responses = [_Response(), _Response(all=[("P1", 0, 0.1)])]
     client, _ = _client_with_fake_conn(responses)
 
     def _detect(*, device: str | None) -> bd.BackendAvailability:

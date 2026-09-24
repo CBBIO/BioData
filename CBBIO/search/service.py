@@ -78,6 +78,25 @@ def _canonicalize_neighbor_groups(
     return canonical_groups
 
 
+def _require_complete_neighbor_groups(
+    grouped: Mapping[str, Sequence[Neighbor]],
+    *,
+    query_ids: Sequence[str],
+    k: int,
+) -> None:
+    """Raise when a backend cannot satisfy the public neighbor-count contract."""
+    incomplete = [
+        f"{query_id!r} ({len(grouped.get(query_id, []))}/{k})"
+        for query_id in query_ids
+        if len(grouped.get(query_id, [])) != k
+    ]
+    if incomplete:
+        raise BioDataError(
+            f"Nearest-neighbor search returned fewer than k={k} distinct neighbors for "
+            f"{', '.join(incomplete)}. Increase the candidate pool or use a corpus with enough embeddings."
+        )
+
+
 class SearchService:
     """Encapsulates backend routing and neighbor-search implementations."""
 
@@ -211,7 +230,10 @@ class SearchService:
                 )
                 for protein_id, distance in sorted(
                     distances.items(),
-                    key=lambda item: (item[1], item[0]),
+                    key=lambda item: (
+                        round(float(item[1]), _CANONICAL_TIE_DECIMALS),
+                        item[0],
+                    ),
                 )[:k]
             ]
         return canonical_groups
@@ -606,6 +628,7 @@ class SearchService:
             metric=effective_metric,
             k=effective_k,
         )["query"]
+        _require_complete_neighbor_groups({"query": neighbors}, query_ids=["query"], k=effective_k)
         self._client._record_search_diagnostics(
             resolved,
             requested_backend=requested_backend,
@@ -734,6 +757,7 @@ class SearchService:
             metric=effective_metric,
             k=effective_k,
         )
+        _require_complete_neighbor_groups(grouped, query_ids=query_ids, k=effective_k)
         self._client._record_search_diagnostics(
             resolved,
             requested_backend=requested_backend,
@@ -930,6 +954,7 @@ class SearchService:
             metric=effective_metric,
             k=effective_k,
         )
+        _require_complete_neighbor_groups(grouped, query_ids=ids, k=effective_k)
         self._client._record_search_diagnostics(
             resolved,
             requested_backend=requested_backend,
@@ -963,12 +988,14 @@ class SearchService:
         params: List[Any] = [value for query_id, embedding in query_items for value in (query_id, embedding)]
 
         exclusion_clause = ""
+        effective_ef_search = 0
         if exclude_protein_ids:
             exclusion_clause = " AND p.id <> ALL(%s)"
 
         if use_ann:
             dim = embedding_dimension(query_items[0][1])
             candidate_limit = max(k, int(ann_candidate_pool)) if ann_candidate_pool is not None else max(k * 20, 200)
+            effective_ef_search = max(int(ann_ef_search), candidate_limit)
             sql = (
                 "WITH query_embeddings(query_id, query_embedding) AS (VALUES "
                 f"{value_rows}"
@@ -1050,11 +1077,14 @@ class SearchService:
                 params.append(sorted(exclude_protein_ids))
             params.append(k)
 
-        with cursor(conn) as cur:
-            if use_ann and ann_ef_search > 0:
-                cur.execute(f"SET hnsw.ef_search = {int(ann_ef_search)};")
-            cur.execute(sql, tuple(params))
-            rows = cur.fetchall()
+        with conn.transaction():
+            with cursor(conn) as cur:
+                if use_ann:
+                    cur.execute(f"SET LOCAL hnsw.ef_search = {effective_ef_search};")
+                else:
+                    cur.execute("SET LOCAL enable_indexscan = off;")
+                cur.execute(sql, tuple(params))
+                rows = cur.fetchall()
 
         for query_id, protein_id, row_layer, distance in rows:
             if protein_id is None:
@@ -1084,10 +1114,12 @@ class SearchService:
         """Find nearest neighbors through pgvector."""
         conn = self._client._require_connection()
         operator = metric_operator(metric)
+        effective_ef_search = 0
         excluded_ids = [str(value) for value in exclude_protein_ids]
         if use_ann:
             dim = embedding_dimension(query_embedding)
             candidate_limit = max(k, int(ann_candidate_pool)) if ann_candidate_pool is not None else max(k * 20, 200)
+            effective_ef_search = max(int(ann_ef_search), candidate_limit)
             extra_where = ""
             params = [
                 embedding_type_id,
@@ -1153,11 +1185,14 @@ class SearchService:
             )
             params.extend([query_embedding, k])
 
-        with cursor(conn) as cur:
-            if use_ann and ann_ef_search > 0:
-                cur.execute(f"SET hnsw.ef_search = {int(ann_ef_search)};")
-            cur.execute(sql, tuple(params))
-            rows = cur.fetchall()
+        with conn.transaction():
+            with cursor(conn) as cur:
+                if use_ann:
+                    cur.execute(f"SET LOCAL hnsw.ef_search = {effective_ef_search};")
+                else:
+                    cur.execute("SET LOCAL enable_indexscan = off;")
+                cur.execute(sql, tuple(params))
+                rows = cur.fetchall()
 
         return [
             Neighbor(protein_id=str(protein_id), layer_index=int(row_layer), distance=float(distance))
@@ -1201,6 +1236,7 @@ class SearchService:
             exclude_clause = " AND se2.sequence_id <> q.query_sequence_id "
 
         candidate_limit = max(k, int(ann_candidate_pool)) if ann_candidate_pool is not None else max(k * 20, 200)
+        effective_ef_search = max(int(ann_ef_search), candidate_limit + (0 if include_query else 1))
         sql = (
             "WITH query_embeddings AS ("
             "    SELECT p.id AS query_protein_id, "
@@ -1251,11 +1287,14 @@ class SearchService:
             k,
         )
 
-        with cursor(conn) as cur:
-            if use_ann and ann_ef_search > 0:
-                cur.execute(f"SET hnsw.ef_search = {int(ann_ef_search)};")
-            cur.execute(sql, params)
-            rows = cur.fetchall()
+        with conn.transaction():
+            with cursor(conn) as cur:
+                if use_ann:
+                    cur.execute(f"SET LOCAL hnsw.ef_search = {effective_ef_search};")
+                elif not use_ann:
+                    cur.execute("SET LOCAL enable_indexscan = off;")
+                cur.execute(sql, params)
+                rows = cur.fetchall()
 
         grouped: Dict[str, List[Neighbor]] = {}
         for query_protein_id, neighbor_id, row_layer, distance in rows:
