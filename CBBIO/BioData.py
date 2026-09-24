@@ -1101,8 +1101,8 @@ class BioDataClient:
     ) -> Generator[Any, None, None]:
         """Yield bounded batches of protein IDs, sequence IDs, and stored embedding vectors.
 
-        This iterator is intended for portable exact stores. It includes the protein identifier
-        required to run an exact local search without a PostgreSQL connection after the build.
+        This iterator is intended for portable exact stores. It streams the small protein-ID
+        mapping separately from embeddings, avoiding a database-side join and sort over vectors.
         """
         if batch_size <= 0:
             raise ValueError("batch_size must be positive.")
@@ -1110,28 +1110,56 @@ class BioDataClient:
         from .search.index_manager import ExactVectorBatch
         from .search.utils import as_numpy_matrix
 
-        cursor_name = f"biodata_exact_index_{uuid.uuid4().hex}"
+        protein_cursor_name = f"biodata_protein_ids_{uuid.uuid4().hex}"
+        vector_cursor_name = f"biodata_exact_index_{uuid.uuid4().hex}"
         yielded_rows = 0
         with conn.transaction():
-            with conn.cursor(name=cursor_name, binary=True) as cur:
-                cur.execute(
+            with conn.cursor(name=protein_cursor_name, binary=True) as protein_cursor:
+                protein_cursor.execute(
                     """
-                    SELECT p.id, se.sequence_id, se.embedding
-                    FROM sequence_embeddings se
-                    JOIN protein p ON p.sequence_id = se.sequence_id
-                    WHERE se.embedding_type_id = %s
-                      AND se.layer_index = %s
-                    ORDER BY p.id;
-                    """,
-                    (embedding_type_id, layer_index),
+                    SELECT sequence_id, id
+                    FROM protein
+                    ORDER BY sequence_id;
+                    """
                 )
-                while rows := cur.fetchmany(batch_size):
-                    yielded_rows += len(rows)
-                    yield ExactVectorBatch(
-                        protein_ids=[str(row[0]) for row in rows],
-                        sequence_ids=[int(row[1]) for row in rows],
-                        vectors=as_numpy_matrix([row[2] for row in rows]),
+                with conn.cursor(name=vector_cursor_name, binary=True) as vector_cursor:
+                    vector_cursor.execute(
+                        """
+                        SELECT sequence_id, embedding
+                        FROM sequence_embeddings
+                        WHERE embedding_type_id = %s
+                          AND layer_index = %s
+                        ORDER BY sequence_id;
+                        """,
+                        (embedding_type_id, layer_index),
                     )
+
+                    def _iter_protein_rows() -> Generator[Any, None, None]:
+                        while protein_rows := protein_cursor.fetchmany(batch_size):
+                            yield from protein_rows
+
+                    protein_rows = _iter_protein_rows()
+                    protein_row = next(protein_rows, None)
+                    while vector_rows := vector_cursor.fetchmany(batch_size):
+                        protein_ids: List[str] = []
+                        sequence_ids: List[int] = []
+                        vectors: List[Any] = []
+                        for raw_sequence_id, vector in vector_rows:
+                            sequence_id = int(raw_sequence_id)
+                            while protein_row is not None and int(protein_row[0]) < sequence_id:
+                                protein_row = next(protein_rows, None)
+                            while protein_row is not None and int(protein_row[0]) == sequence_id:
+                                protein_ids.append(str(protein_row[1]))
+                                sequence_ids.append(sequence_id)
+                                vectors.append(vector)
+                                protein_row = next(protein_rows, None)
+                        if protein_ids:
+                            yielded_rows += len(protein_ids)
+                            yield ExactVectorBatch(
+                                protein_ids=protein_ids,
+                                sequence_ids=sequence_ids,
+                                vectors=as_numpy_matrix(vectors),
+                            )
         if yielded_rows == 0:
             raise NotFoundError(
                 f"No protein embeddings found for embedding_type_id={embedding_type_id}, layer_index={layer_index}."

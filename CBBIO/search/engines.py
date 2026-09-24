@@ -208,6 +208,64 @@ def build_cuvs_streaming_search_state(
     )
 
 
+def build_torch_streaming_search_state(
+    *,
+    batches: Iterable[tuple[Sequence[str], Any]],
+    vector_count: int,
+    dimension: int,
+    metric: DistanceMetric,
+    device: str,
+    embedding_type_id: int,
+    layer_index: int,
+) -> GpuSearchState:
+    """Build a Torch GPU state without retaining the full source matrix in host RAM."""
+    if vector_count < 1:
+        raise BioDataError("Cannot build a Torch search state without vectors.")
+    if dimension < 1:
+        raise BioDataError("Cannot build a Torch search state without a positive dimension.")
+
+    torch = import_torch()
+    protein_ids: list[str] = []
+    loaded_rows = 0
+    tensor = torch.empty((vector_count, dimension), dtype=torch.float32, device=device)
+    for batch_ids, batch_vectors in batches:
+        batch_matrix = as_numpy_matrix(batch_vectors)
+        batch_size = int(batch_matrix.shape[0])
+        if batch_size != len(batch_ids):
+            raise BioDataError("Search ids and vectors must contain the same number of rows.")
+        if int(batch_matrix.shape[1]) != dimension:
+            raise BioDataError(
+                f"Search vector dimension changed during streaming load: expected {dimension}, "
+                f"got {int(batch_matrix.shape[1])}."
+            )
+        next_row = loaded_rows + batch_size
+        if next_row > vector_count:
+            raise BioDataError("Search vector count changed during streaming load. Retry the request.")
+        normalized_batch = prepare_index_vectors(batch_matrix, metric=metric)
+        tensor[loaded_rows:next_row] = torch.as_tensor(normalized_batch, dtype=torch.float32, device=device)
+        protein_ids.extend(str(protein_id) for protein_id in batch_ids)
+        loaded_rows = next_row
+
+    if loaded_rows != vector_count:
+        raise BioDataError(
+            f"Search vector count changed during streaming load: expected {vector_count}, got {loaded_rows}. Retry the request."
+        )
+    protein_rows: dict[str, list[int]] = {}
+    for row_index, protein_id in enumerate(protein_ids):
+        protein_rows.setdefault(protein_id, []).append(row_index)
+    return GpuSearchState(
+        backend="torch_gpu",
+        embedding_type_id=int(embedding_type_id),
+        layer_index=int(layer_index),
+        metric=metric,
+        device=device,
+        ann_enabled=False,
+        protein_ids=protein_ids,
+        protein_rows=protein_rows,
+        vectors=tensor,
+    )
+
+
 def build_faiss_streaming_search_state(
     *,
     batches: Iterable[tuple[Sequence[str], Any]],
@@ -503,6 +561,7 @@ def _has_enough_neighbors(
 
 __all__ = [
     "build_search_state",
+    "build_torch_streaming_search_state",
     "neighbors_from_candidate_rows",
     "search_cuvs_state",
     "search_faiss_state",

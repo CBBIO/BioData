@@ -12,6 +12,7 @@ from .engines import (
     build_cuvs_streaming_search_state,
     build_faiss_streaming_search_state,
     build_search_state,
+    build_torch_streaming_search_state,
     neighbors_from_candidate_rows,
     search_cuvs_state,
     search_faiss_state,
@@ -1816,6 +1817,19 @@ class SearchService:
                 metric=metric,
                 device=device,
                 ann_requested=False,
+                embedding_type_id=embedding_type_id,
+                layer_index=layer_index,
+            )
+        if exact_store is not None and backend == "torch_gpu":
+            return build_torch_streaming_search_state(
+                batches=self._client._index_manager.iter_exact_store_batches(
+                    exact_store,
+                    batch_size=_GPU_EXACT_LOAD_BATCH_SIZE,
+                ),
+                vector_count=exact_store.manifest.vector_count,
+                dimension=exact_store.manifest.dimension,
+                metric=metric,
+                device=device,
                 embedding_type_id=embedding_type_id,
                 layer_index=layer_index,
             )

@@ -87,17 +87,18 @@ revision = client.embedding_index_revision(embedding_type_id=3, layer_index=0)
 
 manager.build_ivf_pq(
     key,
-    lambda: client.iter_embedding_index_batches(embedding_type_id=3, layer_index=0),
+    lambda: client.iter_protein_embedding_index_batches(embedding_type_id=3, layer_index=0),
     source_revision=revision,
     spec=IndexBuildSpec(nlist=3476),
 )
 client.configure_persistent_index(manager, database_label="biodata")
 ```
 
-Builds are deliberate maintenance operations, never an implicit side effect of a search. Build
-the portable exact store with `build_exact_store()` when exact FAISS CPU or cuVS GPU searches need
-to run from local disk. Keep artifacts below `.biodata/indexes/` and commit neither them nor
-notebook outputs. Exact methods use the store to apply one shared `float64` distance and
+Builds are deliberate maintenance operations, never an implicit side effect of a search.
+`build_ivf_pq()` reuses a matching exact store and invokes its source callback only when the
+store is absent or deliberately overwritten. It therefore performs at most one full PostgreSQL vector
+transfer. Keep artifacts below `.biodata/indexes/` and commit neither them nor notebook outputs.
+Exact methods use the store to apply one shared `float64` distance and
 `(distance, protein_id)` ordering after candidate retrieval. See [BioData.md](BioData.md) for the
 full workflow and error behavior.
 
