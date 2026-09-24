@@ -2161,6 +2161,32 @@ def test_as_numpy_matrix_prefers_vector_numpy_representation() -> None:
     assert matrix.tolist() == [[1.0, 2.0], [3.0, 4.0]]
 
 
+def test_build_torch_streaming_search_state_loads_exact_store_batches_without_gpu() -> None:
+    torch = pytest.importorskip("torch")
+
+    state = search_engines.build_torch_streaming_search_state(
+        batches=iter([
+            (["P1"], [[1.0, 0.0]]),
+            (["P2"], [[0.0, 1.0]]),
+        ]),
+        vector_count=2,
+        dimension=2,
+        metric="l2",
+        device="cpu",
+        embedding_type_id=3,
+        layer_index=0,
+    )
+
+    assert state.backend == "torch_gpu"
+    assert state.protein_ids == ["P1", "P2"]
+    assert state.protein_rows == {"P1": [0], "P2": [1]}
+    tensor = torch.as_tensor(state.vectors)
+    assert tensor[0].tolist() == pytest.approx([1.0, 0.0])
+    assert tensor[1].tolist() == pytest.approx([0.0, 1.0])
+
+
+
+
 def test_iter_embedding_index_batches_requests_binary_vector_decoding() -> None:
     client, conn = _client_with_fake_conn([
         _Response(all=[(11, [1.0, 2.0]), (12, [3.0, 4.0])]),
