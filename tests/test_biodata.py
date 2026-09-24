@@ -1727,6 +1727,7 @@ def test_find_nearest_neighbors_for_proteins_auto_routes_to_cuvs_when_available(
         )
 
     monkeypatch.setattr(client, "_detect_backend_availability", _detect)
+    monkeypatch.setattr(client._search, "_probe_cuda_memory", lambda **kwargs: None)
     monkeypatch.setattr(
         client,
         "get_protein_embeddings",
@@ -2172,6 +2173,23 @@ def test_iter_embedding_index_batches_requests_binary_vector_decoding() -> None:
     assert conn.cursor_options[-1][1]
 
 
+def test_iter_protein_embedding_index_batches_merges_identifier_and_vector_streams_locally() -> None:
+    client, conn = _client_with_fake_conn([
+        _Response(all=[(10, "UNUSED"), (11, "P2"), (12, "P1")]),
+        _Response(all=[(11, [1.0, 2.0]), (12, [3.0, 4.0])]),
+    ])
+
+    batches = list(client.iter_protein_embedding_index_batches(embedding_type_id=3, layer_index=0, batch_size=1))
+
+    assert [batch.protein_ids for batch in batches] == [["P2"], ["P1"]]
+    assert [batch.sequence_ids for batch in batches] == [[11], [12]]
+    assert [batch.vectors.tolist() for batch in batches] == [[[1.0, 2.0]], [[3.0, 4.0]]]
+    sql_statements = [sql for sql, _ in conn.executed]
+    assert all("JOIN protein" not in sql for sql in sql_statements)
+    assert all("ORDER BY sequence_id" in sql for sql in sql_statements)
+    assert all(binary for _, binary in conn.cursor_options)
+
+
 def test_exact_cuvs_state_loads_protein_vectors_in_streaming_batches(monkeypatch: pytest.MonkeyPatch) -> None:
     client, _ = _client_with_fake_conn([])
     expected_state = object()
@@ -2296,6 +2314,56 @@ def test_exact_cuvs_state_uses_a_configured_portable_exact_store(monkeypatch: py
 
     state = client._search.load_gpu_search_state(
         backend="cuvs_gpu",
+        embedding_type_id=3,
+        layer_index=0,
+        metric="cosine",
+        device="cuda:0",
+        ann_requested=False,
+    )
+
+    assert state is expected_state
+    assert seen["load"] == {
+        "database_label": "test-database",
+        "embedding_type_id": 3,
+        "layer_index": 0,
+        "source_revision": None,
+    }
+    assert seen["inspection"] is inspection
+    assert seen["build"]["device"] == "cuda:0"
+    assert seen["batches"] == [(["P1", "P2"], [[1.0, 0.0], [0.0, 1.0]])]
+
+
+def test_exact_torch_state_uses_a_configured_portable_exact_store(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = bd.BioDataClient()
+    expected_state = object()
+    seen: Dict[str, Any] = {}
+    inspection = types.SimpleNamespace(
+        state="current",
+        manifest=types.SimpleNamespace(vector_count=2, dimension=2),
+    )
+
+    class _ExactStoreManager:
+        def load_exact_store(self, **kwargs: Any) -> Any:
+            seen["load"] = kwargs
+            return inspection
+
+        def iter_exact_store_batches(self, received_inspection: Any, *, batch_size: int) -> Any:
+            seen["inspection"] = received_inspection
+            seen["batch_size"] = batch_size
+            return iter([(["P1", "P2"], [[1.0, 0.0], [0.0, 1.0]])])
+
+    client._index_manager = _ExactStoreManager()
+    client._index_database_label = "test-database"
+
+    def _build_streaming_state(**kwargs: Any) -> object:
+        seen["build"] = kwargs
+        seen["batches"] = list(kwargs["batches"])
+        return expected_state
+
+    monkeypatch.setattr(search_service, "build_torch_streaming_search_state", _build_streaming_state)
+
+    state = client._search.load_gpu_search_state(
+        backend="torch_gpu",
         embedding_type_id=3,
         layer_index=0,
         metric="cosine",

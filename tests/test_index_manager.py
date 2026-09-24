@@ -5,7 +5,14 @@ from pathlib import Path
 
 import pytest
 
-from CBBIO import ExactVectorBatch, IndexBuildSpec, IndexKey, IndexManager, IndexVectorBatch
+from CBBIO import (
+    ExactVectorBatch,
+    IndexBuildSpec,
+    IndexKey,
+    IndexManager,
+    IndexVectorBatch,
+    SearchIndexStaleError,
+)
 
 
 def test_index_manager_builds_persists_and_updates_an_ivf_pq_index(tmp_path: Path) -> None:
@@ -25,10 +32,18 @@ def test_index_manager_builds_persists_and_updates_an_ivf_pq_index(tmp_path: Pat
     )
     sequence_ids = numpy.arange(100, 116, dtype=numpy.int64)
 
-    def _source() -> Iterable[IndexVectorBatch]:
+    def _source() -> Iterable[ExactVectorBatch]:
         return [
-            IndexVectorBatch(sequence_ids=sequence_ids[:8], vectors=vectors[:8]),
-            IndexVectorBatch(sequence_ids=sequence_ids[8:], vectors=vectors[8:]),
+            ExactVectorBatch(
+                sequence_ids=sequence_ids[:8],
+                protein_ids=[f"P{index}" for index in range(8)],
+                vectors=vectors[:8],
+            ),
+            ExactVectorBatch(
+                sequence_ids=sequence_ids[8:],
+                protein_ids=[f"P{index}" for index in range(8, 16)],
+                vectors=vectors[8:],
+            ),
         ]
 
     manifest = manager.build_ivf_pq(
@@ -110,8 +125,14 @@ def test_index_manager_keeps_the_current_generation_when_a_rebuild_fails(
     )
     sequence_ids = numpy.arange(100, 116, dtype=numpy.int64)
 
-    def _source() -> Iterable[IndexVectorBatch]:
-        return [IndexVectorBatch(sequence_ids=sequence_ids, vectors=vectors)]
+    def _source() -> Iterable[ExactVectorBatch]:
+        return [
+            ExactVectorBatch(
+                sequence_ids=sequence_ids,
+                protein_ids=[f"P{index}" for index in range(16)],
+                vectors=vectors,
+            )
+        ]
 
     spec = IndexBuildSpec(nlist=2, subquantizers=2, bits_per_code=1, training_sample_size=16, nprobe=1)
     manager.build_ivf_pq(key, _source, source_revision="16", spec=spec)
@@ -212,6 +233,102 @@ def test_index_manager_builds_and_streams_a_portable_exact_store(tmp_path: Path)
     assert inspection.artifact.vectors_path.stat().st_size == 3 * 2 * 2
     assert [protein_ids for protein_ids, _ in batches] == [["P1", "P2"], ["P3"]]
     assert numpy.vstack([batch_vectors for _, batch_vectors in batches]) == pytest.approx(vectors, abs=0.001)
+
+    reused_manifest = manager.build_exact_store(key, source_revision="3")
+
+    assert reused_manifest == manifest
+
+
+def test_index_manager_builds_ivf_pq_from_a_shared_portable_exact_store(tmp_path: Path) -> None:
+    numpy = pytest.importorskip("numpy")
+    pytest.importorskip("faiss")
+    key = IndexKey(
+        database_label="test-database",
+        embedding_type_id=3,
+        layer_index=0,
+        metric="cosine",
+        dimension=4,
+    )
+    manager = IndexManager(tmp_path)
+    vectors = numpy.asarray(
+        [[1.0, 0.1 * index, 0.2, 0.3] for index in range(16)],
+        dtype=numpy.float32,
+    )
+    source_calls = 0
+
+    def _source() -> Iterable[ExactVectorBatch]:
+        nonlocal source_calls
+        source_calls += 1
+        return [
+            ExactVectorBatch(
+                sequence_ids=numpy.arange(100, 116, dtype=numpy.int64),
+                protein_ids=[f"P{index}" for index in range(16)],
+                vectors=vectors,
+            )
+        ]
+
+    manifest = manager.build_ivf_pq(
+        key,
+        _source,
+        source_revision="16",
+        spec=IndexBuildSpec(nlist=2, subquantizers=2, bits_per_code=1, training_sample_size=16, nprobe=1),
+        batch_size=4,
+    )
+    l2_key = IndexKey(
+        database_label="test-database",
+        embedding_type_id=3,
+        layer_index=0,
+        metric="l2",
+        dimension=4,
+    )
+    manager.build_ivf_pq(
+        l2_key,
+        _source,
+        source_revision="16",
+        spec=IndexBuildSpec(nlist=2, subquantizers=2, bits_per_code=1, training_sample_size=16, nprobe=1),
+        batch_size=4,
+    )
+
+    inspection = manager.load_exact_store(
+        database_label="test-database",
+        embedding_type_id=3,
+        layer_index=0,
+        source_revision="16",
+    )
+
+    assert manifest.vector_count == 16
+    assert inspection.manifest is not None
+    assert source_calls == 1
+
+
+def test_index_manager_raises_stale_error_when_exact_store_revision_differs(tmp_path: Path) -> None:
+    numpy = pytest.importorskip("numpy")
+    key = IndexKey(
+        database_label="test-database",
+        embedding_type_id=3,
+        layer_index=0,
+        metric="cosine",
+        dimension=2,
+    )
+    manager = IndexManager(tmp_path)
+
+    def _source() -> Iterable[ExactVectorBatch]:
+        return [
+            ExactVectorBatch(
+                sequence_ids=numpy.asarray([1], dtype=numpy.int64),
+                protein_ids=["P1"],
+                vectors=numpy.asarray([[1.0, 0.5]], dtype=numpy.float32),
+            )
+        ]
+
+    manager.build_exact_store(key, _source, source_revision="1")
+
+    with pytest.raises(SearchIndexStaleError, match="revision"):
+        manager.build_ivf_pq(
+            key,
+            source_revision="2",
+            spec=IndexBuildSpec(nlist=1, subquantizers=1, bits_per_code=1, training_sample_size=1, nprobe=1),
+        )
 
 
 def test_index_manager_raises_value_error_when_search_nprobe_is_not_positive(tmp_path: Path) -> None:

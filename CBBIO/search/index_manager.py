@@ -420,15 +420,31 @@ class IndexManager:
     def build_exact_store(
         self,
         key: IndexKey,
-        batch_source: Callable[[], Iterable[ExactVectorBatch]],
+        batch_source: Callable[[], Iterable[ExactVectorBatch]] | None = None,
         *,
         source_revision: str | None,
         overwrite: bool = False,
     ) -> ExactStoreManifest:
-        """Build a portable float16 exact store from one bounded-memory source pass.
+        """Build or reuse a portable float16 exact store.
 
-        The stored matrix is metric-independent. FAISS CPU and cuVS GPU normalize vectors for
-        cosine searches as they materialize their backend-specific exact states.
+        A current store for source_revision is returned without invoking batch_source. The stored
+        matrix is metric-independent. FAISS CPU, cuVS GPU, and Torch GPU normalize vectors
+        for cosine searches as they materialize their backend-specific exact states.
+
+        Args:
+            key: Embedding collection to materialize.
+            batch_source: Factory for the initial bounded-memory PostgreSQL transfer. Required
+                only when the store is absent or deliberately overwritten.
+            source_revision: Database watermark stored in the artifact manifest.
+            overwrite: Replace a stale or invalid store only after a successful rebuild.
+
+        Returns:
+            Manifest for the reused or newly materialized exact store.
+
+        Raises:
+            SearchIndexNotFoundError: If the store is unavailable and batch_source is absent.
+            SearchIndexStaleError: If the store revision is stale and overwrite is false.
+            SearchIndexError: If the source batches or store artifact are invalid.
         """
         artifact = self.exact_store_artifact_for(
             database_label=key.database_label,
@@ -439,11 +455,19 @@ class IndexManager:
             database_label=key.database_label,
             embedding_type_id=key.embedding_type_id,
             layer_index=key.layer_index,
+            source_revision=source_revision,
         )
-        if existing.state != "missing" and not overwrite:
-            raise SearchIndexError(
-                f"An exact store already exists for {key.database_label!r}, embedding type "
-                f"{key.embedding_type_id}, layer {key.layer_index}."
+        if existing.state == "current":
+            if existing.manifest is None:
+                raise SearchIndexError("Current exact store has no manifest.")
+            return existing.manifest
+        if existing.state == "stale" and not overwrite:
+            raise SearchIndexStaleError(existing.reason or "Persistent exact store is stale.")
+        if existing.state == "invalid" and not overwrite:
+            raise SearchIndexNotFoundError(existing.reason or "Persistent exact store is unavailable.")
+        if batch_source is None:
+            raise SearchIndexNotFoundError(
+                "Persistent exact store is unavailable. Pass batch_source to materialize it."
             )
 
         np = _import_numpy()
@@ -568,6 +592,38 @@ class IndexManager:
         if offset != manifest.vector_count:
             raise SearchIndexError("Exact-store metadata row count does not match its manifest.")
 
+    def _iter_exact_store_index_batches(
+        self,
+        inspection: ExactStoreInspection,
+        *,
+        batch_size: int = 10_000,
+    ) -> Iterable[IndexVectorBatch]:
+        """Yield sequence IDs and float32 vectors from a current exact store."""
+        if batch_size <= 0:
+            raise ValueError("batch_size must be positive.")
+        if inspection.state != "current" or inspection.manifest is None:
+            raise SearchIndexError("A current exact-store inspection is required to read vectors.")
+        np = _import_numpy()
+        manifest = inspection.manifest
+        matrix = np.memmap(
+            inspection.artifact.vectors_path,
+            dtype=np.float16,
+            mode="r",
+            shape=(manifest.vector_count, manifest.dimension),
+        )
+        with sqlite3.connect(inspection.artifact.metadata_path) as connection:
+            cursor = connection.execute("SELECT sequence_id FROM vector_rows ORDER BY row_index")
+            offset = 0
+            while rows := cursor.fetchmany(batch_size):
+                next_offset = offset + len(rows)
+                yield IndexVectorBatch(
+                    sequence_ids=np.asarray([int(row[0]) for row in rows], dtype=np.int64),
+                    vectors=np.asarray(matrix[offset:next_offset], dtype=np.float32),
+                )
+                offset = next_offset
+        if offset != manifest.vector_count:
+            raise SearchIndexError("Exact-store metadata row count does not match its manifest.")
+
     def _exact_store_candidate_distances(
         self,
         inspection: ExactStoreInspection,
@@ -655,36 +711,76 @@ class IndexManager:
     def build_ivf_pq(
         self,
         key: IndexKey,
-        batch_source: Callable[[], Iterable[IndexVectorBatch]],
+        exact_batch_source: Callable[[], Iterable[ExactVectorBatch]] | None = None,
         *,
         source_revision: str | None,
         spec: IndexBuildSpec,
         overwrite: bool = False,
+        batch_size: int = 10_000,
     ) -> IndexManifest:
-        """Build and persist an IVF-PQ index from two bounded-memory source passes.
+        """Build an IVF-PQ index from a shared local exact store.
+
+        Reuses a current exact store when available. If it is absent, materializes it from
+        exact_batch_source before training and adding IVF-PQ codes from local disk.
 
         Args:
             key: Embedding collection to index.
-            batch_source: Factory that yields a fresh stream for each required pass.
-            source_revision: Database watermark used to detect a stale local index.
+            exact_batch_source: Factory for the initial PostgreSQL materialization. It is called
+                only when the matching exact store is missing or is deliberately overwritten.
+            source_revision: Database watermark used to detect stale local artifacts.
             spec: IVF-PQ parameters.
-            overwrite: Replace an existing index only after a successful build.
+            overwrite: Deliberately replace stale, invalid, or existing artifacts.
+            batch_size: Local exact-store rows to read at a time while building IVF-PQ.
 
         Returns:
-            Provenance manifest for the completed index.
+            Provenance manifest for the completed IVF-PQ index.
 
         Raises:
-            SearchIndexError: If the source is invalid or an index already exists.
+            SearchIndexNotFoundError: If the exact store is absent and no source is provided.
+            SearchIndexStaleError: If the exact store revision is stale and overwrite is false.
+            SearchIndexError: If an artifact is invalid or the collection cannot form IVF-PQ.
             DriverDependencyError: If FAISS or NumPy is unavailable.
         """
-        artifact = self.artifact_for(key)
-        existing = self.inspect(key)
-        if existing.state != "missing" and not overwrite:
+        existing_index = self.inspect(key)
+        if existing_index.state != "missing" and not overwrite:
             raise SearchIndexError(
                 f"An index already exists for {key.database_label!r}, embedding type "
                 f"{key.embedding_type_id}, layer {key.layer_index}, metric {key.metric!r}."
             )
 
+        self.build_exact_store(
+            key,
+            exact_batch_source,
+            source_revision=source_revision,
+            overwrite=overwrite,
+        )
+        inspection = self.load_exact_store(
+            database_label=key.database_label,
+            embedding_type_id=key.embedding_type_id,
+            layer_index=key.layer_index,
+            source_revision=source_revision,
+        )
+        if inspection.manifest is None or inspection.manifest.dimension != key.dimension:
+            raise SearchIndexError("Exact-store dimension does not match the requested index key.")
+        return self._build_ivf_pq_from_batches(
+            key,
+            lambda: self._iter_exact_store_index_batches(inspection, batch_size=batch_size),
+            source_revision=source_revision,
+            spec=spec,
+            overwrite=overwrite,
+        )
+
+    def _build_ivf_pq_from_batches(
+        self,
+        key: IndexKey,
+        batch_source: Callable[[], Iterable[IndexVectorBatch]],
+        *,
+        source_revision: str | None,
+        spec: IndexBuildSpec,
+        overwrite: bool,
+    ) -> IndexManifest:
+        """Build IVF-PQ from a validated, reusable local vector stream."""
+        artifact = self.artifact_for(key)
         np = _import_numpy()
         if key.dimension % spec.subquantizers != 0:
             raise SearchIndexError(
