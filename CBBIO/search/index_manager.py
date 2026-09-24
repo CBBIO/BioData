@@ -647,19 +647,22 @@ class IndexManager:
             raise SearchIndexError(
                 f"Exact-store query dimension must be {manifest.dimension}, got {int(query.shape[0])}."
             )
-        rows_by_protein_id: dict[str, int] = {}
+        protein_ids_by_row_index: list[str] = []
+        row_indices: list[int] = []
         with sqlite3.connect(inspection.artifact.metadata_path) as connection:
             for start in range(0, len(candidate_ids), 900):
                 identifiers = candidate_ids[start : start + 900]
                 placeholders = ", ".join("?" for _ in identifiers)
                 rows = connection.execute(
                     "SELECT protein_id, row_index FROM vector_rows "
-                    f"WHERE protein_id IN ({placeholders})",
+                    f"WHERE protein_id IN ({placeholders}) "
+                    "ORDER BY protein_id, row_index",
                     identifiers,
                 )
-                rows_by_protein_id.update({str(protein_id): int(row_index) for protein_id, row_index in rows})
-        ordered_ids = [protein_id for protein_id in candidate_ids if protein_id in rows_by_protein_id]
-        if not ordered_ids:
+                for protein_id, row_index in rows:
+                    protein_ids_by_row_index.append(str(protein_id))
+                    row_indices.append(int(row_index))
+        if not row_indices:
             return {}
         matrix = np.memmap(
             inspection.artifact.vectors_path,
@@ -667,8 +670,7 @@ class IndexManager:
             mode="r",
             shape=(manifest.vector_count, manifest.dimension),
         )
-        row_indices = np.asarray([rows_by_protein_id[protein_id] for protein_id in ordered_ids], dtype=np.int64)
-        vectors = np.asarray(matrix[row_indices], dtype=np.float64)
+        vectors = np.asarray(matrix[np.asarray(row_indices, dtype=np.int64)], dtype=np.float64)
         if metric == "cosine":
             query_norm = float(np.linalg.norm(query))
             vector_norms = np.linalg.norm(vectors, axis=1)
@@ -676,7 +678,7 @@ class IndexManager:
             similarities = np.divide(
                 vectors @ query,
                 denominators,
-                out=np.zeros(len(ordered_ids), dtype=np.float64),
+                out=np.zeros(len(row_indices), dtype=np.float64),
                 where=denominators != 0.0,
             )
             distances = np.clip(1.0 - similarities, 0.0, 2.0)
@@ -684,9 +686,16 @@ class IndexManager:
             distances = np.linalg.norm(vectors - query, axis=1)
         else:
             distances = -(vectors @ query)
+        minimum_distances: dict[str, float] = {}
+        for protein_id, distance in zip(protein_ids_by_row_index, distances, strict=True):
+            current = minimum_distances.get(protein_id)
+            value = float(distance)
+            if current is None or value < current:
+                minimum_distances[protein_id] = value
         return {
-            protein_id: float(distance)
-            for protein_id, distance in zip(ordered_ids, distances, strict=True)
+            protein_id: minimum_distances[protein_id]
+            for protein_id in candidate_ids
+            if protein_id in minimum_distances
         }
 
     def inspect(self, key: IndexKey, *, source_revision: str | None = None) -> IndexInspection:

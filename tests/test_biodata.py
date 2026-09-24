@@ -640,7 +640,9 @@ def test_find_nearest_neighbors_for_proteins_groups_rows_and_respects_include_qu
     assert "<=>" in sql
     assert "halfvec(3)" in sql
     assert "query_sequence_id" in sql
+    assert "ORDER BY (se2.embedding::halfvec(3)) <=> (q.query_embedding::halfvec(3))" in sql
     assert "ORDER BY c.distance, p2.id" in sql
+    assert "DISTINCT ON (p2.id)" not in sql
     assert params == (["Q1", "Q2"], 3, 0, 3, 0, 66, 66)
 
 
@@ -788,7 +790,7 @@ def test_find_nearest_neighbors_for_proteins_ann_reranks_candidate_pool() -> Non
     assert "SET hnsw.ef_search = 300;" in conn.executed[2][0]
     sql, params = conn.executed[3]
     assert "LIMIT %s" in sql
-    assert params == (["Q1"], 3, 0, 3, 0, 500, 74)
+    assert params == (["Q1"], 3, 0, 3, 0, 500, 10)
 
 
 def test_warn_if_missing_ann_index_no_warning_when_index_exists() -> None:
@@ -2091,6 +2093,32 @@ def test_search_faiss_state_normalizes_cosine_queries() -> None:
     assert [neighbor.protein_id for neighbor in grouped["Q1"]] == ["A", "B"]
     assert [neighbor.distance for neighbor in grouped["Q1"]] == pytest.approx([0.0, 0.2])
 
+
+
+def test_search_faiss_state_returns_distinct_proteins_when_embeddings_repeat() -> None:
+    np = pytest.importorskip("numpy")
+    pytest.importorskip("faiss")
+    state = search_engines.build_search_state(
+        backend="faiss_cpu",
+        item_ids=["A", "A", "B", "C"],
+        vectors=np.asarray(
+            [[1.0, 0.0], [0.99, 0.01], [0.8, 0.2], [0.6, 0.4]],
+            dtype=np.float32,
+        ),
+        metric="cosine",
+        device="cpu",
+        ann_requested=False,
+    )
+
+    grouped = search_engines.search_faiss_state(
+        state,
+        query_ids=["Q1"],
+        query_vectors=np.asarray([[1.0, 0.0]], dtype=np.float32),
+        k=3,
+        per_query_excluded={"Q1": set()},
+    )
+
+    assert [neighbor.protein_id for neighbor in grouped["Q1"]] == ["A", "B", "C"]
 
 def test_normalize_distance_bounds_cosine_and_l2_distances() -> None:
     assert search_utils.normalize_distance(

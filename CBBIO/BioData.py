@@ -1279,17 +1279,24 @@ class BioDataClient:
                    n.distance
             FROM query_embeddings q
             LEFT JOIN LATERAL (
-                SELECT p.id AS protein_id,
-                       se.layer_index,
-                       se.embedding {operator} q.query_embedding AS distance
-                FROM unnest(q.candidate_sequence_ids) AS candidate(sequence_id)
-                JOIN sequence_embeddings se ON se.sequence_id = candidate.sequence_id
-                JOIN sequence s ON s.id = se.sequence_id
-                JOIN protein p ON p.sequence_id = s.id
-                WHERE se.embedding_type_id = %s
-                  AND se.layer_index = %s
-                  AND NOT (p.id = ANY(q.excluded_protein_ids))
-                ORDER BY distance, p.id
+                SELECT deduplicated.protein_id,
+                       deduplicated.layer_index,
+                       deduplicated.distance
+                FROM (
+                    SELECT DISTINCT ON (p.id)
+                           p.id AS protein_id,
+                           se.layer_index,
+                           se.embedding {operator} q.query_embedding AS distance
+                    FROM unnest(q.candidate_sequence_ids) AS candidate(sequence_id)
+                    JOIN sequence_embeddings se ON se.sequence_id = candidate.sequence_id
+                    JOIN sequence s ON s.id = se.sequence_id
+                    JOIN protein p ON p.sequence_id = s.id
+                    WHERE se.embedding_type_id = %s
+                      AND se.layer_index = %s
+                      AND NOT (p.id = ANY(q.excluded_protein_ids))
+                    ORDER BY p.id, se.embedding {operator} q.query_embedding
+                ) deduplicated
+                ORDER BY deduplicated.distance, deduplicated.protein_id
                 LIMIT %s
             ) n ON TRUE
             ORDER BY q.query_id, n.distance, n.protein_id;

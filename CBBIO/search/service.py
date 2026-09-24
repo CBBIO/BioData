@@ -44,22 +44,38 @@ _CANONICAL_TIE_OVERFETCH = 64
 _GPU_EXACT_LOAD_BATCH_SIZE = 10_000
 
 
+def _retrieval_count(k: int, *, ann_used: bool) -> int:
+    """Return enough vector rows to retain distinct protein IDs."""
+    if ann_used:
+        return k
+    return max(k + _CANONICAL_TIE_OVERFETCH, k * 4)
+
+
 def _canonicalize_neighbor_groups(
     grouped: Mapping[str, Sequence[Neighbor]],
     *,
     k: int,
 ) -> Dict[str, List[Neighbor]]:
     """Apply the cross-backend neighbor ordering contract."""
-    return {
-        str(query_id): sorted(
+    canonical_groups: Dict[str, List[Neighbor]] = {}
+    for query_id, neighbors in grouped.items():
+        seen_protein_ids: set[str] = set()
+        canonical_neighbors: list[Neighbor] = []
+        for neighbor in sorted(
             neighbors,
             key=lambda neighbor: (
                 round(float(neighbor.distance), _CANONICAL_TIE_DECIMALS),
                 neighbor.protein_id,
             ),
-        )[:k]
-        for query_id, neighbors in grouped.items()
-    }
+        ):
+            if neighbor.protein_id in seen_protein_ids:
+                continue
+            seen_protein_ids.add(neighbor.protein_id)
+            canonical_neighbors.append(neighbor)
+            if len(canonical_neighbors) >= k:
+                break
+        canonical_groups[str(query_id)] = canonical_neighbors
+    return canonical_groups
 
 
 class SearchService:
@@ -187,18 +203,17 @@ class SearchService:
                     metric=metric,
                 ),
             )
-            canonical_groups[query_id_str] = sorted(
-                (
-                    Neighbor(
-                        protein_id=neighbor.protein_id,
-                        layer_index=neighbor.layer_index,
-                        distance=distances[neighbor.protein_id],
-                    )
-                    for neighbor in neighbors
-                    if neighbor.protein_id in distances
-                ),
-                key=lambda neighbor: (neighbor.distance, neighbor.protein_id),
-            )[:k]
+            canonical_groups[query_id_str] = [
+                Neighbor(
+                    protein_id=protein_id,
+                    layer_index=layer_index,
+                    distance=distance,
+                )
+                for protein_id, distance in sorted(
+                    distances.items(),
+                    key=lambda item: (item[1], item[0]),
+                )[:k]
+            ]
         return canonical_groups
 
     def _persistent_index_revision_if_current(
@@ -514,7 +529,7 @@ class SearchService:
             batch_size=1,
             device=device,
         )
-        retrieval_k = effective_k + _CANONICAL_TIE_OVERFETCH if not resolved.ann_used else effective_k
+        retrieval_k = _retrieval_count(effective_k, ann_used=resolved.ann_used)
         excluded_ids = [str(value) for value in (exclude_protein_ids or [])]
 
         if resolved.backend == "faiss_persistent":
@@ -658,7 +673,7 @@ class SearchService:
             batch_size=len(query_items),
             device=device,
         )
-        retrieval_k = effective_k + _CANONICAL_TIE_OVERFETCH if not resolved.ann_used else effective_k
+        retrieval_k = _retrieval_count(effective_k, ann_used=resolved.ann_used)
 
         query_ids = [query_id for query_id, _ in query_items]
         query_vectors = [embedding for _, embedding in query_items]
@@ -754,7 +769,6 @@ class SearchService:
         effective_k = self._client.default_k if k is None else int(k)
         if effective_k < 1:
             raise BioDataError("k must be >= 1")
-        retrieval_k = effective_k + _CANONICAL_TIE_OVERFETCH
         requested_backend = cast(SearchBackend, backend or self._client.default_backend)
         persistent_query_map: Mapping[str, Any] | None = None
         persistent_revision: str | None = None
@@ -792,6 +806,7 @@ class SearchService:
             batch_size=len(ids),
             device=device,
         )
+        retrieval_k = _retrieval_count(effective_k, ann_used=resolved.ann_used)
 
         excluded_protein_ids_by_query: Dict[str, Set[str]] = {}
         excluded_sequence_ids_by_query: Dict[str, Set[int]] = {}
@@ -972,14 +987,21 @@ class SearchService:
                 f"            ORDER BY (se.embedding::halfvec({dim})) {operator} q.query_embedding "
                 "            LIMIT %s"
                 "        ) "
-                "        SELECT p.id AS protein_id, "
-                "               c.layer_index, "
-                f"               c.embedding {operator} q.query_embedding AS distance "
-                "        FROM ann_candidates c "
-                "        JOIN protein p ON p.sequence_id = c.sequence_id "
-                "        WHERE TRUE"
+                "        SELECT deduplicated.protein_id, "
+                "               deduplicated.layer_index, "
+                "               deduplicated.distance "
+                "        FROM ("
+                "            SELECT DISTINCT ON (p.id) "
+                "                   p.id AS protein_id, "
+                "                   c.layer_index, "
+                f"                   c.embedding {operator} q.query_embedding AS distance "
+                "            FROM ann_candidates c "
+                "            JOIN protein p ON p.sequence_id = c.sequence_id "
+                "            WHERE TRUE"
                 f"{exclusion_clause} "
-                "        ORDER BY distance "
+                f"            ORDER BY p.id, c.embedding {operator} q.query_embedding "
+                "        ) deduplicated "
+                "        ORDER BY deduplicated.distance, deduplicated.protein_id "
                 "        LIMIT %s"
                 "    ) n ON TRUE"
                 ") "
@@ -1002,16 +1024,23 @@ class SearchService:
                 "       n.distance "
                 "FROM query_embeddings q "
                 "LEFT JOIN LATERAL ("
-                "    SELECT p.id AS protein_id, "
-                "           se.layer_index, "
-                f"           se.embedding {operator} q.query_embedding AS distance "
-                "    FROM sequence_embeddings se "
-                "    JOIN sequence s ON se.sequence_id = s.id "
-                "    JOIN protein p ON p.sequence_id = s.id "
-                "    WHERE se.embedding_type_id = %s "
-                "      AND se.layer_index = %s"
+                "    SELECT deduplicated.protein_id, "
+                "           deduplicated.layer_index, "
+                "           deduplicated.distance "
+                "    FROM ("
+                "        SELECT DISTINCT ON (p.id) "
+                "               p.id AS protein_id, "
+                "               se.layer_index, "
+                f"               se.embedding {operator} q.query_embedding AS distance "
+                "        FROM sequence_embeddings se "
+                "        JOIN sequence s ON se.sequence_id = s.id "
+                "        JOIN protein p ON p.sequence_id = s.id "
+                "        WHERE se.embedding_type_id = %s "
+                "          AND se.layer_index = %s"
                 f"{exclusion_clause} "
-                f"    ORDER BY se.embedding {operator} q.query_embedding "
+                f"        ORDER BY p.id, se.embedding {operator} q.query_embedding "
+                "    ) deduplicated "
+                "    ORDER BY deduplicated.distance, deduplicated.protein_id "
                 "    LIMIT %s"
                 ") n ON TRUE "
                 "ORDER BY q.query_id, n.distance;"

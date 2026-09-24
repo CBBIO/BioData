@@ -368,3 +368,46 @@ def test_index_manager_raises_value_error_when_search_nprobe_is_not_positive(tmp
         IndexManager(tmp_path, search_nprobe=0)
     with pytest.raises(ValueError, match="training_sample_seed"):
         IndexBuildSpec(nlist=1, training_sample_seed=-1)
+
+
+def test_exact_store_candidate_distances_uses_the_nearest_copy_per_protein(tmp_path: Path) -> None:
+    numpy = pytest.importorskip("numpy")
+    key = IndexKey(
+        database_label="test-database",
+        embedding_type_id=3,
+        layer_index=0,
+        metric="cosine",
+        dimension=2,
+    )
+    manager = IndexManager(tmp_path)
+    vectors = numpy.asarray(
+        [[1.0, 0.0], [0.0, 1.0], [0.5, 0.5]],
+        dtype=numpy.float32,
+    )
+
+    def _source() -> Iterable[ExactVectorBatch]:
+        return [
+            ExactVectorBatch(
+                sequence_ids=[11, 12, 13],
+                protein_ids=["P1", "P1", "P2"],
+                vectors=vectors,
+            )
+        ]
+
+    manager.build_exact_store(key, _source, source_revision="3")
+    inspection = manager.load_exact_store(
+        database_label="test-database",
+        embedding_type_id=3,
+        layer_index=0,
+        source_revision="3",
+    )
+
+    distances = manager._exact_store_candidate_distances(
+        inspection,
+        vectors[0],
+        ["P1", "P2"],
+        metric="cosine",
+    )
+
+    assert distances["P1"] == pytest.approx(0.0)
+    assert distances["P2"] > distances["P1"]

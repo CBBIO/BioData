@@ -477,19 +477,23 @@ def search_torch_state(
         for excluded_id in excluded:
             for candidate_index in state.protein_rows.get(excluded_id, []):
                 scores[candidate_index] = float("-inf") if sort_desc else float("inf")
-        top_k = min(k, scores.shape[0])
-        if top_k < 1:
+        requested = min(k, scores.shape[0])
+        if requested < 1:
             grouped[query_id_str] = []
             continue
-        values, indices = torch.topk(scores, k=top_k, largest=sort_desc)
-        grouped[query_id_str] = neighbors_from_candidate_rows(
-            state,
-            candidate_indices=tensor_to_list(indices),
-            candidate_distances=tensor_to_list(values),
-            k=k,
-            excluded_protein_ids=excluded,
-            l2_squared=False,
-        )
+        while True:
+            values, indices = torch.topk(scores, k=requested, largest=sort_desc)
+            grouped[query_id_str] = neighbors_from_candidate_rows(
+                state,
+                candidate_indices=tensor_to_list(indices),
+                candidate_distances=tensor_to_list(values),
+                k=requested,
+                excluded_protein_ids=excluded,
+                l2_squared=False,
+            )
+            if len(grouped[query_id_str]) >= k or requested >= int(scores.shape[0]):
+                break
+            requested = min(int(scores.shape[0]), max(requested * 2, requested + 8))
     return grouped
 
 
@@ -505,13 +509,15 @@ def neighbors_from_candidate_rows(
 ) -> list[Neighbor]:
     """Convert backend candidate rows into neighbor records."""
     neighbors: list[Neighbor] = []
+    seen_protein_ids: set[str] = set()
     for raw_index, raw_distance in zip(candidate_indices, candidate_distances):
         candidate_index = int(raw_index)
         if candidate_index < 0 or candidate_index >= len(state.protein_ids):
             continue
         protein_id = state.protein_ids[candidate_index]
-        if protein_id in excluded_protein_ids:
+        if protein_id in excluded_protein_ids or protein_id in seen_protein_ids:
             continue
+        seen_protein_ids.add(protein_id)
         neighbors.append(
             Neighbor(
                 protein_id=protein_id,

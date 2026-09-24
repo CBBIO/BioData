@@ -219,10 +219,13 @@ By default, a stored-protein search excludes the query sequence, including any
 other protein identifiers that point to that same sequence. Pass
 `include_query=True` to retain those zero-distance aliases.
 
+Every search returns at most one neighbor per `protein_id`. When the collection
+contains several sequences for one protein, BioData keeps the smallest distance.
+
 Stored-protein searches use the same deterministic ordering for pgvector, FAISS,
 and cuVS. Distances are quantized to five decimal places for ordering and then
-sorted by `protein_id`. Each backend retrieves 64 additional neighbors before
-this final ordering, so ties at the requested cutoff are not dropped.
+sorted by `protein_id`. Exact backends over-fetch vector rows before this final
+deduplication, so ties and repeated protein IDs at the requested cutoff are not dropped.
 
 ### Approximate batch query
 
