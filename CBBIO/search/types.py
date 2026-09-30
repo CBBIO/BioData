@@ -14,6 +14,7 @@ ResolvedSearchBackend = (
     | Literal["faiss_gpu"]
     | Literal["faiss_persistent"]
     | Literal["cuvs_gpu"]
+    | Literal["cuvs_streaming"]
     | Literal["torch_gpu"]
 )
 

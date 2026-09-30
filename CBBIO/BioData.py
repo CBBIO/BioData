@@ -203,7 +203,7 @@ def _config_defaults(config: Mapping[str, Any]) -> ConfigDict:
     if metric not in {"l2", "cosine", "inner_product"}:
         raise BioDataError(f"Invalid search.default_metric: {metric!r}")
     backend = str(search_config.get("default_backend", DEFAULT_SEARCH_BACKEND)).strip().lower()
-    if backend not in {"auto", "gpu", "pgvector", "faiss_cpu", "faiss_gpu", "faiss_persistent", "cuvs_gpu", "torch_gpu"}:
+    if backend not in {"auto", "gpu", "pgvector", "faiss_cpu", "faiss_gpu", "faiss_persistent", "cuvs_gpu", "cuvs_streaming", "torch_gpu"}:
         raise BioDataError(f"Invalid search.default_backend: {backend!r}")
 
     return {
@@ -295,6 +295,15 @@ class BioDataClient:
     def last_search_diagnostics(self) -> Dict[str, Any]:
         """Return diagnostics recorded by the most recent neighbor search."""
         return dict(self._last_search_diagnostics)
+
+    def clear_search_cache(self) -> None:
+        """Release resident local search states and cached persistent indexes.
+
+        This does not delete portable exact-store or IVF-PQ files. It only releases
+        in-process objects so a subsequent exact local search performs a cold load.
+        """
+        self._search_state_cache.clear()
+        self._persistent_index_cache.clear()
 
     def configure_persistent_index(self, manager: IndexManager, *, database_label: str) -> None:
         """Configure prebuilt local IVF-PQ indexes for ``faiss_persistent`` searches.
@@ -1323,8 +1332,15 @@ class BioDataClient:
         ann_candidate_pool: int | None = None,
         backend: SearchBackend | None = None,
         device: str | None = None,
+        cuvs_streaming_block_size: int | None = None,
+        cuvs_streaming_query_batch_size: int | None = None,
+        profile_cuvs_streaming: bool = False,
     ) -> List[Neighbor]:
-        """Find nearest proteins using the configured search backend."""
+        """Find nearest proteins using the configured search backend.
+
+        Set ``profile_cuvs_streaming=True`` to record detailed local timings for
+        a ``cuvs_streaming`` request in :attr:`last_search_diagnostics`.
+        """
         return self._search.find_nearest_neighbors(
             query_embedding,
             embedding_type_id,
@@ -1337,6 +1353,9 @@ class BioDataClient:
             ann_candidate_pool=ann_candidate_pool,
             backend=backend,
             device=device,
+            cuvs_streaming_block_size=cuvs_streaming_block_size,
+            cuvs_streaming_query_batch_size=cuvs_streaming_query_batch_size,
+            profile_cuvs_streaming=profile_cuvs_streaming,
         )
 
     def find_nearest_neighbors_for_embeddings(
@@ -1353,6 +1372,9 @@ class BioDataClient:
         ann_candidate_pool: int | None = None,
         backend: SearchBackend | None = None,
         device: str | None = None,
+        cuvs_streaming_block_size: int | None = None,
+        cuvs_streaming_query_batch_size: int | None = None,
+        profile_cuvs_streaming: bool = False,
     ) -> Dict[str, List[Neighbor]]:
         """Find nearest neighbors for multiple external query embeddings.
 
@@ -1368,6 +1390,9 @@ class BioDataClient:
             ann_candidate_pool: Candidate count before exact reranking for pgvector ANN or ``faiss_persistent``.
             backend: Search backend to use.
             device: Optional accelerator device for GPU backends.
+            cuvs_streaming_block_size: Exact cuVS block size, or ``None`` to size from free VRAM.
+            cuvs_streaming_query_batch_size: Query count per exact cuVS streaming pass, or ``None`` for auto.
+            profile_cuvs_streaming: Whether to record per-stage cuVS streaming timings in ``last_search_diagnostics``.
 
         Returns:
             Mapping from each query id to its nearest neighbors.
@@ -1384,6 +1409,9 @@ class BioDataClient:
             ann_candidate_pool=ann_candidate_pool,
             backend=backend,
             device=device,
+            cuvs_streaming_block_size=cuvs_streaming_block_size,
+            cuvs_streaming_query_batch_size=cuvs_streaming_query_batch_size,
+            profile_cuvs_streaming=profile_cuvs_streaming,
         )
 
     def find_nearest_neighbors_for_proteins(
@@ -1400,6 +1428,9 @@ class BioDataClient:
         ann_candidate_pool: int | None = None,
         backend: SearchBackend | None = None,
         device: str | None = None,
+        cuvs_streaming_block_size: int | None = None,
+        cuvs_streaming_query_batch_size: int | None = None,
+        profile_cuvs_streaming: bool = False,
     ) -> Dict[str, List[Neighbor]]:
         """Find nearest neighbors for many stored proteins.
 
@@ -1415,6 +1446,9 @@ class BioDataClient:
             ann_candidate_pool: Candidate count before exact reranking for pgvector ANN or ``faiss_persistent``.
             backend: Search backend to use.
             device: Optional accelerator device for GPU backends.
+            cuvs_streaming_block_size: Exact cuVS block size, or ``None`` to size from free VRAM.
+            cuvs_streaming_query_batch_size: Query count per exact cuVS streaming pass, or ``None`` for auto.
+            profile_cuvs_streaming: Whether to record per-stage cuVS streaming timings in ``last_search_diagnostics``.
 
         Returns:
             Mapping from each protein ID to its nearest neighbors.
@@ -1431,6 +1465,9 @@ class BioDataClient:
             ann_candidate_pool=ann_candidate_pool,
             backend=backend,
             device=device,
+            cuvs_streaming_block_size=cuvs_streaming_block_size,
+            cuvs_streaming_query_batch_size=cuvs_streaming_query_batch_size,
+            profile_cuvs_streaming=profile_cuvs_streaming,
         )
 
     def _find_nearest_neighbors_pgvector(
@@ -1839,6 +1876,9 @@ class BioDataClient:
         metric: DistanceMetric,
         k: int,
         query_count: int,
+        cuvs_streaming_block_size: int | None = None,
+        cuvs_streaming_query_batch_size: int | None = None,
+        cuvs_streaming_profile: Mapping[str, int | float] | None = None,
     ) -> None:
         self._search.record_search_diagnostics(
             resolved,
@@ -1848,6 +1888,9 @@ class BioDataClient:
             metric=metric,
             k=k,
             query_count=query_count,
+            cuvs_streaming_block_size=cuvs_streaming_block_size,
+            cuvs_streaming_query_batch_size=cuvs_streaming_query_batch_size,
+            cuvs_streaming_profile=cuvs_streaming_profile,
         )
 
     def _warn_if_search_backend_degraded(

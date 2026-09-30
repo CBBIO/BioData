@@ -324,6 +324,33 @@ class ExactStoreInspection:
     reason: str | None = None
 
 
+@dataclass
+class ExactStoreReadProfile:
+    """Accumulate timing details while reading batches from an exact store."""
+
+    sqlite_open_seconds: float = 0.0
+    sqlite_query_seconds: float = 0.0
+    sqlite_fetch_seconds: float = 0.0
+    protein_id_decode_seconds: float = 0.0
+    vector_map_seconds: float = 0.0
+    vector_read_cast_seconds: float = 0.0
+    batch_count: int = 0
+    vector_count: int = 0
+
+    def diagnostics(self) -> dict[str, int | float]:
+        """Return stable diagnostic names for the completed read."""
+        return {
+            "exact_store_sqlite_open_seconds": self.sqlite_open_seconds,
+            "exact_store_sqlite_query_seconds": self.sqlite_query_seconds,
+            "exact_store_sqlite_fetch_seconds": self.sqlite_fetch_seconds,
+            "exact_store_protein_id_decode_seconds": self.protein_id_decode_seconds,
+            "exact_store_vector_map_seconds": self.vector_map_seconds,
+            "exact_store_vector_read_cast_seconds": self.vector_read_cast_seconds,
+            "exact_store_batch_count": self.batch_count,
+            "exact_store_vector_count": self.vector_count,
+        }
+
+
 class IndexManager:
     """Build, inspect, and query persistent IVF-PQ indexes and exact vector stores."""
 
@@ -516,6 +543,7 @@ class IndexManager:
                 vector_write_seconds += time.perf_counter() - vector_write_started_at
                 metadata_write_started_at = time.perf_counter()
                 connection.execute("CREATE INDEX vector_rows_protein_id ON vector_rows (protein_id)")
+                connection.execute("CREATE INDEX vector_rows_sequence_id ON vector_rows (sequence_id)")
                 connection.commit()
                 metadata_write_seconds += time.perf_counter() - metadata_write_started_at
             if vector_count < 1:
@@ -570,13 +598,117 @@ class IndexManager:
         inspection: ExactStoreInspection,
         *,
         batch_size: int = 10_000,
+        vector_dtype: Literal["float16", "float32"] = "float32",
+        profile: ExactStoreReadProfile | None = None,
     ) -> Iterable[tuple[list[str], Any]]:
-        """Yield float32 vector batches and protein IDs from a loaded exact store."""
+        """Yield vector batches and protein IDs from a loaded exact store.
+
+        Args:
+            inspection: Current exact-store artifact to read.
+            batch_size: Maximum vectors yielded together.
+            vector_dtype: Requested NumPy dtype for each yielded vector matrix.
+            profile: Optional accumulator for SQLite and vector-read timings.
+        """
         if batch_size <= 0:
             raise ValueError("batch_size must be positive.")
+        if vector_dtype not in {"float16", "float32"}:
+            raise ValueError("vector_dtype must be 'float16' or 'float32'.")
         if inspection.state != "current" or inspection.manifest is None:
             raise SearchIndexError("A current exact-store inspection is required to read vectors.")
         np = _import_numpy()
+        manifest = inspection.manifest
+        started_at = time.perf_counter()
+        matrix = np.memmap(
+            inspection.artifact.vectors_path,
+            dtype=np.float16,
+            mode="r",
+            shape=(manifest.vector_count, manifest.dimension),
+        )
+        if profile is not None:
+            profile.vector_map_seconds += time.perf_counter() - started_at
+        started_at = time.perf_counter()
+        with sqlite3.connect(inspection.artifact.metadata_path) as connection:
+            if profile is not None:
+                profile.sqlite_open_seconds += time.perf_counter() - started_at
+            started_at = time.perf_counter()
+            cursor = connection.execute("SELECT protein_id FROM vector_rows ORDER BY row_index")
+            if profile is not None:
+                profile.sqlite_query_seconds += time.perf_counter() - started_at
+            offset = 0
+            while True:
+                started_at = time.perf_counter()
+                rows = cursor.fetchmany(batch_size)
+                if profile is not None:
+                    profile.sqlite_fetch_seconds += time.perf_counter() - started_at
+                if not rows:
+                    break
+                next_offset = offset + len(rows)
+                started_at = time.perf_counter()
+                protein_ids = [str(row[0]) for row in rows]
+                if profile is not None:
+                    profile.protein_id_decode_seconds += time.perf_counter() - started_at
+                started_at = time.perf_counter()
+                dtype = np.float16 if vector_dtype == "float16" else np.float32
+                vectors = np.asarray(matrix[offset:next_offset], dtype=dtype)
+                if profile is not None:
+                    profile.vector_read_cast_seconds += time.perf_counter() - started_at
+                    profile.batch_count += 1
+                    profile.vector_count += len(protein_ids)
+                yield protein_ids, vectors
+                offset = next_offset
+        if offset != manifest.vector_count:
+            raise SearchIndexError("Exact-store metadata row count does not match its manifest.")
+
+    def get_exact_store_query_context(
+        self,
+        inspection: ExactStoreInspection,
+        protein_ids: Iterable[str],
+    ) -> tuple[dict[str, Any], dict[str, set[str]], dict[str, set[int]]]:
+        """Load stored query vectors and same-sequence exclusions without a database.
+
+        Returns:
+            Query vectors keyed by protein ID, protein aliases keyed by query ID,
+            and sequence IDs keyed by query ID.
+        """
+        if inspection.state != "current" or inspection.manifest is None:
+            raise SearchIndexError("A current exact-store inspection is required to read query vectors.")
+        requested_ids = list(dict.fromkeys(str(protein_id) for protein_id in protein_ids))
+        query_vectors: dict[str, Any] = {}
+        aliases_by_query: dict[str, set[str]] = {protein_id: {protein_id} for protein_id in requested_ids}
+        sequence_ids_by_query: dict[str, set[int]] = {protein_id: set() for protein_id in requested_ids}
+        if not requested_ids:
+            return query_vectors, aliases_by_query, sequence_ids_by_query
+
+        np = _import_numpy()
+        row_indices_by_protein: dict[str, int] = {}
+        sequence_ids_by_protein: dict[str, int] = {}
+        with sqlite3.connect(inspection.artifact.metadata_path) as connection:
+            for start in range(0, len(requested_ids), 900):
+                identifiers = requested_ids[start : start + 900]
+                placeholders = ", ".join("?" for _ in identifiers)
+                rows = connection.execute(
+                    "SELECT protein_id, sequence_id, row_index FROM vector_rows "
+                    f"WHERE protein_id IN ({placeholders})",
+                    identifiers,
+                )
+                for protein_id, sequence_id, row_index in rows:
+                    protein_id_str = str(protein_id)
+                    row_indices_by_protein.setdefault(protein_id_str, int(row_index))
+                    sequence_ids_by_protein.setdefault(protein_id_str, int(sequence_id))
+
+            sequence_ids = sorted(set(sequence_ids_by_protein.values()))
+            aliases_by_sequence_id: dict[int, set[str]] = {sequence_id: set() for sequence_id in sequence_ids}
+            for start in range(0, len(sequence_ids), 900):
+                identifiers = sequence_ids[start : start + 900]
+                placeholders = ", ".join("?" for _ in identifiers)
+                rows = connection.execute(
+                    "SELECT protein_id, sequence_id FROM vector_rows "
+                    f"WHERE sequence_id IN ({placeholders})",
+                    identifiers,
+                )
+                for protein_id, sequence_id in rows:
+                    aliases_by_sequence_id.setdefault(int(sequence_id), set()).add(str(protein_id))
+
         manifest = inspection.manifest
         matrix = np.memmap(
             inspection.artifact.vectors_path,
@@ -584,15 +716,40 @@ class IndexManager:
             mode="r",
             shape=(manifest.vector_count, manifest.dimension),
         )
+        for protein_id in requested_ids:
+            row_index = row_indices_by_protein.get(protein_id)
+            sequence_id = sequence_ids_by_protein.get(protein_id)
+            if row_index is None or sequence_id is None:
+                continue
+            query_vectors[protein_id] = np.asarray(matrix[row_index], dtype=np.float32)
+            sequence_ids_by_query[protein_id].add(sequence_id)
+            aliases_by_query[protein_id].update(aliases_by_sequence_id.get(sequence_id, set()))
+        return query_vectors, aliases_by_query, sequence_ids_by_query
+
+    def get_exact_store_protein_ids_by_sequence_id(
+        self,
+        inspection: ExactStoreInspection,
+        sequence_ids: Iterable[int],
+    ) -> dict[int, list[str]]:
+        """Resolve protein IDs for exact-store sequence IDs without PostgreSQL."""
+        if inspection.state != "current" or inspection.manifest is None:
+            raise SearchIndexError("A current exact-store inspection is required to read protein IDs.")
+        requested_ids = sorted(set(int(sequence_id) for sequence_id in sequence_ids))
+        protein_ids_by_sequence_id: dict[int, list[str]] = {sequence_id: [] for sequence_id in requested_ids}
+        if not requested_ids:
+            return protein_ids_by_sequence_id
         with sqlite3.connect(inspection.artifact.metadata_path) as connection:
-            cursor = connection.execute("SELECT protein_id FROM vector_rows ORDER BY row_index")
-            offset = 0
-            while rows := cursor.fetchmany(batch_size):
-                next_offset = offset + len(rows)
-                yield [str(row[0]) for row in rows], np.asarray(matrix[offset:next_offset], dtype=np.float32)
-                offset = next_offset
-        if offset != manifest.vector_count:
-            raise SearchIndexError("Exact-store metadata row count does not match its manifest.")
+            for start in range(0, len(requested_ids), 900):
+                identifiers = requested_ids[start : start + 900]
+                placeholders = ", ".join("?" for _ in identifiers)
+                rows = connection.execute(
+                    "SELECT sequence_id, protein_id FROM vector_rows "
+                    f"WHERE sequence_id IN ({placeholders}) ORDER BY sequence_id, protein_id",
+                    identifiers,
+                )
+                for sequence_id, protein_id in rows:
+                    protein_ids_by_sequence_id[int(sequence_id)].append(str(protein_id))
+        return protein_ids_by_sequence_id
 
     def _iter_exact_store_index_batches(
         self,
@@ -1158,6 +1315,7 @@ __all__ = [
     "ExactStoreArtifact",
     "ExactStoreInspection",
     "ExactStoreManifest",
+    "ExactStoreReadProfile",
     "ExactVectorBatch",
     "IndexArtifact",
     "IndexBuildSpec",

@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from CBBIO import (
+    ExactStoreReadProfile,
     ExactVectorBatch,
     IndexBuildSpec,
     IndexKey,
@@ -211,7 +212,23 @@ def test_index_manager_builds_and_streams_a_portable_exact_store(tmp_path: Path)
         layer_index=0,
         source_revision="3",
     )
-    batches = list(manager.iter_exact_store_batches(inspection, batch_size=2))
+    read_profile = ExactStoreReadProfile()
+    batches = list(manager.iter_exact_store_batches(inspection, batch_size=2, profile=read_profile))
+    float16_batches = list(
+        manager.iter_exact_store_batches(
+            inspection,
+            batch_size=2,
+            vector_dtype="float16",
+        ),
+    )
+    query_vectors, aliases_by_query, sequence_ids_by_query = manager.get_exact_store_query_context(
+        inspection,
+        ["P2", "missing"],
+    )
+    protein_ids_by_sequence_id = manager.get_exact_store_protein_ids_by_sequence_id(
+        inspection,
+        [11, 13, 99],
+    )
     distances = manager._exact_store_candidate_distances(
         inspection,
         vectors[0],
@@ -231,6 +248,17 @@ def test_index_manager_builds_and_streams_a_portable_exact_store(tmp_path: Path)
     assert distances["P1"] == pytest.approx(0.0)
     assert distances["P2"] > distances["P1"]
     assert inspection.artifact.vectors_path.stat().st_size == 3 * 2 * 2
+    assert float16_batches[0][1].dtype == numpy.float16
+    assert query_vectors["P2"].tolist() == pytest.approx(vectors[1].tolist())
+    assert aliases_by_query["P2"] == {"P2"}
+    assert aliases_by_query["missing"] == {"missing"}
+    assert sequence_ids_by_query["P2"] == {12}
+    assert sequence_ids_by_query["missing"] == set()
+    assert protein_ids_by_sequence_id == {11: ["P1"], 13: ["P3"], 99: []}
+    assert read_profile.batch_count == 2
+    assert read_profile.vector_count == 3
+    assert read_profile.sqlite_fetch_seconds >= 0.0
+    assert read_profile.vector_read_cast_seconds >= 0.0
     assert [protein_ids for protein_ids, _ in batches] == [["P1", "P2"], ["P3"]]
     assert numpy.vstack([batch_vectors for _, batch_vectors in batches]) == pytest.approx(vectors, abs=0.001)
 

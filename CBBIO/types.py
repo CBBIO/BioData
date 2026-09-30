@@ -22,6 +22,7 @@ SearchBackend: TypeAlias = Literal[
     "faiss_gpu",
     "faiss_persistent",
     "cuvs_gpu",
+    "cuvs_streaming",
     "torch_gpu",
 ]
 

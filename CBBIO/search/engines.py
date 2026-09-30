@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections import Counter
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass
+import time
 from typing import Any, Set, cast
 
 from ..BioData import BioDataError
@@ -20,6 +23,77 @@ from .utils import (
     tensor_to_list,
     torch_normalize,
 )
+
+
+@dataclass
+class CuvsStreamingProfile:
+    """Accumulate optional wall-clock timings for a cuVS streaming search."""
+
+    block_count: int = 0
+    scanned_vector_count: int = 0
+    cuvs_search_call_count: int = 0
+    query_batch_count: int = 0
+    max_query_batch_size: int = 0
+    tie_expansion_count: int = 0
+    max_block_candidate_count: int = 0
+    query_preparation_seconds: float = 0.0
+    query_upload_seconds: float = 0.0
+    vector_preparation_seconds: float = 0.0
+    vector_upload_seconds: float = 0.0
+    index_build_seconds: float = 0.0
+    search_seconds: float = 0.0
+    result_download_seconds: float = 0.0
+    candidate_processing_seconds: float = 0.0
+    exclusion_preparation_seconds: float = 0.0
+
+    def diagnostics(self) -> dict[str, int | float]:
+        """Return stable diagnostic names for the completed search."""
+        return {
+            "block_count": self.block_count,
+            "scanned_vector_count": self.scanned_vector_count,
+            "cuvs_search_call_count": self.cuvs_search_call_count,
+            "query_batch_count": self.query_batch_count,
+            "max_query_batch_size": self.max_query_batch_size,
+            "tie_expansion_count": self.tie_expansion_count,
+            "max_block_candidate_count": self.max_block_candidate_count,
+            "query_preparation_seconds": self.query_preparation_seconds,
+            "query_upload_seconds": self.query_upload_seconds,
+            "vector_preparation_seconds": self.vector_preparation_seconds,
+            "vector_upload_seconds": self.vector_upload_seconds,
+            "index_build_seconds": self.index_build_seconds,
+            "search_seconds": self.search_seconds,
+            "result_download_seconds": self.result_download_seconds,
+            "candidate_processing_seconds": self.candidate_processing_seconds,
+            "exclusion_preparation_seconds": self.exclusion_preparation_seconds,
+        }
+
+
+def _synchronize_cupy(cupy: Any) -> None:
+    """Synchronize the active CuPy stream when the runtime exposes one."""
+    get_current_stream = getattr(cupy.cuda, "get_current_stream", None)
+    if callable(get_current_stream):
+        cast(Any, get_current_stream()).synchronize()
+
+
+def _profile_cupy_operation(cupy: Any, operation: Callable[[], Any]) -> tuple[Any, float]:
+    """Run one GPU operation and return its synchronized wall-clock duration."""
+    started_at = time.perf_counter()
+    result = operation()
+    _synchronize_cupy(cupy)
+    return result, time.perf_counter() - started_at
+
+
+def _normalize_cuvs_dataset_in_place(dataset: Any, *, cupy: Any) -> None:
+    """Normalize one float32 cuVS dataset in GPU memory for cosine distance."""
+    linalg = getattr(cupy, "linalg", None)
+    if linalg is None:
+        import numpy as np
+
+        norms = np.linalg.norm(dataset, axis=1, keepdims=True)
+    else:
+        norms = linalg.norm(dataset, axis=1, keepdims=True)
+    norms[norms == 0.0] = 1.0
+    dataset /= norms
 
 
 def build_search_state(
@@ -444,6 +518,287 @@ def search_cuvs_state(
             requested = min(len(state.protein_ids), max(requested * 2, requested + 8))
 
 
+def search_cuvs_streaming_exact(
+    *,
+    batch_source: Callable[[], Iterable[tuple[Sequence[str], Any]]],
+    query_ids: Sequence[str],
+    query_vectors: Any,
+    k: int,
+    metric: DistanceMetric,
+    device: str,
+    layer_index: int,
+    per_query_excluded: Mapping[str, Set[str]],
+    query_batch_size: int | None = None,
+    profile: CuvsStreamingProfile | None = None,
+) -> dict[str, list[Neighbor]]:
+    """Search a portable exact store with bounded host and cuVS GPU memory.
+
+    Each query batch owns only its candidate state, scans the exact store, and
+    is finalized before the next batch begins. This keeps host memory bounded
+    even for a very large number of queries. Per-block candidate pools expand
+    for excluded rows and at the canonical distance-tie boundary, preserving
+    the candidates needed for shared ``(distance, protein_id)`` ordering.
+    """
+    if k < 1:
+        raise ValueError("k must be positive.")
+    if not query_ids:
+        return {}
+
+    cupy = import_cupy()
+    import_cuvs()
+    from cuvs.neighbors import brute_force as cuvs_brute_force  # type: ignore
+
+    query_id_values = [str(query_id) for query_id in query_ids]
+    started_at = time.perf_counter()
+    query_matrix = prepare_index_vectors(as_numpy_matrix(query_vectors), metric=metric)
+    if profile is not None:
+        profile.query_preparation_seconds += time.perf_counter() - started_at
+    if int(query_matrix.shape[0]) != len(query_id_values):
+        raise BioDataError("Query ids and vectors must contain the same number of rows.")
+    if query_batch_size is None:
+        effective_query_batch_size = len(query_id_values)
+    else:
+        if query_batch_size < 1:
+            raise ValueError("query_batch_size must be positive.")
+        effective_query_batch_size = min(len(query_id_values), int(query_batch_size))
+    candidate_count = max(k + 64, k * 4)
+    metric_name = "sqeuclidean" if metric == "l2" else str(metric)
+    grouped: dict[str, list[Neighbor]] = {}
+    scanned_vectors = 0
+
+    with cupy.cuda.Device(cuda_device_index(device)):
+        for query_batch_start in range(0, len(query_id_values), effective_query_batch_size):
+            query_batch_end = min(
+                len(query_id_values),
+                query_batch_start + effective_query_batch_size,
+            )
+            query_batch_ids = query_id_values[query_batch_start:query_batch_end]
+            if profile is None:
+                gpu_queries = cupy.asarray(
+                    query_matrix[query_batch_start:query_batch_end],
+                    dtype=cupy.float32,
+                )
+            else:
+                gpu_queries, elapsed_seconds = _profile_cupy_operation(
+                    cupy,
+                    lambda: cupy.asarray(
+                        query_matrix[query_batch_start:query_batch_end],
+                        dtype=cupy.float32,
+                    ),
+                )
+                profile.query_upload_seconds += elapsed_seconds
+                profile.query_batch_count += 1
+                profile.max_query_batch_size = max(profile.max_query_batch_size, len(query_batch_ids))
+            best_candidates: dict[str, dict[str, float]] = {
+                query_id: {} for query_id in query_batch_ids
+            }
+
+            for protein_ids, batch_vectors in batch_source():
+                batch_matrix = batch_vectors
+                if not hasattr(batch_matrix, "ndim"):
+                    batch_matrix = as_numpy_matrix(batch_vectors)
+                if batch_matrix.ndim != 2 or int(batch_matrix.shape[1]) < 1:
+                    raise ValueError("Expected a 2D embedding matrix with at least one column.")
+                if int(batch_matrix.shape[0]) != len(protein_ids):
+                    raise BioDataError("Search ids and vectors must contain the same number of rows.")
+                if int(batch_matrix.shape[1]) != int(query_matrix.shape[1]):
+                    raise BioDataError(
+                        f"Search vector dimension changed during streaming search: expected "
+                        f"{int(query_matrix.shape[1])}, got {int(batch_matrix.shape[1])}."
+                    )
+                block_size = int(batch_matrix.shape[0])
+                if block_size < 1:
+                    continue
+                scanned_vectors += block_size
+                if profile is not None:
+                    profile.block_count += 1
+                    profile.scanned_vector_count += block_size
+                protein_id_values = [str(protein_id) for protein_id in protein_ids]
+                started_at = time.perf_counter() if profile is not None else 0.0
+                excluded_id_sets = [
+                    per_query_excluded.get(query_id, set())
+                    for query_id in query_batch_ids
+                ]
+                if any(excluded_id_sets):
+                    rows_per_protein_id = Counter(protein_id_values)
+                    excluded_row_count = max(
+                        sum(rows_per_protein_id.get(protein_id, 0) for protein_id in excluded_ids)
+                        for excluded_ids in excluded_id_sets
+                    )
+                else:
+                    excluded_row_count = 0
+                if profile is not None:
+                    profile.exclusion_preparation_seconds += time.perf_counter() - started_at
+                local_count = min(block_size, candidate_count + excluded_row_count + 1)
+                if profile is None:
+                    dataset = cupy.asarray(batch_matrix, dtype=cupy.float32)
+                    if metric == "cosine":
+                        _normalize_cuvs_dataset_in_place(dataset, cupy=cupy)
+                    index = cast(Any, cuvs_brute_force).build(dataset, metric=metric_name)
+                else:
+                    profile.max_block_candidate_count = max(profile.max_block_candidate_count, local_count)
+                    dataset, elapsed_seconds = _profile_cupy_operation(
+                        cupy,
+                        lambda: cupy.asarray(batch_matrix, dtype=cupy.float32),
+                    )
+                    profile.vector_upload_seconds += elapsed_seconds
+                    if metric == "cosine":
+                        _, elapsed_seconds = _profile_cupy_operation(
+                            cupy,
+                            lambda: _normalize_cuvs_dataset_in_place(dataset, cupy=cupy),
+                        )
+                        profile.vector_preparation_seconds += elapsed_seconds
+                    index, elapsed_seconds = _profile_cupy_operation(
+                        cupy,
+                        lambda: cast(Any, cuvs_brute_force).build(dataset, metric=metric_name),
+                    )
+                    profile.index_build_seconds += elapsed_seconds
+
+                pending_query_rows = list(range(len(query_batch_ids)))
+                block_candidates: dict[str, list[tuple[str, float]]] = {}
+                while pending_query_rows:
+                    pending_queries = gpu_queries[pending_query_rows]
+                    if profile is None:
+                        distances, indices = cast(Any, cuvs_brute_force).search(
+                            index,
+                            pending_queries,
+                            local_count,
+                        )
+                        host_distances = cupy.asnumpy(distances)
+                        host_indices = cupy.asnumpy(indices)
+                    else:
+                        (distances, indices), elapsed_seconds = _profile_cupy_operation(
+                            cupy,
+                            lambda: cast(Any, cuvs_brute_force).search(
+                                index,
+                                pending_queries,
+                                local_count,
+                            ),
+                        )
+                        profile.search_seconds += elapsed_seconds
+                        profile.cuvs_search_call_count += 1
+                        started_at = time.perf_counter()
+                        host_distances = cupy.asnumpy(distances)
+                        host_indices = cupy.asnumpy(indices)
+                        profile.result_download_seconds += time.perf_counter() - started_at
+                    started_at = time.perf_counter() if profile is not None else 0.0
+                    retry_query_rows: list[int] = []
+                    for result_row, query_row in enumerate(pending_query_rows):
+                        query_id = query_batch_ids[query_row]
+                        candidates = _streaming_block_candidates(
+                            protein_id_values=protein_id_values,
+                            candidate_indices=host_indices[result_row].tolist(),
+                            candidate_distances=host_distances[result_row].tolist(),
+                            excluded_protein_ids=per_query_excluded.get(query_id, set()),
+                            metric=metric,
+                        )
+                        block_candidates[query_id] = candidates
+                        if local_count < block_size and _streaming_boundary_has_tie(
+                            candidates,
+                            candidate_count=candidate_count,
+                        ):
+                            retry_query_rows.append(query_row)
+                    if profile is not None:
+                        profile.candidate_processing_seconds += time.perf_counter() - started_at
+                    if not retry_query_rows:
+                        break
+                    if profile is not None:
+                        profile.tie_expansion_count += 1
+                    local_count = min(block_size, max(local_count * 2, local_count + 64))
+                    if profile is not None:
+                        profile.max_block_candidate_count = max(profile.max_block_candidate_count, local_count)
+                    pending_query_rows = retry_query_rows
+
+                started_at = time.perf_counter() if profile is not None else 0.0
+                for query_id, block_values in block_candidates.items():
+                    candidates = best_candidates[query_id]
+                    for protein_id, distance in block_values:
+                        previous = candidates.get(protein_id)
+                        if previous is None or distance < previous:
+                            candidates[protein_id] = distance
+                    best_candidates[query_id] = _retain_streaming_candidates(
+                        candidates,
+                        candidate_count=candidate_count,
+                    )
+                if profile is not None:
+                    profile.candidate_processing_seconds += time.perf_counter() - started_at
+                del index
+                del dataset
+
+            for query_id, candidates in best_candidates.items():
+                grouped[query_id] = [
+                    Neighbor(protein_id=protein_id, layer_index=layer_index, distance=distance)
+                    for protein_id, distance in sorted(
+                        candidates.items(),
+                        key=lambda item: (item[1], item[0]),
+                    )[:k]
+                ]
+            del gpu_queries
+
+    if scanned_vectors < 1:
+        raise BioDataError("Cannot search an empty exact-store vector collection.")
+    return grouped
+
+
+def _streaming_block_candidates(
+    *,
+    protein_id_values: Sequence[str],
+    candidate_indices: Sequence[Any],
+    candidate_distances: Sequence[Any],
+    excluded_protein_ids: Set[str],
+    metric: DistanceMetric,
+) -> list[tuple[str, float]]:
+    """Convert one sorted cuVS block result into eligible candidates."""
+    candidates: list[tuple[str, float]] = []
+    for raw_index, raw_distance in zip(candidate_indices, candidate_distances):
+        row_index = int(raw_index)
+        if row_index < 0 or row_index >= len(protein_id_values):
+            continue
+        protein_id = protein_id_values[row_index]
+        if protein_id in excluded_protein_ids:
+            continue
+        candidates.append(
+            (
+                protein_id,
+                normalize_distance(
+                    metric=metric,
+                    value=raw_distance,
+                    l2_squared=metric == "l2",
+                    cosine_value_is_distance=True,
+                ),
+            ),
+        )
+    return candidates
+
+
+def _streaming_boundary_has_tie(
+    candidates: Sequence[tuple[str, float]],
+    *,
+    candidate_count: int,
+) -> bool:
+    """Return whether an additional cuVS result exactly ties the retained boundary."""
+    if len(candidates) <= candidate_count:
+        return False
+    return candidates[candidate_count - 1][1] == candidates[candidate_count][1]
+
+
+def _retain_streaming_candidates(
+    candidates: Mapping[str, float],
+    *,
+    candidate_count: int,
+) -> dict[str, float]:
+    """Keep candidates through the canonical exact-distance tie boundary."""
+    ordered = sorted(candidates.items(), key=lambda item: (item[1], item[0]))
+    if len(ordered) <= candidate_count:
+        return dict(ordered)
+    boundary = ordered[candidate_count - 1][1]
+    return {
+        protein_id: distance
+        for protein_id, distance in ordered
+        if distance <= boundary
+    }
+
+
 def search_torch_state(
     state: GpuSearchState,
     *,
@@ -566,10 +921,12 @@ def _has_enough_neighbors(
 
 
 __all__ = [
+    "CuvsStreamingProfile",
     "build_search_state",
     "build_torch_streaming_search_state",
     "neighbors_from_candidate_rows",
     "search_cuvs_state",
+    "search_cuvs_streaming_exact",
     "search_faiss_state",
     "search_state",
     "search_torch_state",

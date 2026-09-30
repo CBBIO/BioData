@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 import uuid
 import warnings
 from typing import Any, Dict, Generator, List, Mapping, Sequence, Set, cast
@@ -9,17 +10,19 @@ from typing import Any, Dict, Generator, List, Mapping, Sequence, Set, cast
 from ..BioData import BioDataError, NotFoundError, cursor, embedding_dimension, metric_opclass, metric_operator
 from ..types import DistanceMetric, Neighbor, SearchBackend
 from .engines import (
+    CuvsStreamingProfile,
     build_cuvs_streaming_search_state,
     build_faiss_streaming_search_state,
     build_search_state,
     build_torch_streaming_search_state,
     neighbors_from_candidate_rows,
     search_cuvs_state,
+    search_cuvs_streaming_exact,
     search_faiss_state,
     search_state,
     search_torch_state,
 )
-from .index_manager import IndexKey, SearchIndexError
+from .index_manager import ExactStoreReadProfile, IndexKey, SearchIndexError
 from .types import (
     DEFAULT_BACKEND_THRESHOLDS,
     BackendAvailability,
@@ -39,7 +42,6 @@ from .utils import (
 )
 
 
-_CANONICAL_TIE_DECIMALS = 5
 _CANONICAL_TIE_OVERFETCH = 64
 _GPU_EXACT_LOAD_BATCH_SIZE = 10_000
 
@@ -64,7 +66,7 @@ def _canonicalize_neighbor_groups(
         for neighbor in sorted(
             neighbors,
             key=lambda neighbor: (
-                round(float(neighbor.distance), _CANONICAL_TIE_DECIMALS),
+                float(neighbor.distance),
                 neighbor.protein_id,
             ),
         ):
@@ -102,6 +104,10 @@ class SearchService:
 
     def __init__(self, client: Any) -> None:
         self._client = client
+        self._portable_query_context_cache: tuple[
+            tuple[str, str, tuple[str, ...]],
+            tuple[dict[str, Any], dict[str, set[str]], dict[str, set[int]]],
+        ] | None = None
 
     @staticmethod
     def _per_query_exclusions(
@@ -201,6 +207,7 @@ class SearchService:
         exact_store = self._load_persistent_exact_store(
             embedding_type_id=embedding_type_id,
             layer_index=layer_index,
+            require_database_revision=False,
         )
         manager = self._client._index_manager
         scorer = getattr(manager, "_exact_store_candidate_distances", None)
@@ -231,7 +238,7 @@ class SearchService:
                 for protein_id, distance in sorted(
                     distances.items(),
                     key=lambda item: (
-                        round(float(item[1]), _CANONICAL_TIE_DECIMALS),
+                        float(item[1]),
                         item[0],
                     ),
                 )[:k]
@@ -513,8 +520,15 @@ class SearchService:
         ann_candidate_pool: int | None = None,
         backend: SearchBackend | None = None,
         device: str | None = None,
+        cuvs_streaming_block_size: int | None = None,
+        cuvs_streaming_query_batch_size: int | None = None,
+        profile_cuvs_streaming: bool = False,
     ) -> List[Neighbor]:
-        """Find nearest neighbors for one query embedding."""
+        """Find nearest neighbors for one query embedding.
+
+        Args:
+            cuvs_streaming_block_size: Exact cuVS block size, or ``None`` to size from free VRAM.
+        """
         effective_metric = metric or self._client.default_metric
         effective_k = self._client.default_k if k is None else int(k)
         if effective_k < 1:
@@ -553,6 +567,10 @@ class SearchService:
         )
         retrieval_k = _retrieval_count(effective_k, ann_used=resolved.ann_used)
         excluded_ids = [str(value) for value in (exclude_protein_ids or [])]
+        effective_cuvs_streaming_block_size: int | None = None
+        effective_cuvs_streaming_query_batch_size: int | None = None
+        cuvs_streaming_profile: dict[str, int | float] | None = None
+        cuvs_streaming_started_at: float | None = None
 
         if resolved.backend == "faiss_persistent":
             neighbors = self._find_nearest_neighbors_persistent(
@@ -609,6 +627,30 @@ class SearchService:
                 device=resolved.device,
                 use_ann=resolved.ann_used,
             )
+        elif resolved.backend == "cuvs_streaming":
+            cuvs_streaming_started_at = time.perf_counter() if profile_cuvs_streaming else None
+            (
+                streaming_grouped,
+                effective_cuvs_streaming_block_size,
+                effective_cuvs_streaming_query_batch_size,
+                cuvs_streaming_profile,
+            ) = (
+                self.find_nearest_neighbors_for_queries_cuvs_streaming(
+                    ["query"],
+                    [query_embedding],
+                    embedding_type_id=embedding_type_id,
+                    layer_index=layer_index,
+                    k=retrieval_k,
+                    metric=effective_metric,
+                    include_query=True,
+                    device=resolved.device,
+                    block_size=cuvs_streaming_block_size,
+                    query_batch_size=cuvs_streaming_query_batch_size,
+                    profile_cuvs_streaming=profile_cuvs_streaming,
+                    excluded_protein_ids_by_query={"query": set(excluded_ids)},
+                )
+            )
+            neighbors = streaming_grouped["query"]
         else:
             neighbors = self._client._find_nearest_neighbors_torch(
                 query_embedding,
@@ -620,6 +662,7 @@ class SearchService:
                 device=resolved.device,
             )
 
+        canonicalization_started_at = time.perf_counter() if cuvs_streaming_profile is not None else None
         neighbors = self._canonicalize_exact_neighbor_groups(
             {"query": neighbors},
             {"query": query_embedding},
@@ -628,6 +671,10 @@ class SearchService:
             metric=effective_metric,
             k=effective_k,
         )["query"]
+        if cuvs_streaming_profile is not None and canonicalization_started_at is not None:
+            cuvs_streaming_profile["canonicalization_seconds"] = time.perf_counter() - canonicalization_started_at
+        if cuvs_streaming_profile is not None and cuvs_streaming_started_at is not None:
+            cuvs_streaming_profile["total_seconds"] = time.perf_counter() - cuvs_streaming_started_at
         _require_complete_neighbor_groups({"query": neighbors}, query_ids=["query"], k=effective_k)
         self._client._record_search_diagnostics(
             resolved,
@@ -637,6 +684,9 @@ class SearchService:
             metric=effective_metric,
             k=effective_k,
             query_count=1,
+            cuvs_streaming_block_size=effective_cuvs_streaming_block_size,
+            cuvs_streaming_query_batch_size=effective_cuvs_streaming_query_batch_size,
+            cuvs_streaming_profile=cuvs_streaming_profile,
         )
         return neighbors
 
@@ -654,6 +704,9 @@ class SearchService:
         ann_candidate_pool: int | None = None,
         backend: SearchBackend | None = None,
         device: str | None = None,
+        cuvs_streaming_block_size: int | None = None,
+        cuvs_streaming_query_batch_size: int | None = None,
+        profile_cuvs_streaming: bool = False,
     ) -> Dict[str, List[Neighbor]]:
         """Find nearest neighbors for multiple external query embeddings."""
         query_items = [(str(query_id), embedding) for query_id, embedding in query_embeddings.items()]
@@ -702,6 +755,10 @@ class SearchService:
         query_vectors = [embedding for _, embedding in query_items]
         excluded_ids = {str(protein_id) for protein_id in (exclude_protein_ids or [])}
         grouped: Dict[str, List[Neighbor]] = {}
+        effective_cuvs_streaming_block_size: int | None = None
+        effective_cuvs_streaming_query_batch_size: int | None = None
+        cuvs_streaming_profile: dict[str, int | float] | None = None
+        cuvs_streaming_started_at: float | None = None
 
         if resolved.backend == "faiss_persistent":
             grouped = self._find_nearest_neighbors_persistent(
@@ -726,6 +783,27 @@ class SearchService:
                 ann_ef_search=ann_ef_search,
                 ann_candidate_pool=ann_candidate_pool,
             )
+        elif resolved.backend == "cuvs_streaming":
+            cuvs_streaming_started_at = time.perf_counter() if profile_cuvs_streaming else None
+            (
+                grouped,
+                effective_cuvs_streaming_block_size,
+                effective_cuvs_streaming_query_batch_size,
+                cuvs_streaming_profile,
+            ) = self.find_nearest_neighbors_for_queries_cuvs_streaming(
+                query_ids,
+                query_vectors,
+                embedding_type_id=embedding_type_id,
+                layer_index=layer_index,
+                k=retrieval_k,
+                metric=effective_metric,
+                include_query=True,
+                device=resolved.device,
+                block_size=cuvs_streaming_block_size,
+                query_batch_size=cuvs_streaming_query_batch_size,
+                profile_cuvs_streaming=profile_cuvs_streaming,
+                excluded_protein_ids_by_query={query_id: set(excluded_ids) for query_id in query_ids},
+            )
         else:
             state = self._client._get_or_load_gpu_search_state(
                 backend=resolved.backend,
@@ -749,6 +827,7 @@ class SearchService:
                 )
                 grouped.update(partial)
 
+        canonicalization_started_at = time.perf_counter() if cuvs_streaming_profile is not None else None
         grouped = self._canonicalize_exact_neighbor_groups(
             grouped,
             dict(query_items),
@@ -757,6 +836,10 @@ class SearchService:
             metric=effective_metric,
             k=effective_k,
         )
+        if cuvs_streaming_profile is not None and canonicalization_started_at is not None:
+            cuvs_streaming_profile["canonicalization_seconds"] = time.perf_counter() - canonicalization_started_at
+        if cuvs_streaming_profile is not None and cuvs_streaming_started_at is not None:
+            cuvs_streaming_profile["total_seconds"] = time.perf_counter() - cuvs_streaming_started_at
         _require_complete_neighbor_groups(grouped, query_ids=query_ids, k=effective_k)
         self._client._record_search_diagnostics(
             resolved,
@@ -766,6 +849,9 @@ class SearchService:
             metric=effective_metric,
             k=effective_k,
             query_count=len(query_items),
+            cuvs_streaming_block_size=effective_cuvs_streaming_block_size,
+            cuvs_streaming_query_batch_size=effective_cuvs_streaming_query_batch_size,
+            cuvs_streaming_profile=cuvs_streaming_profile,
         )
         return grouped
 
@@ -783,6 +869,9 @@ class SearchService:
         ann_candidate_pool: int | None = None,
         backend: SearchBackend | None = None,
         device: str | None = None,
+        cuvs_streaming_block_size: int | None = None,
+        cuvs_streaming_query_batch_size: int | None = None,
+        profile_cuvs_streaming: bool = False,
     ) -> Dict[str, List[Neighbor]]:
         """Find nearest neighbors for stored protein embeddings."""
         ids = [str(value) for value in protein_ids]
@@ -832,12 +921,34 @@ class SearchService:
         )
         retrieval_k = _retrieval_count(effective_k, ann_used=resolved.ann_used)
 
+        effective_cuvs_streaming_block_size: int | None = None
+        effective_cuvs_streaming_query_batch_size: int | None = None
+        cuvs_streaming_profile: dict[str, int | float] | None = None
+        cuvs_streaming_started_at: float | None = None
+        query_embedding_local_read_seconds: float | None = None
+        query_embeddings_for_canonicalization: Mapping[str, Any] | None = persistent_query_map
+        uses_portable_exact_store = (
+            not resolved.ann_used
+            and resolved.backend in {"faiss_cpu", "faiss_gpu", "cuvs_gpu", "cuvs_streaming", "torch_gpu"}
+        )
+        local_exact_query_context = (
+            self._local_exact_store_query_context(
+                ids,
+                embedding_type_id=embedding_type_id,
+                layer_index=layer_index,
+            )
+            if uses_portable_exact_store
+            else None
+        )
         excluded_protein_ids_by_query: Dict[str, Set[str]] = {}
         excluded_sequence_ids_by_query: Dict[str, Set[int]] = {}
         if not include_query and resolved.backend != "pgvector":
-            excluded_protein_ids_by_query, excluded_sequence_ids_by_query = (
-                self._client._stored_query_exclusions(ids)
-            )
+            if local_exact_query_context is not None:
+                _, excluded_protein_ids_by_query, excluded_sequence_ids_by_query = local_exact_query_context
+            else:
+                excluded_protein_ids_by_query, excluded_sequence_ids_by_query = (
+                    self._client._stored_query_exclusions(ids)
+                )
 
         if resolved.backend == "faiss_persistent":
             query_map = persistent_query_map or self._client.get_protein_embeddings(
@@ -845,6 +956,7 @@ class SearchService:
                 embedding_type_id=embedding_type_id,
                 layer_index=layer_index,
             )
+            query_embeddings_for_canonicalization = query_map
             grouped = self._find_nearest_neighbors_persistent(
                 query_map,
                 embedding_type_id=embedding_type_id,
@@ -875,12 +987,54 @@ class SearchService:
                 ann_ef_search=ann_ef_search,
                 ann_candidate_pool=ann_candidate_pool,
             )
-        else:
-            query_map = persistent_query_map or self._client.get_protein_embeddings(
-                ids,
+        elif resolved.backend == "cuvs_streaming":
+            cuvs_streaming_started_at = time.perf_counter() if profile_cuvs_streaming else None
+            query_embedding_local_read_started_at = time.perf_counter() if profile_cuvs_streaming else None
+            query_map = (
+                persistent_query_map
+                or (local_exact_query_context[0] if local_exact_query_context is not None else None)
+                or self._client.get_protein_embeddings(
+                    ids,
+                    embedding_type_id=embedding_type_id,
+                    layer_index=layer_index,
+                )
+            )
+            if query_embedding_local_read_started_at is not None:
+                query_embedding_local_read_seconds = time.perf_counter() - query_embedding_local_read_started_at
+            query_embeddings_for_canonicalization = query_map
+            if not query_map:
+                return {}
+            query_ids = [protein_id for protein_id in ids if protein_id in query_map]
+            (
+                grouped,
+                effective_cuvs_streaming_block_size,
+                effective_cuvs_streaming_query_batch_size,
+                cuvs_streaming_profile,
+            ) = self.find_nearest_neighbors_for_queries_cuvs_streaming(
+                query_ids,
+                [query_map[protein_id] for protein_id in query_ids],
                 embedding_type_id=embedding_type_id,
                 layer_index=layer_index,
+                k=retrieval_k,
+                metric=effective_metric,
+                include_query=include_query,
+                device=resolved.device,
+                block_size=cuvs_streaming_block_size,
+                query_batch_size=cuvs_streaming_query_batch_size,
+                profile_cuvs_streaming=profile_cuvs_streaming,
+                excluded_protein_ids_by_query=excluded_protein_ids_by_query,
             )
+        else:
+            query_map = (
+                persistent_query_map
+                or (local_exact_query_context[0] if local_exact_query_context is not None else None)
+                or self._client.get_protein_embeddings(
+                    ids,
+                    embedding_type_id=embedding_type_id,
+                    layer_index=layer_index,
+                )
+            )
+            query_embeddings_for_canonicalization = query_map
             if not query_map:
                 return {}
             query_ids = [protein_id for protein_id in ids if protein_id in query_map]
@@ -942,9 +1096,10 @@ class SearchService:
                     )
                 grouped.update(partial)
 
+        canonicalization_started_at = time.perf_counter() if cuvs_streaming_profile is not None else None
         grouped = self._canonicalize_exact_neighbor_groups(
             grouped,
-            persistent_query_map or self._client.get_protein_embeddings(
+            query_embeddings_for_canonicalization or self._client.get_protein_embeddings(
                 ids,
                 embedding_type_id=embedding_type_id,
                 layer_index=layer_index,
@@ -954,6 +1109,12 @@ class SearchService:
             metric=effective_metric,
             k=effective_k,
         )
+        if cuvs_streaming_profile is not None and query_embedding_local_read_seconds is not None:
+            cuvs_streaming_profile["query_embedding_local_read_seconds"] = query_embedding_local_read_seconds
+        if cuvs_streaming_profile is not None and canonicalization_started_at is not None:
+            cuvs_streaming_profile["canonicalization_seconds"] = time.perf_counter() - canonicalization_started_at
+        if cuvs_streaming_profile is not None and cuvs_streaming_started_at is not None:
+            cuvs_streaming_profile["total_seconds"] = time.perf_counter() - cuvs_streaming_started_at
         _require_complete_neighbor_groups(grouped, query_ids=ids, k=effective_k)
         self._client._record_search_diagnostics(
             resolved,
@@ -963,6 +1124,9 @@ class SearchService:
             metric=effective_metric,
             k=effective_k,
             query_count=len(ids),
+            cuvs_streaming_block_size=effective_cuvs_streaming_block_size,
+            cuvs_streaming_query_batch_size=effective_cuvs_streaming_query_batch_size,
+            cuvs_streaming_profile=cuvs_streaming_profile,
         )
         return grouped
 
@@ -1543,6 +1707,142 @@ class SearchService:
             per_query_excluded=per_query_excluded,
         )
 
+    def _resolve_cuvs_streaming_block_size(
+        self,
+        exact_store: Any,
+        *,
+        device: str,
+        requested_block_size: int | None,
+    ) -> int:
+        """Choose a fixed or conservative free-VRAM cuVS streaming block size."""
+        manifest = exact_store.manifest
+        if manifest is None:
+            raise BioDataError("cuvs_streaming requires an exact-store manifest.")
+        vector_count = int(manifest.vector_count)
+        if requested_block_size is not None:
+            if requested_block_size < 1:
+                raise ValueError("cuvs_streaming_block_size must be positive.")
+            return min(vector_count, int(requested_block_size))
+
+        cupy = import_cupy()
+        with cupy.cuda.Device(cuda_device_index(device)):
+            free_bytes, _total_bytes = cupy.cuda.runtime.memGetInfo()
+        # cuVS owns the float32 dataset and temporary brute-force buffers. Reserve
+        # most free VRAM for those allocations and unrelated CUDA runtime overhead.
+        bytes_per_vector = max(1, int(manifest.dimension) * 4 * 2)
+        auto_block_size = int(int(free_bytes) * 0.20) // bytes_per_vector
+        return min(vector_count, max(10_000, auto_block_size))
+
+    def _resolve_cuvs_streaming_query_batch_size(
+        self,
+        exact_store: Any,
+        *,
+        device: str,
+        requested_query_batch_size: int | None,
+        query_count: int,
+        candidate_count: int,
+    ) -> int:
+        """Choose a fixed or conservative cuVS streaming query-batch size."""
+        manifest = exact_store.manifest
+        if manifest is None:
+            raise BioDataError("cuvs_streaming requires an exact-store manifest.")
+        if query_count < 1:
+            raise ValueError("query_count must be positive.")
+        if requested_query_batch_size is not None:
+            if requested_query_batch_size < 1:
+                raise ValueError("cuvs_streaming_query_batch_size must be positive.")
+            return min(query_count, int(requested_query_batch_size))
+
+        cupy = import_cupy()
+        with cupy.cuda.Device(cuda_device_index(device)):
+            free_bytes, _total_bytes = cupy.cuda.runtime.memGetInfo()
+        # Query vectors and cuVS result buffers both scale with the query batch.
+        # The cap also bounds the Python candidate map retained for one chunk.
+        bytes_per_query = max(
+            1,
+            int(manifest.dimension) * 4 + int(candidate_count) * 16,
+        )
+        auto_batch_size = int(int(free_bytes) * 0.05) // bytes_per_query
+        return min(query_count, max(1, min(1_000, auto_batch_size)))
+
+    def find_nearest_neighbors_for_queries_cuvs_streaming(
+        self,
+        query_ids: Sequence[str],
+        query_vectors: Sequence[Any],
+        *,
+        embedding_type_id: int,
+        layer_index: int,
+        k: int,
+        metric: DistanceMetric,
+        include_query: bool,
+        device: str | None,
+        block_size: int | None,
+        query_batch_size: int | None,
+        profile_cuvs_streaming: bool = False,
+        excluded_protein_ids_by_query: Mapping[str, Set[str]] | None = None,
+    ) -> tuple[Dict[str, List[Neighbor]], int, int, dict[str, int | float] | None]:
+        """Search a portable exact store through bounded-memory cuVS blocks."""
+        exact_store = self._load_persistent_exact_store(
+            embedding_type_id=embedding_type_id,
+            layer_index=layer_index,
+            require_database_revision=False,
+        )
+        manager = self._client._index_manager
+        if exact_store is None or manager is None:
+            raise BioDataError(
+                "cuvs_streaming requires a configured current portable exact store. "
+                "Build the exact store with IndexManager before searching.",
+            )
+        resolved_device = str(device or "").strip()
+        if not resolved_device:
+            raise BioDataError("cuvs_streaming selected without a usable CUDA device.")
+        effective_block_size = self._resolve_cuvs_streaming_block_size(
+            exact_store,
+            device=resolved_device,
+            requested_block_size=block_size,
+        )
+        effective_query_batch_size = self._resolve_cuvs_streaming_query_batch_size(
+            exact_store,
+            device=resolved_device,
+            requested_query_batch_size=query_batch_size,
+            query_count=len(query_ids),
+            candidate_count=max(k + 64, k * 4),
+        )
+        per_query_excluded = self._per_query_exclusions(
+            query_ids,
+            include_query=include_query,
+            excluded_protein_ids_by_query=excluded_protein_ids_by_query,
+        )
+        read_profile = ExactStoreReadProfile() if profile_cuvs_streaming else None
+        search_profile = CuvsStreamingProfile() if profile_cuvs_streaming else None
+        grouped = search_cuvs_streaming_exact(
+            batch_source=lambda: manager.iter_exact_store_batches(
+                exact_store,
+                batch_size=effective_block_size,
+                vector_dtype="float16",
+                profile=read_profile,
+            )
+            if read_profile is not None
+            else manager.iter_exact_store_batches(
+                exact_store,
+                batch_size=effective_block_size,
+                vector_dtype="float16",
+            ),
+            query_ids=query_ids,
+            query_vectors=query_vectors,
+            k=k,
+            metric=metric,
+            device=resolved_device,
+            layer_index=layer_index,
+            per_query_excluded=per_query_excluded,
+            query_batch_size=effective_query_batch_size,
+            profile=search_profile,
+        )
+        diagnostics = None
+        if read_profile is not None and search_profile is not None:
+            diagnostics = {**read_profile.diagnostics(), **search_profile.diagnostics()}
+        return grouped, effective_block_size, effective_query_batch_size, diagnostics
+
     def find_nearest_neighbors_for_queries_torch(
         self,
         query_ids: Sequence[str],
@@ -1666,7 +1966,7 @@ class SearchService:
     ) -> ResolvedBackend:
         """Resolve the effective search backend for a workload."""
         requested = str(requested_backend).strip().lower()
-        if requested not in {"auto", "gpu", "pgvector", "faiss_cpu", "faiss_gpu", "faiss_persistent", "cuvs_gpu", "torch_gpu"}:
+        if requested not in {"auto", "gpu", "pgvector", "faiss_cpu", "faiss_gpu", "faiss_persistent", "cuvs_gpu", "cuvs_streaming", "torch_gpu"}:
             raise BioDataError(f"Unsupported search backend: {requested_backend!r}")
 
         if requested == "faiss_persistent":
@@ -1740,6 +2040,12 @@ class SearchService:
             if not availability.cuvs_gpu or availability.cuvs_device is None:
                 raise BioDataError("Requested backend 'cuvs_gpu' is not available on this host.")
             return ResolvedBackend("cuvs_gpu", availability.cuvs_device, ann_requested, ann_requested, False, "explicit_cuvs_gpu", batch_size, resident_cuvs, availability.hardware_class)
+        if requested == "cuvs_streaming":
+            if ann_requested:
+                raise BioDataError("cuvs_streaming supports exact search only; pass use_ann=False.")
+            if not availability.cuvs_gpu or availability.cuvs_device is None:
+                raise BioDataError("Requested backend 'cuvs_streaming' is not available on this host.")
+            return ResolvedBackend("cuvs_streaming", availability.cuvs_device, False, False, False, "explicit_cuvs_streaming", batch_size, False, availability.hardware_class)
         if requested == "torch_gpu":
             if not availability.torch_gpu or availability.torch_device is None:
                 raise BioDataError("Requested backend 'torch_gpu' is not available on this host.")
@@ -1861,6 +2167,7 @@ class SearchService:
         exact_store = self._load_persistent_exact_store(
             embedding_type_id=embedding_type_id,
             layer_index=layer_index,
+            require_database_revision=False,
         )
         if exact_store is not None and not ann_requested and backend == "faiss_cpu":
             return build_faiss_streaming_search_state(
@@ -1933,11 +2240,45 @@ class SearchService:
             layer_index=layer_index,
         )
 
+    def _local_exact_store_query_context(
+        self,
+        protein_ids: Sequence[str],
+        *,
+        embedding_type_id: int,
+        layer_index: int,
+    ) -> tuple[dict[str, Any], dict[str, set[str]], dict[str, set[int]]] | None:
+        """Return local query vectors and exclusions from a portable exact store."""
+        exact_store = self._load_persistent_exact_store(
+            embedding_type_id=embedding_type_id,
+            layer_index=layer_index,
+            require_database_revision=False,
+        )
+        manager = self._client._index_manager
+        get_context = getattr(manager, "get_exact_store_query_context", None)
+        if exact_store is None or not callable(get_context) or exact_store.manifest is None:
+            return None
+        cache_key = (
+            str(exact_store.artifact.vectors_path.resolve()),
+            str(exact_store.manifest.created_at),
+            tuple(str(protein_id) for protein_id in protein_ids),
+        )
+        if self._portable_query_context_cache is not None:
+            cached_key, cached_context = self._portable_query_context_cache
+            if cached_key == cache_key:
+                return cached_context
+        context = cast(
+            tuple[dict[str, Any], dict[str, set[str]], dict[str, set[int]]],
+            get_context(exact_store, protein_ids),
+        )
+        self._portable_query_context_cache = (cache_key, context)
+        return context
+
     def _load_persistent_exact_store(
         self,
         *,
         embedding_type_id: int,
         layer_index: int,
+        require_database_revision: bool = True,
     ) -> Any | None:
         """Return a current exact store when one is configured for this collection."""
         manager = self._client._index_manager
@@ -1946,7 +2287,7 @@ class SearchService:
         if manager is None or database_label is None or not callable(load_exact_store):
             return None
         source_revision = None
-        if self._client.is_connected:
+        if require_database_revision and self._client.is_connected:
             source_revision = self._client.embedding_index_revision(embedding_type_id, layer_index)
         try:
             return load_exact_store(
@@ -2060,6 +2401,9 @@ class SearchService:
         metric: DistanceMetric,
         k: int,
         query_count: int,
+        cuvs_streaming_block_size: int | None = None,
+        cuvs_streaming_query_batch_size: int | None = None,
+        cuvs_streaming_profile: Mapping[str, int | float] | None = None,
     ) -> None:
         """Record diagnostics for a completed search."""
         self._client._warn_if_search_backend_degraded(
@@ -2069,7 +2413,7 @@ class SearchService:
             layer_index=layer_index,
             metric=metric,
         )
-        self._client._last_search_diagnostics = {
+        diagnostics: Dict[str, Any] = {
             "requested_backend": requested_backend,
             "resolved_backend": resolved.backend,
             "device": resolved.device,
@@ -2089,6 +2433,13 @@ class SearchService:
             "estimated_bytes": None if resolved.estimated_bytes is None else int(resolved.estimated_bytes),
             "free_bytes": None if resolved.free_bytes is None else int(resolved.free_bytes),
         }
+        if cuvs_streaming_block_size is not None:
+            diagnostics["cuvs_streaming_block_size"] = int(cuvs_streaming_block_size)
+        if cuvs_streaming_query_batch_size is not None:
+            diagnostics["cuvs_streaming_query_batch_size"] = int(cuvs_streaming_query_batch_size)
+        if cuvs_streaming_profile is not None:
+            diagnostics["cuvs_streaming_profile"] = dict(cuvs_streaming_profile)
+        self._client._last_search_diagnostics = diagnostics
 
     def warn_if_search_backend_degraded(
         self,

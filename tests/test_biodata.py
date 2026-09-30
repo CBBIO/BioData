@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, cast
 
 import pytest
 
-from CBBIO import IndexKey
+from CBBIO import IndexKey, Neighbor
 import CBBIO.BioData as bd
 from CBBIO.search import engines as search_engines
 from CBBIO.search import service as search_service
@@ -426,6 +426,160 @@ def test_faiss_persistent_search_retrieves_local_candidates_and_reranks_once() -
     rerank_sql, rerank_params = conn.executed[1]
     assert "unnest(q.candidate_sequence_ids)" in rerank_sql
     assert rerank_params == ("query", [0.1, 0.2], [11, 12], ["P1"], 3, 0, 1)
+
+
+def test_clear_search_cache_releases_only_in_process_search_state() -> None:
+    client, _ = _client_with_fake_conn([])
+    client._search_state_cache["faiss_cpu"] = cast(Any, object())
+    client._persistent_index_cache[(object(), "revision")] = object()
+
+    client.clear_search_cache()
+
+    assert client._search_state_cache == {}
+    assert client._persistent_index_cache == {}
+
+
+def test_search_diagnostics_include_effective_cuvs_streaming_block_size() -> None:
+    client, _ = _client_with_fake_conn([])
+    resolved = bd.ResolvedBackend(
+        backend="cuvs_streaming",
+        device="cuda:0",
+        ann_requested=False,
+        ann_used=False,
+        degraded=False,
+        reason="explicit_cuvs_streaming",
+        batch_size=2,
+        resident=False,
+        hardware_class="cuda",
+    )
+
+    client._record_search_diagnostics(
+        resolved,
+        requested_backend="cuvs_streaming",
+        embedding_type_id=3,
+        layer_index=0,
+        metric="cosine",
+        k=100,
+        query_count=2,
+        cuvs_streaming_block_size=250_000,
+        cuvs_streaming_profile={"search_seconds": 1.25, "block_count": 3},
+    )
+
+    assert client.last_search_diagnostics["cuvs_streaming_block_size"] == 250_000
+    assert client.last_search_diagnostics["cuvs_streaming_profile"] == {"search_seconds": 1.25, "block_count": 3}
+
+
+def test_cuvs_streaming_stored_queries_fetch_embeddings_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _ = _client_with_fake_conn([])
+    resolved = bd.ResolvedBackend(
+        backend="cuvs_streaming",
+        device="cuda:0",
+        ann_requested=False,
+        ann_used=False,
+        degraded=False,
+        reason="explicit_cuvs_streaming",
+        batch_size=1,
+        resident=False,
+        hardware_class="cuda",
+    )
+    monkeypatch.setattr(client, "_resolve_search_backend", lambda **_: resolved)
+    monkeypatch.setattr(client._search, "_apply_auto_gpu_heuristics", lambda value, **_: value)
+    monkeypatch.setattr(client, "_stored_query_exclusions", lambda _: ({"Q1": {"Q1"}}, {"Q1": {1}}))
+
+    fetch_count = 0
+    query_embeddings = {"Q1": [0.1, 0.2]}
+
+    def _get_protein_embeddings(*_: Any, **__: Any) -> Dict[str, List[float]]:
+        nonlocal fetch_count
+        fetch_count += 1
+        return query_embeddings
+
+    monkeypatch.setattr(client, "get_protein_embeddings", _get_protein_embeddings)
+
+    def _streaming_search(*_: Any, **__: Any) -> Tuple[Dict[str, List[Neighbor]], int, int, Dict[str, float]]:
+        return {"Q1": [Neighbor("P2", 0, 0.1)]}, 2_500_000, 1, {"search_seconds": 0.1}
+
+    monkeypatch.setattr(client._search, "find_nearest_neighbors_for_queries_cuvs_streaming", _streaming_search)
+    canonicalization_queries: Dict[str, List[float]] = {}
+
+    def _canonicalize(
+        grouped: Dict[str, List[Neighbor]],
+        query_map: Dict[str, List[float]],
+        **_: Any,
+    ) -> Dict[str, List[Neighbor]]:
+        canonicalization_queries.update(query_map)
+        return grouped
+
+    monkeypatch.setattr(client._search, "_canonicalize_exact_neighbor_groups", _canonicalize)
+
+    grouped = client.find_nearest_neighbors_for_proteins(
+        ["Q1"],
+        embedding_type_id=3,
+        k=1,
+        backend="cuvs_streaming",
+        profile_cuvs_streaming=True,
+    )
+
+    assert grouped["Q1"] == [Neighbor("P2", 0, 0.1)]
+    assert fetch_count == 1
+    assert canonicalization_queries == query_embeddings
+    profile = client.last_search_diagnostics["cuvs_streaming_profile"]
+    assert profile["query_embedding_local_read_seconds"] >= 0.0
+
+
+def test_cuvs_streaming_stored_queries_use_a_portable_exact_store_without_database_reads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, _ = _client_with_fake_conn([])
+    resolved = bd.ResolvedBackend(
+        backend="cuvs_streaming",
+        device="cuda:0",
+        ann_requested=False,
+        ann_used=False,
+        degraded=False,
+        reason="explicit_cuvs_streaming",
+        batch_size=1,
+        resident=False,
+        hardware_class="cuda",
+    )
+    monkeypatch.setattr(client, "_resolve_search_backend", lambda **_: resolved)
+    monkeypatch.setattr(client._search, "_apply_auto_gpu_heuristics", lambda value, **_: value)
+    local_context = ({"Q1": [0.1, 0.2]}, {"Q1": {"Q1"}}, {"Q1": {1}})
+    monkeypatch.setattr(client._search, "_local_exact_store_query_context", lambda *_, **__: local_context)
+
+    def _database_read(*_: Any, **__: Any) -> None:
+        raise AssertionError("cuvs_streaming should not read query data from PostgreSQL")
+
+    monkeypatch.setattr(client, "get_protein_embeddings", _database_read)
+    monkeypatch.setattr(client, "_stored_query_exclusions", _database_read)
+
+    captured_vectors: list[list[float]] = []
+
+    def _streaming_search(
+        _query_ids: list[str],
+        query_vectors: list[list[float]],
+        **_: Any,
+    ) -> Tuple[Dict[str, List[Neighbor]], int, int, Dict[str, float]]:
+        captured_vectors.extend(query_vectors)
+        return {"Q1": [Neighbor("P2", 0, 0.1)]}, 2_500_000, 1, {"search_seconds": 0.1}
+
+    monkeypatch.setattr(client._search, "find_nearest_neighbors_for_queries_cuvs_streaming", _streaming_search)
+    monkeypatch.setattr(
+        client._search,
+        "_canonicalize_exact_neighbor_groups",
+        lambda grouped, *_args, **_kwargs: grouped,
+    )
+
+    grouped = client.find_nearest_neighbors_for_proteins(
+        ["Q1"],
+        embedding_type_id=3,
+        k=1,
+        backend="cuvs_streaming",
+        profile_cuvs_streaming=True,
+    )
+
+    assert grouped["Q1"] == [Neighbor("P2", 0, 0.1)]
+    assert captured_vectors == [[0.1, 0.2]]
 
 
 def test_faiss_persistent_search_requires_a_configured_manager() -> None:
@@ -2025,6 +2179,317 @@ def test_search_cuvs_state_preserves_cosine_distances(monkeypatch: pytest.Monkey
     assert fake_cupy.device_indices == [3]
 
 
+def test_streaming_candidate_pool_retains_exact_distance_ties() -> None:
+    retained = search_engines._retain_streaming_candidates(
+        {"C": 0.100003, "A": 0.100001, "B": 0.100003, "D": 0.100011},
+        candidate_count=2,
+    )
+
+    assert list(retained) == ["A", "B", "C"]
+    assert search_engines._streaming_boundary_has_tie(
+        list(retained.items()),
+        candidate_count=2,
+    )
+
+
+def test_search_cuvs_streaming_exact_merges_blocks_without_resident_matrix(monkeypatch: pytest.MonkeyPatch) -> None:
+    np = pytest.importorskip("numpy")
+
+    class _FakeDevice:
+        def __init__(self, device_indices: List[int], index: int) -> None:
+            self._device_indices = device_indices
+            self._index = index
+
+        def __enter__(self) -> "_FakeDevice":
+            self._device_indices.append(self._index)
+            return self
+
+        def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+            return None
+
+    class _FakeCuda:
+        def __init__(self, device_indices: List[int]) -> None:
+            self._device_indices = device_indices
+
+        def Device(self, index: int) -> _FakeDevice:
+            return _FakeDevice(self._device_indices, index)
+
+    class _FakeCupy:
+        float32 = np.float32
+
+        def __init__(self) -> None:
+            self.device_indices: List[int] = []
+            self.cuda = _FakeCuda(self.device_indices)
+
+        def asarray(self, values: Any, dtype: Any = None) -> Any:
+            return np.asarray(values, dtype=dtype)
+
+        def asnumpy(self, values: Any) -> Any:
+            return np.asarray(values)
+
+    def _build(dataset: Any, *, metric: str) -> Any:
+        assert metric == "cosine"
+        return dataset
+
+    def _search(index: Any, query_matrix: Any, requested: int) -> tuple[Any, Any]:
+        distances = 1.0 - np.matmul(query_matrix, index.transpose())
+        indices = np.argsort(distances, axis=1)[:, :requested]
+        return np.take_along_axis(distances, indices, axis=1), indices
+
+    fake_cupy = _FakeCupy()
+    brute_force_module = types.SimpleNamespace(build=_build, search=_search)
+    neighbors_module = types.ModuleType("cuvs.neighbors")
+    setattr(neighbors_module, "brute_force", brute_force_module)
+    cuvs_module = types.ModuleType("cuvs")
+    setattr(cuvs_module, "neighbors", neighbors_module)
+    monkeypatch.setattr(search_engines, "import_cupy", lambda: fake_cupy)
+    monkeypatch.setattr(search_engines, "import_cuvs", lambda: cuvs_module)
+    monkeypatch.setitem(sys.modules, "cuvs", cuvs_module)
+    monkeypatch.setitem(sys.modules, "cuvs.neighbors", neighbors_module)
+
+    batches = [
+        (["A", "B", "C"], np.asarray([[1.0, 0.0], [0.0, 1.0], [0.6, 0.4]], dtype=np.float32)),
+        (["D", "E"], np.asarray([[0.8, 0.2], [0.7, 0.3]], dtype=np.float32)),
+    ]
+    profile = search_engines.CuvsStreamingProfile()
+    grouped = search_engines.search_cuvs_streaming_exact(
+        batch_source=lambda: iter(batches),
+        query_ids=["Q1"],
+        query_vectors=[[1.0, 0.0]],
+        k=3,
+        metric="cosine",
+        device="cuda:2",
+        layer_index=0,
+        per_query_excluded={"Q1": set()},
+        profile=profile,
+    )
+
+    assert [neighbor.protein_id for neighbor in grouped["Q1"]] == ["A", "D", "E"]
+    assert profile.block_count == 2
+    assert profile.scanned_vector_count == 5
+    assert profile.cuvs_search_call_count == 2
+    assert profile.tie_expansion_count == 0
+    assert grouped["Q1"][0].distance == pytest.approx(0.0)
+    assert fake_cupy.device_indices == [2]
+
+
+def test_search_cuvs_streaming_exact_batches_query_vectors(monkeypatch: pytest.MonkeyPatch) -> None:
+    np = pytest.importorskip("numpy")
+
+    class _FakeDevice:
+        def __enter__(self) -> "_FakeDevice":
+            return self
+
+        def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+            return None
+
+    class _FakeCuda:
+        def Device(self, index: int) -> _FakeDevice:
+            assert index == 0
+            return _FakeDevice()
+
+    class _FakeCupy:
+        float32 = np.float32
+        cuda = _FakeCuda()
+
+        def asarray(self, values: Any, dtype: Any = None) -> Any:
+            return np.asarray(values, dtype=dtype)
+
+        def asnumpy(self, values: Any) -> Any:
+            return np.asarray(values)
+
+    query_batch_sizes: List[int] = []
+
+    def _build(dataset: Any, *, metric: str) -> Any:
+        assert metric == "sqeuclidean"
+        return dataset
+
+    def _search(index: Any, query_matrix: Any, requested: int) -> tuple[Any, Any]:
+        query_batch_sizes.append(int(query_matrix.shape[0]))
+        distances = (query_matrix - index.transpose()) ** 2
+        indices = np.argsort(distances, axis=1)[:, :requested]
+        return np.take_along_axis(distances, indices, axis=1), indices
+
+    fake_cupy = _FakeCupy()
+    brute_force_module = types.SimpleNamespace(build=_build, search=_search)
+    neighbors_module = types.ModuleType("cuvs.neighbors")
+    setattr(neighbors_module, "brute_force", brute_force_module)
+    cuvs_module = types.ModuleType("cuvs")
+    setattr(cuvs_module, "neighbors", neighbors_module)
+    monkeypatch.setattr(search_engines, "import_cupy", lambda: fake_cupy)
+    monkeypatch.setattr(search_engines, "import_cuvs", lambda: cuvs_module)
+    monkeypatch.setitem(sys.modules, "cuvs", cuvs_module)
+    monkeypatch.setitem(sys.modules, "cuvs.neighbors", neighbors_module)
+
+    profile = search_engines.CuvsStreamingProfile()
+    grouped = search_engines.search_cuvs_streaming_exact(
+        batch_source=lambda: iter([(
+            [f"P{index:03d}" for index in range(70)],
+            np.arange(70, dtype=np.float32).reshape(-1, 1),
+        )]),
+        query_ids=["Q1", "Q2", "Q3"],
+        query_vectors=[[0.1], [30.1], [60.1]],
+        k=1,
+        metric="l2",
+        device="cuda:0",
+        layer_index=0,
+        per_query_excluded={"Q1": set(), "Q2": set(), "Q3": set()},
+        query_batch_size=2,
+        profile=profile,
+    )
+
+    assert [grouped[query_id][0].protein_id for query_id in ("Q1", "Q2", "Q3")] == [
+        "P000",
+        "P030",
+        "P060",
+    ]
+    assert query_batch_sizes == [2, 1]
+    assert profile.query_batch_count == 2
+    assert profile.max_query_batch_size == 2
+    assert profile.cuvs_search_call_count == 2
+
+
+def test_search_cuvs_streaming_exact_expands_blocks_at_canonical_distance_ties(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    np = pytest.importorskip("numpy")
+
+    class _FakeDevice:
+        def __enter__(self) -> "_FakeDevice":
+            return self
+
+        def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+            return None
+
+    class _FakeCuda:
+        def Device(self, index: int) -> _FakeDevice:
+            assert index == 0
+            return _FakeDevice()
+
+    class _FakeCupy:
+        float32 = np.float32
+        cuda = _FakeCuda()
+
+        def asarray(self, values: Any, dtype: Any = None) -> Any:
+            return np.asarray(values, dtype=dtype)
+
+        def asnumpy(self, values: Any) -> Any:
+            return np.asarray(values)
+
+    requested_counts: List[int] = []
+
+    def _build(dataset: Any, *, metric: str) -> Any:
+        assert metric == "cosine"
+        return dataset
+
+    def _search(index: Any, query_matrix: Any, requested: int) -> tuple[Any, Any]:
+        requested_counts.append(requested)
+        distances = 1.0 - np.matmul(query_matrix, index.transpose())
+        indices = np.argsort(distances, axis=1)[:, :requested]
+        return np.take_along_axis(distances, indices, axis=1), indices
+
+    fake_cupy = _FakeCupy()
+    brute_force_module = types.SimpleNamespace(build=_build, search=_search)
+    neighbors_module = types.ModuleType("cuvs.neighbors")
+    setattr(neighbors_module, "brute_force", brute_force_module)
+    cuvs_module = types.ModuleType("cuvs")
+    setattr(cuvs_module, "neighbors", neighbors_module)
+    monkeypatch.setattr(search_engines, "import_cupy", lambda: fake_cupy)
+    monkeypatch.setattr(search_engines, "import_cuvs", lambda: cuvs_module)
+    monkeypatch.setitem(sys.modules, "cuvs", cuvs_module)
+    monkeypatch.setitem(sys.modules, "cuvs.neighbors", neighbors_module)
+
+    protein_ids = [f"P{row_index:03d}" for row_index in range(69)]
+    grouped = search_engines.search_cuvs_streaming_exact(
+        batch_source=lambda: iter([(protein_ids, np.tile([[1.0, 0.0]], (69, 1)))]),
+        query_ids=["Q1"],
+        query_vectors=[[1.0, 0.0]],
+        k=3,
+        metric="cosine",
+        device="cuda:0",
+        layer_index=0,
+        per_query_excluded={"Q1": set()},
+    )
+
+    assert requested_counts == [68, 69]
+    assert [neighbor.protein_id for neighbor in grouped["Q1"]] == ["P000", "P001", "P002"]
+
+
+
+def test_search_cuvs_streaming_retries_only_queries_with_boundary_ties(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    np = pytest.importorskip("numpy")
+
+    class _FakeDevice:
+        def __enter__(self) -> "_FakeDevice":
+            return self
+
+        def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+            return None
+
+    class _FakeCuda:
+        def Device(self, index: int) -> _FakeDevice:
+            assert index == 0
+            return _FakeDevice()
+
+    class _FakeCupy:
+        float32 = np.float32
+        cuda = _FakeCuda()
+
+        def asarray(self, values: Any, dtype: Any = None) -> Any:
+            return np.asarray(values, dtype=dtype)
+
+        def asnumpy(self, values: Any) -> Any:
+            return np.asarray(values)
+
+    query_batch_sizes: List[int] = []
+
+    def _build(dataset: Any, *, metric: str) -> Any:
+        assert metric == "cosine"
+        return dataset
+
+    def _search(index: Any, query_matrix: Any, requested: int) -> tuple[Any, Any]:
+        query_batch_sizes.append(int(query_matrix.shape[0]))
+        distances = 1.0 - np.matmul(query_matrix, index.transpose())
+        indices = np.argsort(distances, axis=1)[:, :requested]
+        return np.take_along_axis(distances, indices, axis=1), indices
+
+    fake_cupy = _FakeCupy()
+    brute_force_module = types.SimpleNamespace(build=_build, search=_search)
+    neighbors_module = types.ModuleType("cuvs.neighbors")
+    setattr(neighbors_module, "brute_force", brute_force_module)
+    cuvs_module = types.ModuleType("cuvs")
+    setattr(cuvs_module, "neighbors", neighbors_module)
+    monkeypatch.setattr(search_engines, "import_cupy", lambda: fake_cupy)
+    monkeypatch.setattr(search_engines, "import_cuvs", lambda: cuvs_module)
+    monkeypatch.setitem(sys.modules, "cuvs", cuvs_module)
+    monkeypatch.setitem(sys.modules, "cuvs.neighbors", neighbors_module)
+    tie_results = iter([True, False, False])
+    monkeypatch.setattr(
+        search_engines,
+        "_streaming_boundary_has_tie",
+        lambda candidates, *, candidate_count: next(tie_results),
+    )
+
+    profile = search_engines.CuvsStreamingProfile()
+    grouped = search_engines.search_cuvs_streaming_exact(
+        batch_source=lambda: iter([([f"P{index:03d}" for index in range(69)], np.tile([[1.0, 0.0]], (69, 1)))]),
+        query_ids=["Q1", "Q2"],
+        query_vectors=[[1.0, 0.0], [1.0, 0.0]],
+        k=3,
+        metric="cosine",
+        device="cuda:0",
+        layer_index=0,
+        per_query_excluded={"Q1": set(), "Q2": set()},
+        profile=profile,
+    )
+
+    assert sorted(grouped) == ["Q1", "Q2"]
+    assert query_batch_sizes == [2, 1]
+    assert profile.cuvs_search_call_count == 2
+    assert profile.tie_expansion_count == 1
+
 def test_build_cuvs_states_use_the_requested_cuda_device(monkeypatch: pytest.MonkeyPatch) -> None:
     np = pytest.importorskip("numpy")
 
@@ -2225,6 +2690,15 @@ def test_as_numpy_matrix_prefers_vector_numpy_representation() -> None:
 
     assert matrix.dtype == np.float32
     assert matrix.tolist() == [[1.0, 2.0], [3.0, 4.0]]
+
+
+def test_as_numpy_matrix_reuses_float32_numpy_matrix_without_row_conversion() -> None:
+    np = pytest.importorskip("numpy")
+
+    values = np.asarray([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
+    matrix = search_utils.as_numpy_matrix(values)
+
+    assert matrix is values
 
 
 def test_build_torch_streaming_search_state_loads_exact_store_batches_without_gpu() -> None:

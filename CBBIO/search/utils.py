@@ -45,7 +45,13 @@ def _as_numpy_matrix(values: Any) -> Any:
     except ModuleNotFoundError as exc:
         raise DriverDependencyError("NumPy is required for GPU search backends. Install with: pip install numpy") from exc
 
-    matrix = np.asarray([_coerce_vector_row(value) for value in values], dtype=np.float32)
+    # Exact-store batches already arrive as float32 NumPy matrices. Converting
+    # each row through ``tolist()`` would transiently allocate one Python float per
+    # element, which defeats bounded-memory streaming for large blocks.
+    if isinstance(values, np.ndarray):
+        matrix = np.asarray(values, dtype=np.float32)
+    else:
+        matrix = np.asarray([_coerce_vector_row(value) for value in values], dtype=np.float32)
     if matrix.ndim == 1:
         matrix = matrix.reshape(1, -1)
     if matrix.ndim != 2 or matrix.shape[1] < 1:
