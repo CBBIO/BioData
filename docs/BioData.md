@@ -332,8 +332,8 @@ client.configure_persistent_index(manager, database_label="biodata")
 ```
 
 An exact store is a portable `float16` matrix plus local protein-ID metadata. It is independent
-of the distance metric and is the common local source for exact `faiss_cpu`, exact `cuvs_gpu`,
-exact `torch_gpu`, and `build_ivf_pq()`. `build_ivf_pq()` reuses a current store or
+of the distance metric. It is the common local source for exact `faiss_cpu`, exact `cuvs_gpu`,
+bounded-VRAM exact `cuvs_streaming`, exact `torch_gpu`, and `build_ivf_pq()`. `build_ivf_pq()` reuses a current store or
 materializes it from its callback only when absent. Exact backends automatically use a current
 configured store instead of reading the full matrix from PostgreSQL.
 The store allows external-embedding searches without a database connection after it has been
@@ -379,7 +379,8 @@ neighbors = client.find_nearest_neighbors_for_embeddings(
 Do not call `client.connect()`. The first search fills the selected backend state from local
 files. Later searches reuse the resident state.
 
-FAISS materializes an exact `IndexFlat` in RAM. cuVS and PyTorch stream the store into VRAM.
+FAISS materializes an exact `IndexFlat` in RAM. `cuvs_gpu` and `torch_gpu` materialize the
+complete store in VRAM. `cuvs_streaming` keeps only one block in VRAM.
 Exact searches over-fetch a small boundary margin, then compute their final distances in `float64`
 from the shared `float16` store and sort by `(distance, protein_id)`. This makes FAISS, cuVS,
 Torch, and pgvector return the same ranking and reported distances when they have the same
@@ -389,6 +390,52 @@ still bounds its reranked result.
 Its manifest records the time spent reading batches from the source, writing the `float16` matrix,
 and writing the SQLite metadata. This lets a notebook report the initial transfer separately from
 later local FAISS/cuVS materialization.
+
+### Search with bounded GPU memory
+
+```python
+import numpy as np
+
+from CBBIO import BioDataClient, IndexManager
+
+manager = IndexManager("/scratch/biodata/.biodata/indexes")
+client = BioDataClient(index_manager=manager, index_database_label="biodata-nas")
+
+neighbors = client.find_nearest_neighbors_for_embeddings(
+    {"cluster-query": np.zeros(1024, dtype=np.float32)},
+    embedding_type_id=3,
+    layer_index=0,
+    k=100,
+    metric="cosine",
+    backend="cuvs_streaming",
+    device="cuda:0",
+    cuvs_streaming_block_size=None,
+    cuvs_streaming_query_batch_size=None,
+    profile_cuvs_streaming=True,
+)
+
+profile = client.last_search_diagnostics["cuvs_streaming_profile"]
+print(profile["search_seconds"], profile["tie_expansion_count"])
+```
+
+`"cuvs_streaming"` scans the portable exact store block by block. It is exact and does not
+require a database connection. Set `cuvs_streaming_block_size` to a fixed number of vectors when
+you know the GPU limit. Pass `None` to size the block conservatively from currently free VRAM.
+Set `cuvs_streaming_query_batch_size` to bound GPU and candidate-host memory for a large query
+batch; `None` derives a conservative value from free VRAM, capped at 1,000 queries. Query chunks
+are exact, but each chunk rescans the store so use the largest safe value for throughput. The
+backend retains extra candidates at distance ties before applying the canonical
+`(distance, protein_id)` ordering and retries only queries whose boundary ties. It does not support `use_ann=True` and does not retain
+the full matrix in VRAM, so each call scans the store and is slower than warm `cuvs_gpu`.
+
+Pass `profile_cuvs_streaming=True` only when investigating performance. The profile records
+SQLite open/query/fetch time, float16 memmap reads, GPU float32 conversion and normalization,
+host-to-device upload, cuVS index build/search, device-to-host results, candidate processing,
+canonicalization, and the end-to-end local request. For stored-protein queries it also records
+the local exact-store read of their query embeddings and exclusions. It reports the number of
+blocks, cuVS search calls, and tie-driven expansions. Profiling synchronizes GPU stages to
+attribute their time
+correctly, so use an unprofiled run for the headline latency benchmark.
 
 ### Batch query for external embeddings
 
@@ -456,7 +503,8 @@ the usual automatic choice; it is never built during a query.
 | `"faiss_cpu"` | FAISS on CPU |
 | `"faiss_gpu"` | FAISS on GPU (requires faiss-gpu) |
 | `"faiss_persistent"` | Prebuilt local IVF-PQ plus exact pgvector reranking |
-| `"cuvs_gpu"` | cuVS on NVIDIA GPU (requires cuVS) |
+| `"cuvs_gpu"` | cuVS with the complete corpus resident in NVIDIA VRAM |
+| `"cuvs_streaming"` | Exact cuVS blocks from a portable exact store; bounded VRAM, no ANN |
 | `"torch_gpu"` | Pure PyTorch GPU search |
 
 Loaded in-memory states are cached separately for the CPU and for each GPU device. Therefore a
@@ -498,6 +546,10 @@ After every search, diagnostics are available on the client:
 neighbors = client.find_nearest_neighbors(query_emb, 1, 33, k=20)
 print(client.last_search_diagnostics)
 # {"backend": "faiss_gpu", "ann_used": False, "device": "cuda:0", ...}
+
+streaming_block_size = client.last_search_diagnostics.get("cuvs_streaming_block_size")
+if streaming_block_size is not None:
+    print(f"cuVS streaming block: {streaming_block_size:,} vectors")
 ```
 
 ---
